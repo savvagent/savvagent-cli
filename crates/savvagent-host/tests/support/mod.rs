@@ -1,4 +1,5 @@
-//! Test support for `cross_vendor_history.rs`.
+//! Test support for `cross_vendor_history.rs` and
+//! `cross_provider_history.rs`.
 //!
 //! Builds synthetic SPP histories whose `tool_use_id`s carry a foreign
 //! provider prefix (e.g. `"anthropic:toolu_xyz"`), and spins per-vendor
@@ -7,6 +8,14 @@
 //!
 //! The pattern mirrors `crates/provider-anthropic/tests/integration.rs`
 //! and its siblings.
+//!
+//! `dead_code` is suppressed here because each integration-test binary
+//! that includes this module via `mod support;` consumes only a subset of
+//! the helpers — `cross_vendor_history` exercises every vendor, while
+//! `cross_provider_history` only touches the Anthropic-side helpers.
+//! Without the allow, the latter binary would fail under workspace
+//! `-D warnings`.
+#![allow(dead_code)]
 
 use std::sync::{Arc, Mutex};
 
