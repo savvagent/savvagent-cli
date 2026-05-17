@@ -1442,8 +1442,14 @@ impl Host {
         Ok(())
     }
 
-    /// Switch the active provider. Clears conversation history first so the
-    /// new provider starts on a clean session.
+    /// Switch the active provider. The active provider is the default the
+    /// router falls through to when no `@`-prefix override applies.
+    ///
+    /// Phase 3+: conversation history is **preserved** across this switch.
+    /// The next turn's `tool_use_id`s will be prefixed with the new active
+    /// provider's id; older history blocks keep their original prefixes,
+    /// which the receiving provider's translator accepts as opaque strings
+    /// (Phase 2 cross-vendor gate).
     ///
     /// Returns [`PoolError::NotRegistered`] if `id` is not in the pool.
     pub async fn set_active_provider(&self, id: &ProviderId) -> Result<(), PoolError> {
@@ -1454,9 +1460,6 @@ impl Host {
                 return Err(PoolError::NotRegistered(id.clone()));
             }
         }
-        // Order matters: clear history first (so the new provider sees a
-        // clean session), then swap active.
-        self.clear_history().await;
         *self.active_provider.write().await = id.clone();
         Ok(())
     }

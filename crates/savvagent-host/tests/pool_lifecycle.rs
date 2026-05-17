@@ -683,17 +683,17 @@ async fn force_disconnect_emits_aborted_after_grace_on_wire() {
     }
 }
 
-/// Verifies that `set_active_provider` clears the conversation history before
-/// swapping the active id. A regression that removed `clear_history()` (or
-/// swapped the order so the clear happened after the swap) would allow the new
-/// provider to inherit stale messages from a previous conversation, violating
-/// the "one active provider per conversation" invariant.
+/// Verifies that `set_active_provider` **preserves** the conversation
+/// history when swapping the active id. Phase 3 makes cross-provider
+/// history safe (the Phase 2 gate proved every receiver accepts
+/// foreign-prefixed `tool_use_id`s); clearing on `/use` would defeat the
+/// new capability.
 ///
-/// The observable side-effect used here is `Host::messages().len()`: after a
-/// completed turn, the history is non-empty; after `set_active_provider`, it
-/// must be zero.
+/// Set-up: a host with two providers in the pool. Drop a synthetic
+/// assistant message into history (simulating a completed turn), call
+/// `set_active_provider(gemini)`, and assert the message is still there.
 #[tokio::test]
-async fn set_active_provider_clears_history_before_swap() {
+async fn set_active_provider_preserves_history() {
     let mut cfg = HostConfig::new(
         ProviderEndpoint::StreamableHttp {
             url: "http://unused".into(),
@@ -704,10 +704,10 @@ async fn set_active_provider_clears_history_before_swap() {
     cfg.startup_connect = StartupConnectPolicy::All;
     let host = Host::start(cfg).await.unwrap();
 
-    // Run a turn so the host has at least one message committed to state.
-    // EchoClient returns EndTurn with empty content, so the turn succeeds
-    // and both the user message and the (empty) assistant message are
-    // committed to state.messages.
+    // Run a turn so the host has messages committed to state. EchoClient
+    // returns EndTurn with empty content, so the turn succeeds and both
+    // the user message and the (empty) assistant message are committed to
+    // state.messages.
     host.run_turn("hello from anthropic").await.unwrap();
 
     let count_before = host.messages().await.len();
@@ -716,7 +716,8 @@ async fn set_active_provider_clears_history_before_swap() {
         "expected at least one message after a completed turn, got 0"
     );
 
-    // Swap to gemini — must clear history first, then swap active id.
+    // Swap to gemini — Phase 3 must preserve the history, only flipping
+    // the active id.
     let gemini = ProviderId::new("gemini").unwrap();
     host.set_active_provider(&gemini).await.unwrap();
 
@@ -727,8 +728,9 @@ async fn set_active_provider_clears_history_before_swap() {
     );
     assert_eq!(
         host.messages().await.len(),
-        0,
-        "set_active_provider must clear history before swapping; \
-         found {count_before} message(s) still in state after the swap"
+        count_before,
+        "set_active_provider must preserve conversation history; \
+         expected {count_before} message(s) to remain, got {}",
+        host.messages().await.len()
     );
 }
