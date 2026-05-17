@@ -338,6 +338,7 @@ impl Host {
                         PoolEntry::new(
                             Arc::clone(&reg.client),
                             reg.capabilities.clone(),
+                            reg.aliases.clone(),
                             reg.display_name.clone(),
                         ),
                     );
@@ -373,7 +374,7 @@ impl Host {
                 config.model.clone(),
             )
             .expect("single-model caps with matching default are always valid");
-            let entry = PoolEntry::new(provider_arc, caps, "Default".into());
+            let entry = PoolEntry::new(provider_arc, caps, Vec::new(), "Default".into());
             let mut map = HashMap::new();
             map.insert(id.clone(), entry);
             (map, id)
@@ -466,7 +467,7 @@ impl Host {
             config.model.clone(),
         )
         .expect("single-model caps with matching default are always valid");
-        let entry = PoolEntry::new(provider_arc, caps, "Default".into());
+        let entry = PoolEntry::new(provider_arc, caps, Vec::new(), "Default".into());
         let mut pool_map: HashMap<savvagent_protocol::ProviderId, PoolEntry> = HashMap::new();
         pool_map.insert(default_id.clone(), entry);
 
@@ -1230,7 +1231,7 @@ impl Host {
         }
         pool.insert(
             reg.id.clone(),
-            PoolEntry::new(reg.client, reg.capabilities, reg.display_name),
+            PoolEntry::new(reg.client, reg.capabilities, reg.aliases, reg.display_name),
         );
         // Pre-create the cancel broadcast sender so run_turn_inner can
         // subscribe before acquiring a lease, closing the TOCTOU window.

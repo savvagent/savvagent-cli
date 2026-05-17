@@ -47,6 +47,7 @@ pub enum DisconnectMode {
 pub struct PoolEntry {
     client: Arc<dyn ProviderClient + Send + Sync>,
     capabilities: ProviderCapabilities,
+    aliases: Vec<crate::capabilities::ModelAlias>,
     display_name: String,
     /// Number of [`ProviderLease`]s currently outstanding for this entry.
     /// Used by drain-disconnect to wait until in-flight turns finish.
@@ -58,11 +59,13 @@ impl PoolEntry {
     pub fn new(
         client: Arc<dyn ProviderClient + Send + Sync>,
         capabilities: ProviderCapabilities,
+        aliases: Vec<crate::capabilities::ModelAlias>,
         display_name: String,
     ) -> Self {
         Self {
             client,
             capabilities,
+            aliases,
             display_name,
             active_turns: Arc::new(AtomicUsize::new(0)),
         }
@@ -71,6 +74,11 @@ impl PoolEntry {
     /// The capability metadata advertised by this provider.
     pub fn capabilities(&self) -> &ProviderCapabilities {
         &self.capabilities
+    }
+
+    /// The model aliases advertised by this provider.
+    pub fn aliases(&self) -> &[crate::capabilities::ModelAlias] {
+        &self.aliases
     }
 
     /// Human-readable name for display in the UI.
@@ -159,7 +167,7 @@ mod tests {
             "m".into(),
         )
         .expect("valid test caps");
-        PoolEntry::new(Arc::new(StubClient), caps, "Stub".into())
+        PoolEntry::new(Arc::new(StubClient), caps, Vec::new(), "Stub".into())
     }
 
     #[test]
