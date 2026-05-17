@@ -572,10 +572,57 @@ impl Host {
             let s = self.state.lock().await;
             s.messages.clone()
         };
+
+        // Parse the `@`-prefix against the currently-connected pool.
+        // Aliases are flattened across every connected provider so
+        // `@opus` works even if the active provider is Gemini.
+        let parsed = {
+            let pool = self.pool.read().await;
+            let views: Vec<crate::router::ProviderView<'_>> = pool
+                .iter()
+                .map(|(id, entry)| crate::router::ProviderView {
+                    id,
+                    capabilities: entry.capabilities(),
+                })
+                .collect();
+            let aliases: Vec<crate::capabilities::ModelAlias> = pool
+                .values()
+                .flat_map(|entry| entry.aliases().to_vec())
+                .collect();
+            crate::router::prefix::parse_at_prefix(&user_input, &views, &aliases)
+            // Pool read guard dropped at end of this block.
+        };
+
         messages.push(Message {
             role: Role::User,
-            content: vec![ContentBlock::Text { text: user_input }],
+            content: vec![ContentBlock::Text { text: parsed.body }],
         });
+
+        // Run the router. The decision pins the provider + model for the
+        // entire turn, including every tool-use iteration.
+        let decision = {
+            let pool = self.pool.read().await;
+            let views: Vec<crate::router::ProviderView<'_>> = pool
+                .iter()
+                .map(|(id, entry)| crate::router::ProviderView {
+                    id,
+                    capabilities: entry.capabilities(),
+                })
+                .collect();
+            let active_id: ProviderId = self.active_provider.read().await.clone();
+            let active_model: String = self.current_model.read().await.clone();
+            crate::router::Router::pick(parsed.override_, &views, &active_id, &active_model)
+        };
+
+        if let Some(tx) = &events {
+            let _ = tx
+                .send(TurnEvent::RouteSelected {
+                    provider_id: decision.provider_id.clone(),
+                    model_id: decision.model_id.clone(),
+                    reason: decision.reason.clone(),
+                })
+                .await;
+        }
 
         let tool_defs = {
             let guard = self.tools.lock().await;
@@ -600,9 +647,18 @@ impl Host {
                     .await;
             }
 
+            // History sent to the provider has the receiver's own prefix
+            // stripped from every tool_use_id. Foreign-prefixed ids pass
+            // through verbatim — the Phase 2 gate proved each translator
+            // accepts them. See router::namespace docs for the contract.
+            let req_messages = crate::router::namespace::strip_own_prefix_in_history(
+                &messages,
+                &decision.provider_id,
+            );
+
             let req = CompleteRequest {
-                model: self.current_model.read().await.clone(),
-                messages: messages.clone(),
+                model: decision.model_id.clone(),
+                messages: req_messages,
                 system: self.system_prompt.clone(),
                 tools: tool_defs.clone(),
                 temperature: None,
@@ -645,7 +701,7 @@ impl Host {
             // and cancel_rx.recv() will fire. If Force removes the pool entry
             // between (b) and (c), pool.get returns None and we return
             // NoActiveProvider — either path is correct.
-            let active_id: ProviderId = self.active_provider.read().await.clone();
+            let active_id: ProviderId = decision.provider_id.clone();
 
             let mut cancel_rx: broadcast::Receiver<CancellationReason> = {
                 let map = self.cancel_signal.lock().await;
@@ -749,16 +805,25 @@ impl Host {
                 "provider.complete returned"
             );
 
-            // Append the assistant turn verbatim — the provider's content
-            // blocks (including tool_use ids) round-trip back unchanged.
+            // Namespace every ToolUse.id in the returned assistant
+            // content. Future turns that route to a different provider
+            // see `<this-provider>:<id>` in history; the receiving
+            // provider's adapter accepts that as an opaque string
+            // (Phase 2 gate), and `strip_own_prefix_in_history` strips
+            // the prefix back off if the *next* turn lands on the same
+            // provider.
+            let namespaced_content = crate::router::namespace::namespace_assistant_content(
+                resp.content.clone(),
+                &decision.provider_id,
+            );
             messages.push(Message {
                 role: Role::Assistant,
-                content: resp.content.clone(),
+                content: namespaced_content.clone(),
             });
 
             let mut tool_uses: Vec<(String, String, Value)> = Vec::new();
             let mut text_buf = String::new();
-            for block in &resp.content {
+            for block in &namespaced_content {
                 match block {
                     ContentBlock::Text { text } => {
                         if !text_buf.is_empty() {
