@@ -583,6 +583,17 @@ fn render_log(app: &App, frame: &mut Frame, area: Rect, palette: Palette) {
                     )));
                 }
             }
+            Entry::RouteBadge(text) => {
+                // Muted single line. Style matches Entry::Note; the leading
+                // glyph distinguishes routing decisions from generic notices.
+                lines.push(Line::from(Span::styled(
+                    format!("▸ {text}"),
+                    palette
+                        .base_style()
+                        .fg(palette.muted)
+                        .add_modifier(Modifier::ITALIC),
+                )));
+            }
             Entry::Note(text) => {
                 lines.push(Line::from(Span::styled(
                     format!("· {text}"),

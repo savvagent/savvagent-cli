@@ -1774,7 +1774,8 @@ fn translate_turn_event_to_host_event(
             })
         }
         // No analog — these stay TUI-private.
-        TurnEvent::TextDelta { .. }
+        TurnEvent::RouteSelected { .. }
+        | TurnEvent::TextDelta { .. }
         | TurnEvent::PermissionRequested { .. }
         | TurnEvent::BashNetworkRequested { .. }
         | TurnEvent::ToolCallDenied { .. }

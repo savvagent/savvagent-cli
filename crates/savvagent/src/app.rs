@@ -186,6 +186,10 @@ pub enum Entry {
         /// Truncated payload (only set after completion).
         result_preview: Option<String>,
     },
+    /// Per-turn routing badge — rendered as a muted single line above
+    /// the assistant entry that follows it. Source: `TurnEvent::RouteSelected`.
+    /// Format: `"provider/model — Reason"` (e.g. `"anthropic/claude-opus-4-7 — Override"`).
+    RouteBadge(String),
     /// Local notice — file ops, errors, transcript notifications.
     Note(String),
 }
@@ -530,6 +534,19 @@ impl App {
     /// Apply one streaming event from the host into the conversation log.
     pub fn apply_turn_event(&mut self, event: TurnEvent) {
         match event {
+            TurnEvent::RouteSelected {
+                provider_id,
+                model_id,
+                reason,
+            } => {
+                self.flush_live_text();
+                self.entries.push(Entry::RouteBadge(format!(
+                    "{}/{} — {}",
+                    provider_id.as_str(),
+                    model_id,
+                    reason
+                )));
+            }
             TurnEvent::IterationStarted { .. } => {}
             TurnEvent::TextDelta { text } => {
                 self.live_text.push_str(&text);
@@ -652,7 +669,9 @@ impl App {
             .entries
             .iter()
             .map(|e| match e {
-                Entry::User(t) | Entry::Assistant(t) | Entry::Note(t) => t.len(),
+                Entry::User(t) | Entry::Assistant(t) | Entry::Note(t) | Entry::RouteBadge(t) => {
+                    t.len()
+                }
                 Entry::Tool {
                     arguments,
                     result_preview,
@@ -1321,6 +1340,7 @@ impl App {
                     };
                     format!("tool: {name}({arguments}) [{status_label}]")
                 }
+                Entry::RouteBadge(t) => format!("route: {t}"),
                 Entry::Note(t) => format!("note: {t}"),
             })
             .collect();
