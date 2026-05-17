@@ -13,7 +13,9 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use savvagent_host::{CostTier, ModelCapabilities, ProviderCapabilities, ProviderRegistration};
+use savvagent_host::{
+    CostTier, ModelAlias, ModelCapabilities, ProviderCapabilities, ProviderRegistration,
+};
 use savvagent_mcp::{InProcessProviderClient, ProviderClient};
 use savvagent_plugin::{
     Contributions, Effect, HookKind, HostEvent, Manifest, Plugin, PluginError, PluginId,
@@ -154,13 +156,35 @@ impl ProviderAnthropicPlugin {
             .map_err(|e| format!("client build: {e}"))?;
         let client: Arc<dyn ProviderClient + Send + Sync> =
             Arc::new(InProcessProviderClient::new(Arc::new(provider)));
-        Ok(Some(ProviderRegistration::new(
-            savvagent_protocol::ProviderId::new(PROVIDER_ID)
-                .expect("PROVIDER_ID is a valid provider id"),
-            DISPLAY_NAME,
-            client,
-            Self::capabilities(),
-        )))
+        Ok(Some(
+            ProviderRegistration::new(
+                savvagent_protocol::ProviderId::new(PROVIDER_ID)
+                    .expect("PROVIDER_ID is a valid provider id"),
+                DISPLAY_NAME,
+                client,
+                Self::capabilities(),
+            )
+            .with_aliases(vec![
+                ModelAlias {
+                    alias: "opus".into(),
+                    provider: ProviderId::new("anthropic")
+                        .expect("static alias provider id is valid"),
+                    model: "claude-opus-4-7".into(),
+                },
+                ModelAlias {
+                    alias: "sonnet".into(),
+                    provider: ProviderId::new("anthropic")
+                        .expect("static alias provider id is valid"),
+                    model: "claude-sonnet-4-6".into(),
+                },
+                ModelAlias {
+                    alias: "haiku".into(),
+                    provider: ProviderId::new("anthropic")
+                        .expect("static alias provider id is valid"),
+                    model: "claude-haiku-4-5".into(),
+                },
+            ]),
+        ))
     }
 
     /// Test-only helper that pre-installs a stub client without going

@@ -4,7 +4,9 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use savvagent_host::{CostTier, ModelCapabilities, ProviderCapabilities, ProviderRegistration};
+use savvagent_host::{
+    CostTier, ModelAlias, ModelCapabilities, ProviderCapabilities, ProviderRegistration,
+};
 use savvagent_mcp::{InProcessProviderClient, ProviderClient};
 use savvagent_plugin::{
     Contributions, Effect, HookKind, HostEvent, Manifest, Plugin, PluginError, PluginId,
@@ -110,13 +112,27 @@ impl ProviderOpenAiPlugin {
             .map_err(|e| format!("client build: {e}"))?;
         let client: Arc<dyn ProviderClient + Send + Sync> =
             Arc::new(InProcessProviderClient::new(Arc::new(provider)));
-        Ok(Some(ProviderRegistration::new(
-            savvagent_protocol::ProviderId::new(PROVIDER_ID)
-                .expect("PROVIDER_ID is a valid provider id"),
-            DISPLAY_NAME,
-            client,
-            Self::capabilities(),
-        )))
+        Ok(Some(
+            ProviderRegistration::new(
+                savvagent_protocol::ProviderId::new(PROVIDER_ID)
+                    .expect("PROVIDER_ID is a valid provider id"),
+                DISPLAY_NAME,
+                client,
+                Self::capabilities(),
+            )
+            .with_aliases(vec![
+                ModelAlias {
+                    alias: "gpt".into(),
+                    provider: ProviderId::new("openai").expect("static alias provider id is valid"),
+                    model: "gpt-4o".into(),
+                },
+                ModelAlias {
+                    alias: "gpt-4o".into(),
+                    provider: ProviderId::new("openai").expect("static alias provider id is valid"),
+                    model: "gpt-4o".into(),
+                },
+            ]),
+        ))
     }
 
     fn try_connect_from_keyring(&mut self) -> Option<()> {
