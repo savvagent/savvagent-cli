@@ -387,7 +387,14 @@ async fn open_screen(app: &mut App, id: &str, args: ScreenArgs) -> Result<(), St
         },
         ("connect.picker", _) => ScreenArgs::ConnectPicker,
         ("model.picker", _) => ScreenArgs::ModelPicker {
-            current_id: app.model.clone(),
+            // Phase 3+: catalog rows are `provider/model`-qualified so
+            // the current-row marker must match the same shape. Falls
+            // back to the bare model id when no provider is active —
+            // in that case the picker just won't highlight any row.
+            current_id: match app.active_provider_id {
+                Some(pid) => format!("{}/{}", pid, app.model),
+                None => app.model.clone(),
+            },
             models: app.cached_models.clone(),
         },
         (_, other) => other,

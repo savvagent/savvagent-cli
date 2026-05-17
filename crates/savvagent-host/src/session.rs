@@ -1285,6 +1285,18 @@ impl Host {
         pool.get(&active).map(|entry| entry.capabilities().clone())
     }
 
+    /// Snapshot every connected provider's `(id, capabilities)`. Used by
+    /// the TUI's `/model` picker to show models across the whole pool,
+    /// not just the active provider's catalog.
+    pub async fn pool_snapshot(
+        &self,
+    ) -> Vec<(savvagent_protocol::ProviderId, ProviderCapabilities)> {
+        let pool = self.pool.read().await;
+        pool.iter()
+            .map(|(id, entry)| (id.clone(), entry.capabilities().clone()))
+            .collect()
+    }
+
     /// Update the model id forwarded in every subsequent `CompleteRequest`.
     ///
     /// This is the pool-safe alternative to rebuilding the host: the pool

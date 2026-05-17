@@ -836,6 +836,11 @@ fn resolve_model_change(
 /// reconnects the active provider with the new id. When the pool has no
 /// models registered for the active provider the check is skipped and the
 /// provider rejects an invalid id at first turn instead.
+///
+/// Phase 3+: `/model <provider>/<model>` switches both the active provider
+/// and the default model in one step — picking any row from the picker
+/// (or typing the qualifier inline) routes future turns through that
+/// provider.
 async fn handle_model_command(app: &mut App, rest: &str, host_slot: &HostSlot) {
     if rest.is_empty() {
         match app.active_provider_id {
@@ -858,7 +863,59 @@ async fn handle_model_command(app: &mut App, rest: &str, host_slot: &HostSlot) {
         return;
     }
 
-    let new_model = rest.to_string();
+    // Parse the optional `provider/` qualifier off the front.
+    let (qualifier, bare_model) = match rest.split_once('/') {
+        Some((p, m)) if !p.is_empty() && !m.is_empty() => (Some(p.to_string()), m.to_string()),
+        _ => (None, rest.to_string()),
+    };
+
+    // If a qualifier is present and differs from the current active
+    // provider, swap providers first so the model validation lands on
+    // the right pool entry.
+    if let Some(prov) = &qualifier {
+        if Some(prov.as_str()) != app.active_provider_id {
+            let Some(host) = current_host(host_slot).await else {
+                app.push_note(rust_i18n::t!("notes.model-not-connected").to_string());
+                return;
+            };
+            let pid = match savvagent_protocol::ProviderId::new(prov) {
+                Ok(p) => p,
+                Err(_) => {
+                    app.push_note(
+                        rust_i18n::t!("notes.use-invalid-id", id = prov.clone()).to_string(),
+                    );
+                    return;
+                }
+            };
+            match host.set_active_provider(&pid).await {
+                Ok(()) => {
+                    if let Some(s) = PROVIDERS.iter().find(|s| s.id == pid.as_str()) {
+                        app.active_provider_id = Some(s.id);
+                    }
+                    if let Err(err) = crate::plugin::effects::dispatch_host_event(
+                        app,
+                        savvagent_plugin::HostEvent::ActiveProviderChanged { id: pid.clone() },
+                        0,
+                    )
+                    .await
+                    {
+                        tracing::warn!(error = %err, "ActiveProviderChanged dispatch failed");
+                    }
+                }
+                Err(savvagent_host::PoolError::NotRegistered(_)) => {
+                    app.push_note(
+                        rust_i18n::t!("notes.use-not-connected", name = prov.clone()).to_string(),
+                    );
+                    return;
+                }
+                Err(e) => {
+                    app.push_note(format!("{e}"));
+                    return;
+                }
+            }
+        }
+    }
+
     let Some(spec_id) = app.active_provider_id else {
         app.push_note(rust_i18n::t!("notes.model-not-connected").to_string());
         return;
@@ -868,17 +925,18 @@ async fn handle_model_command(app: &mut App, rest: &str, host_slot: &HostSlot) {
         return;
     }
 
-    // Validate the requested id against the active provider's capability
-    // metadata. When the pool has no capabilities registered for the active
-    // provider (shouldn't happen in practice) we fall through optimistically.
+    // Validate the requested id against the (now-)active provider's
+    // capability metadata. When the pool has no capabilities registered
+    // for the active provider (shouldn't happen in practice) we fall
+    // through optimistically.
     if let Some(host) = current_host(host_slot).await {
         if let Some(caps) = host.active_capabilities().await {
-            if !caps.models().is_empty() && caps.model(&new_model).is_none() {
+            if !caps.models().is_empty() && caps.model(&bare_model).is_none() {
                 let active = host.active_provider().await;
                 app.push_note(
                     rust_i18n::t!(
                         "notes.model-not-in-active",
-                        id = new_model,
+                        id = bare_model.clone(),
                         provider = active.as_str()
                     )
                     .to_string(),
@@ -890,7 +948,7 @@ async fn handle_model_command(app: &mut App, rest: &str, host_slot: &HostSlot) {
 
     // Persist immediately for the direct /model <id> command path.
     if let Some(spec) = PROVIDERS.iter().find(|s| s.id == spec_id) {
-        match models_pref::save_for_provider(spec.id, &new_model).await {
+        match models_pref::save_for_provider(spec.id, &bare_model).await {
             Ok(()) => {}
             Err(e) => {
                 tracing::warn!(error = ?e, provider = spec.id, "models.toml save failed");
@@ -902,7 +960,7 @@ async fn handle_model_command(app: &mut App, rest: &str, host_slot: &HostSlot) {
         }
     }
 
-    perform_model_change(new_model, host_slot, app).await;
+    perform_model_change(bare_model, host_slot, app).await;
     refresh_cached_models(app, host_slot).await;
 }
 
@@ -1012,13 +1070,19 @@ async fn do_resume_from_path(app: &mut App, host_slot: &HostSlot, path: &Path) {
     }
 }
 
-/// Refresh [`App::cached_models`] from the active provider's capability
-/// metadata. Only models from the currently-active provider are shown in
-/// the picker; switching providers (`/use`) triggers a fresh refresh.
+/// Refresh [`App::cached_models`] from the *entire* connected pool's
+/// capability metadata.
 ///
-/// Falls back to a single-entry catalog containing the current model id when
-/// no host is connected or the active provider has no models registered, so
-/// the picker always has something to render.
+/// Phase 3+: the `/model` picker shows every connected provider's models,
+/// not just the active provider's catalog — picking a row sets both the
+/// default model and the default provider in one step. Each row's `id` is
+/// qualified as `provider/model` so the picker (and downstream
+/// `Effect::SetActiveModel` handler) can recover the destination provider
+/// from the selection.
+///
+/// Falls back to a single-entry catalog containing the current model id
+/// when no host is connected or the pool is empty, so the picker always
+/// has something to render.
 async fn refresh_cached_models(app: &mut App, host_slot: &HostSlot) {
     let fallback = vec![savvagent_plugin::ModelEntry {
         id: app.model.clone(),
@@ -1028,33 +1092,49 @@ async fn refresh_cached_models(app: &mut App, host_slot: &HostSlot) {
         app.cached_models = fallback;
         return;
     };
-    let Some(caps) = host.active_capabilities().await else {
-        tracing::debug!("active_capabilities returned None; using single-entry fallback");
-        app.cached_models = fallback;
-        return;
-    };
-    if caps.models().is_empty() {
-        tracing::debug!("active provider has no models in capabilities; using fallback");
+    let snapshot = host.pool_snapshot().await;
+    if snapshot.is_empty() {
+        tracing::debug!("pool_snapshot returned empty; using single-entry fallback");
         app.cached_models = fallback;
         return;
     }
-    app.cached_models = caps
-        .models()
-        .iter()
-        .map(|m| savvagent_plugin::ModelEntry {
-            display_name: if m.display_name.is_empty() {
+    let mut rows: Vec<savvagent_plugin::ModelEntry> = Vec::new();
+    for (pid, caps) in snapshot {
+        for m in caps.models() {
+            let display = if m.display_name.is_empty() {
                 m.id.clone()
             } else {
                 m.display_name.clone()
-            },
-            id: m.id.clone(),
-        })
-        .collect();
+            };
+            rows.push(savvagent_plugin::ModelEntry {
+                // `provider/model` qualifier carries the destination
+                // provider through the picker → SetActiveModel → host
+                // round-trip. `apply_pending_model_change` parses the
+                // prefix back out.
+                id: format!("{}/{}", pid.as_str(), m.id),
+                display_name: format!("{}/{} — {}", pid.as_str(), m.id, display),
+            });
+        }
+    }
+    if rows.is_empty() {
+        tracing::debug!("pool_snapshot had no models across any provider; using fallback");
+        app.cached_models = fallback;
+        return;
+    }
+    rows.sort_by(|a, b| a.id.cmp(&b.id));
+    app.cached_models = rows;
 }
 
 /// Drain `app.pending_model_change` (set by `Effect::SetActiveModel`)
 /// and forward the request to [`perform_model_change`]. No-op when
 /// nothing is queued.
+///
+/// Phase 3+: the picker rows are qualified as `provider/model`. When a
+/// pending id carries a `provider/` prefix, this function switches the
+/// active provider first (so the model lands on the right host) and then
+/// applies the bare model id. A bare id (no slash) is treated as a model
+/// on the currently-active provider for backwards compatibility with the
+/// `/model <id>` slash form.
 async fn apply_pending_model_change(
     app: &mut App,
     host_slot: &HostSlot,
@@ -1064,6 +1144,60 @@ async fn apply_pending_model_change(
     let Some(pending) = app.pending_model_change.take() else {
         return;
     };
+
+    // Parse the optional `provider/` qualifier off the front of the id.
+    // When present, the target provider must be the one we set active
+    // before applying the model change.
+    let (target_provider, bare_model) = match pending.id.split_once('/') {
+        Some((p, m)) if !p.is_empty() && !m.is_empty() => (Some(p.to_string()), m.to_string()),
+        _ => (None, pending.id.clone()),
+    };
+
+    // If the picker handed us a `provider/model` id, switch the active
+    // provider first. This must happen before `perform_model_change` so
+    // `host.set_model` lands on the right pool entry.
+    if let Some(prov) = &target_provider {
+        let Some(host) = current_host(host_slot).await else {
+            app.push_note(rust_i18n::t!("notes.model-not-connected").to_string());
+            return;
+        };
+        let pid = match savvagent_protocol::ProviderId::new(prov) {
+            Ok(p) => p,
+            Err(_) => {
+                app.push_note(rust_i18n::t!("notes.use-invalid-id", id = prov.clone()).to_string());
+                return;
+            }
+        };
+        if pid.as_str() != app.active_provider_id.unwrap_or("") {
+            match host.set_active_provider(&pid).await {
+                Ok(()) => {
+                    if let Some(s) = PROVIDERS.iter().find(|s| s.id == pid.as_str()) {
+                        app.active_provider_id = Some(s.id);
+                    }
+                    if let Err(err) = crate::plugin::effects::dispatch_host_event(
+                        app,
+                        savvagent_plugin::HostEvent::ActiveProviderChanged { id: pid.clone() },
+                        0,
+                    )
+                    .await
+                    {
+                        tracing::warn!(error = %err, "ActiveProviderChanged dispatch failed");
+                    }
+                }
+                Err(savvagent_host::PoolError::NotRegistered(_)) => {
+                    app.push_note(
+                        rust_i18n::t!("notes.use-not-connected", name = prov.clone()).to_string(),
+                    );
+                    return;
+                }
+                Err(e) => {
+                    app.push_note(format!("{e}"));
+                    return;
+                }
+            }
+        }
+    }
+
     let Some(spec_id) = app.active_provider_id else {
         app.push_note(rust_i18n::t!("notes.model-not-connected").to_string());
         return;
@@ -1073,19 +1207,18 @@ async fn apply_pending_model_change(
         return;
     };
 
-    // Validate against the active provider's capability metadata. The picker
-    // is already filtered to the active provider's models, so this is a
-    // belt-and-suspenders check. When no capabilities are registered we
-    // proceed optimistically — the provider rejects an invalid id at first
-    // turn instead.
+    // Validate the bare model id against the (now-)active provider's
+    // capability metadata. When no capabilities are registered we proceed
+    // optimistically — the provider rejects an invalid id at first turn
+    // instead.
     if let Some(host) = current_host(host_slot).await {
         if let Some(caps) = host.active_capabilities().await {
-            if !caps.models().is_empty() && caps.model(&pending.id).is_none() {
+            if !caps.models().is_empty() && caps.model(&bare_model).is_none() {
                 let active = host.active_provider().await;
                 app.push_note(
                     rust_i18n::t!(
                         "notes.model-not-in-active",
-                        id = pending.id,
+                        id = bare_model.clone(),
                         provider = active.as_str()
                     )
                     .to_string(),
@@ -1095,7 +1228,7 @@ async fn apply_pending_model_change(
         }
     }
 
-    perform_model_change(pending.id.clone(), host_slot, app).await;
+    perform_model_change(bare_model.clone(), host_slot, app).await;
 
     // Refresh the picker's catalog cache; if the new model came with a
     // larger advertised set than the previous one, the picker should
@@ -1104,7 +1237,7 @@ async fn apply_pending_model_change(
 
     // Persist only when the requesting effect asked for it.
     if pending.persist {
-        match models_pref::save_for_provider(spec.id, &pending.id).await {
+        match models_pref::save_for_provider(spec.id, &bare_model).await {
             Ok(()) => app
                 .push_note(rust_i18n::t!("notes.model-persisted", provider = spec.id).to_string()),
             Err(e) => {
@@ -1345,10 +1478,9 @@ async fn handle_use_command(app: &mut App, rest: &str, host_slot: &HostSlot) {
     };
     match host.set_active_provider(&pid).await {
         Ok(()) => {
-            // History is already cleared on the host side; reset the
-            // TUI's transcript view to match.
-            app.entries.clear();
-            app.live_text.clear();
+            // Phase 3+: history is preserved across `/use`. The TUI
+            // entries vector keeps every prior turn so the user can
+            // continue the conversation on the new active provider.
             app.update_metrics();
             // Sync app.active_provider_id and app.model to the new active
             // provider so every subsequent site that branches on
