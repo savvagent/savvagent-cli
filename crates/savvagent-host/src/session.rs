@@ -600,6 +600,13 @@ impl Host {
 
         // Run the router. The decision pins the provider + model for the
         // entire turn, including every tool-use iteration.
+        //
+        // Snapshot active_id/active_model BEFORE taking the pool guard so
+        // we never hold the pool RwLock across an `.await`, and so this
+        // path matches the lock acquisition order used elsewhere
+        // (active_provider -> pool).
+        let active_id: ProviderId = self.active_provider.read().await.clone();
+        let active_model: String = self.current_model.read().await.clone();
         let decision = {
             let pool = self.pool.read().await;
             let views: Vec<crate::router::ProviderView<'_>> = pool
@@ -609,9 +616,8 @@ impl Host {
                     capabilities: entry.capabilities(),
                 })
                 .collect();
-            let active_id: ProviderId = self.active_provider.read().await.clone();
-            let active_model: String = self.current_model.read().await.clone();
             crate::router::Router::pick(parsed.override_, &views, &active_id, &active_model)
+            // pool guard dropped at end of this block
         };
 
         if let Some(tx) = &events {
@@ -813,13 +819,9 @@ impl Host {
             // the prefix back off if the *next* turn lands on the same
             // provider.
             let namespaced_content = crate::router::namespace::namespace_assistant_content(
-                resp.content.clone(),
+                resp.content,
                 &decision.provider_id,
             );
-            messages.push(Message {
-                role: Role::Assistant,
-                content: namespaced_content.clone(),
-            });
 
             let mut tool_uses: Vec<(String, String, Value)> = Vec::new();
             let mut text_buf = String::new();
@@ -837,6 +839,11 @@ impl Host {
                     _ => {}
                 }
             }
+
+            messages.push(Message {
+                role: Role::Assistant,
+                content: namespaced_content,
+            });
 
             // Tool-use blocks drive continuation. Providers disagree on how
             // they signal tool use through `stop_reason` (Anthropic emits
