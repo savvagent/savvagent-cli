@@ -9,7 +9,7 @@
 //!
 //! - Layer 1 — `@provider[:model]` override (Override reason)
 //! - Layer 5 — fall through to the active provider + its default model
-//!             (Default reason)
+//!   (Default reason)
 //!
 //! Layers 2-4 (modality, user rules, heuristics) are reserved for
 //! Phases 4-6; `RoutingReason` is `#[non_exhaustive]` so adding them
