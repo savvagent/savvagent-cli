@@ -24,7 +24,7 @@ pub mod pool;
 pub mod router;
 pub use pool::{DisconnectMode, PoolEntry, PoolError, ProviderLease};
 pub use router::{
-    LegacyModelResolution, ProviderView, RoutingDecision, RoutingOverride, RoutingReason,
+    LegacyModelResolution, ProviderView, Router, RoutingDecision, RoutingOverride, RoutingReason,
     resolve_legacy_model,
 };
 mod default_prompt;

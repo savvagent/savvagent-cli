@@ -13,4 +13,4 @@ pub mod prefix;
 pub mod router;
 
 pub use legacy_model::{LegacyModelResolution, ProviderView, resolve_legacy_model};
-pub use router::{RoutingDecision, RoutingOverride, RoutingReason};
+pub use router::{Router, RoutingDecision, RoutingOverride, RoutingReason};

@@ -167,6 +167,17 @@ pub struct TurnOutcome {
 /// these to render incremental output.
 #[derive(Debug, Clone)]
 pub enum TurnEvent {
+    /// The router picked a `(provider, model)` for this turn. Emitted
+    /// once, before any `IterationStarted`, so the TUI can render a
+    /// per-turn routing badge above the assistant's response.
+    RouteSelected {
+        /// The chosen provider for this turn.
+        provider_id: savvagent_protocol::ProviderId,
+        /// The chosen model for this turn.
+        model_id: String,
+        /// Why the router picked it (rendered as "Override" / "Default" today).
+        reason: crate::router::RoutingReason,
+    },
     /// One iteration of the loop began. `iteration` is 1-based.
     IterationStarted {
         /// 1-based iteration index.
