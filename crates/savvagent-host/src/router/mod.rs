@@ -2,6 +2,7 @@
 //! parsing; modality / rules / heuristics arrive in Phases 4-6.
 
 pub mod legacy_model;
+pub mod namespace;
 pub mod prefix;
 // The `router` submodule is the home of the `Router` struct (lands in
 // Task 5) plus the routing-decision data types. Naming it `router`
