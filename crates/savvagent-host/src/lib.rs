@@ -23,7 +23,10 @@ mod config;
 pub mod pool;
 pub mod router;
 pub use pool::{DisconnectMode, PoolEntry, PoolError, ProviderLease};
-pub use router::{LegacyModelResolution, ProviderView, resolve_legacy_model};
+pub use router::{
+    LegacyModelResolution, ProviderView, RoutingDecision, RoutingOverride, RoutingReason,
+    resolve_legacy_model,
+};
 mod default_prompt;
 mod logging;
 mod permissions;
