@@ -117,8 +117,8 @@ provider has a key on file.
 |---|---|
 | `/connect [<provider>] [--rekey]` | Add a provider to the connection pool. Silent when the keyring already has a stored key — the API-key modal only opens when a key is missing or `--rekey` is passed. Multiple providers can be connected simultaneously; switch with `/use <provider>`. |
 | `/disconnect <provider> [--force]` | Remove a provider from the pool. Default (drain) mode waits for any in-flight turn to finish. `--force` signals a cooperative cancel, waits 500 ms, then aborts. |
-| `/use <provider>` | Switch the active provider and start a fresh conversation thread. Currently a conversation runs on one active provider end-to-end; cross-provider routing within a conversation lands in a future release. |
-| `/model` | Open the model picker for the active provider (no args), or switch directly: `/model gemini-2.5-pro`. Lists only the active provider's models; use `/use <provider>` first to switch providers. Selection persists per provider to `~/.savvagent/models.toml`. |
+| `/use <provider>` | Switch the active provider. As of v0.17.0 the conversation history is preserved across the switch — `tool_use_id`s are provider-namespaced so subsequent turns on the new provider can safely see prior tool calls. For one-off routing without changing the active provider, use the `@<provider>` prefix. |
+| `/model` | Open the model picker (no args), or switch directly: `/model gemini-2.5-pro`. As of v0.17.0 the picker lists every connected provider's models; selecting a model from a different provider switches the active provider too. Selection persists per provider to `~/.savvagent/models.toml`. |
 | `/theme` | Open the theme picker (no args), or switch directly: `/theme tokyo-night`. Persists to `~/.savvagent/theme.toml`. |
 | `/language` | Open the locale picker. Persists to `~/.savvagent/language.toml`. Ships with en / es / pt / hi; falls back to en for missing keys. |
 | `/plugins` | Open the plugin manager — toggle optional plugins on/off; core plugins can't be disabled. Persists to `~/.savvagent/plugins.toml`. |
@@ -136,6 +136,22 @@ provider has a key on file.
 | `/quit` | Exit. |
 
 `@` opens a file picker that inserts `@path` into the prompt.
+
+### Routing turns to a specific provider/model
+
+Prefix any message with `@<provider>:<model>` (or `@<provider>`, or
+`@<alias>`) to route that single turn to a specific destination
+regardless of the active provider:
+
+- `@anthropic:claude-opus-4-7 design this` — explicit provider + model
+- `@gemini explain this` — bare provider, picks Gemini's default model
+- `@opus refactor this` — alias, resolves to Anthropic's claude-opus-4-7
+- `@@team look here` — literal `@team` (strips one `@`)
+
+Unknown `@`-tokens are not consumed: the message goes through verbatim
+and the next turn routes to whichever provider `/use` last selected.
+Each assistant turn shows a muted `▸ provider/model — Reason` line above
+its response so the routing decision is always visible.
 
 ### Multi-provider pool (Phase 1)
 

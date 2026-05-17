@@ -17,7 +17,7 @@ members = [
 default-members = ["crates/savvagent"]
 
 [workspace.package]
-version = "0.16.0"
+version = "0.17.0"
 edition = "2024"
 license = "AGPL-3.0-or-later"
 repository = "https://github.com/robhicks/savvagent-rs"
@@ -25,17 +25,17 @@ rust-version = "1.85"
 
 [workspace.dependencies]
 # Local crates
-savvagent-plugin = { path = "crates/savvagent-plugin", version = "0.16.0" }
-savvagent-protocol = { path = "crates/savvagent-protocol", version = "0.16.0" }
-savvagent-mcp = { path = "crates/savvagent-mcp", version = "0.16.0" }
-savvagent-host = { path = "crates/savvagent-host", version = "0.16.0" }
-provider-anthropic = { path = "crates/provider-anthropic", version = "0.16.0" }
-provider-gemini = { path = "crates/provider-gemini", version = "0.16.0" }
-provider-local = { path = "crates/provider-local", version = "0.16.0" }
-provider-openai = { path = "crates/provider-openai", version = "0.16.0" }
-tool-bash = { path = "crates/tool-bash", version = "0.16.0" }
-tool-fs = { path = "crates/tool-fs", version = "0.16.0" }
-tool-grep = { path = "crates/tool-grep", version = "0.16.0" }
+savvagent-plugin = { path = "crates/savvagent-plugin", version = "0.17.0" }
+savvagent-protocol = { path = "crates/savvagent-protocol", version = "0.17.0" }
+savvagent-mcp = { path = "crates/savvagent-mcp", version = "0.17.0" }
+savvagent-host = { path = "crates/savvagent-host", version = "0.17.0" }
+provider-anthropic = { path = "crates/provider-anthropic", version = "0.17.0" }
+provider-gemini = { path = "crates/provider-gemini", version = "0.17.0" }
+provider-local = { path = "crates/provider-local", version = "0.17.0" }
+provider-openai = { path = "crates/provider-openai", version = "0.17.0" }
+tool-bash = { path = "crates/tool-bash", version = "0.17.0" }
+tool-fs = { path = "crates/tool-fs", version = "0.17.0" }
+tool-grep = { path = "crates/tool-grep", version = "0.17.0" }
 
 # Async runtime + utilities
 tokio = { version = "1.52", features = ["full"] }

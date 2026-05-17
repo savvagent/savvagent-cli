@@ -6,6 +6,55 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 (pre-1.0: `0.MINOR.PATCH`, where MINOR captures features + breaking
 boundary changes and PATCH captures fixes).
 
+## 0.17.0 - 2026-05-17
+
+### Added
+
+- **`@provider:model` (and `@provider`, `@alias`) prefix.** Users can now
+  route an individual turn to a specific provider/model by prefixing
+  their message with `@anthropic:claude-opus-4-7`, `@gemini`, `@opus`,
+  etc. Unknown `@`-tokens are NOT consumed — the message goes through
+  verbatim and the next turn routes to the active provider as usual. To
+  start a message with a literal `@`, prefix with `@@`.
+- **Per-turn routing badge.** Each assistant turn now renders a muted
+  `▸ provider/model — Reason` line above its response so it's always
+  obvious which provider handled the turn and why
+  (Override / Default; modality / rules / heuristics arrive in later
+  phases).
+- **Built-in model aliases.** `@opus`, `@sonnet`, `@haiku` map to
+  Anthropic; `@flash`, `@pro` map to Gemini; `@gpt`, `@gpt-4o` map to
+  OpenAI. Ambiguous aliases (same short name across providers) fall
+  through with a styled note rather than picking one silently.
+
+### Changed
+
+- **Cross-provider history is now safe.** `/use <provider>` no longer
+  clears the conversation when switching the active provider. The host
+  namespaces every `tool_use_id` with the issuing provider at insertion
+  time (`<provider_id>:<original_id>`) and strips the receiver's own
+  prefix back off before each request; foreign-prefixed ids flow through
+  every translator as opaque strings, validated by the Phase 2
+  cross-vendor gate (v0.16.0).
+- **`/model` picker shows every connected provider's models.** Selecting
+  a model from a different provider updates both the active provider and
+  the default model in one step.
+
+### Internal
+
+- Phase 3 of the multi-provider-pool roadmap (see
+  `docs/superpowers/specs/2026-05-15-multi-provider-pool-and-auto-routing-design.md`).
+  New `crates/savvagent-host/src/router/{prefix,router,namespace}.rs`
+  modules; `Host::run_turn_inner` now parses the `@`-prefix, invokes
+  `Router::pick`, emits `TurnEvent::RouteSelected`, and namespaces ids
+  on append / strips on egress.
+- `TurnEvent::RouteSelected { provider_id, model_id, reason }` added.
+  Existing `TurnEvent` consumers that match the enum exhaustively need a
+  new arm (the TUI's `apply_turn_event` handles it; downstream consumers
+  outside this repo may need to update).
+- `PoolEntry` gains an `aliases` field carrying every `ModelAlias` the
+  provider's `ProviderRegistration` declared; `PoolEntry::new` takes a
+  new `aliases: Vec<ModelAlias>` argument.
+
 ## 0.16.0 - 2026-05-16
 
 ### CI
