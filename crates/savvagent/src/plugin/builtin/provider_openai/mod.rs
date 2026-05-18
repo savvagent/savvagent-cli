@@ -276,10 +276,12 @@ impl BuiltinProviderPlugin for ProviderOpenAiPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::plugin::builtin::provider_common::test_support::use_mock_keyring;
 
     #[tokio::test]
     #[serial_test::serial]
     async fn no_creds_emits_prompt_api_key() {
+        use_mock_keyring();
         rust_i18n::set_locale("en");
         let _ = keyring::Entry::new("savvagent", PROVIDER_ID).map(|e| e.delete_credential());
 
@@ -300,8 +302,12 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial]
     async fn handle_slash_with_stored_key_skips_modal() {
+        use_mock_keyring();
         rust_i18n::set_locale("en");
 
+        // Clear anything a prior test (or a panicked-before-cleanup run)
+        // left behind so the assertion below depends only on our setup.
+        let _ = keyring::Entry::new("savvagent", PROVIDER_ID).map(|e| e.delete_credential());
         let _ = keyring::Entry::new("savvagent", PROVIDER_ID).map(|e| e.set_password("test-key"));
 
         let mut p = ProviderOpenAiPlugin::new();
@@ -330,8 +336,12 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial]
     async fn handle_slash_with_rekey_flag_opens_modal_even_when_client_exists() {
+        use_mock_keyring();
         rust_i18n::set_locale("en");
 
+        // Clear anything a prior test (or a panicked-before-cleanup run)
+        // left behind so the assertion below depends only on our setup.
+        let _ = keyring::Entry::new("savvagent", PROVIDER_ID).map(|e| e.delete_credential());
         let _ = keyring::Entry::new("savvagent", PROVIDER_ID).map(|e| e.set_password("test-key"));
 
         let mut p = ProviderOpenAiPlugin::new();
