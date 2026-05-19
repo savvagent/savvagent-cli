@@ -196,6 +196,19 @@ use = "anthropic/claude-haiku-4-5"
 
 Rules evaluate top-to-bottom; the first match wins. Run `/route reload` after editing the file. Run `/route show` to see the active rules and the most recent routing decision. `@provider:model` overrides and modality redirects still take precedence over rules.
 
+### Heuristic classifier (opt-in)
+
+Add `heuristics = true` to `~/.savvagent/routing.toml` to turn on Layer 4 of the router — a hardcoded classifier that picks a cheaper or stronger model based on the shape of the user input:
+
+- **Short question** (≤200 chars + a `?`) → cheapest connected model (`CostTier::Free` or `Cheap`).
+- **Coding-flavored prompt** (contains any of `refactor`, `implement`, `debug`, `fix bug`, `compile`, `stack trace`, `function`, `class`, `error`) → strongest connected model (`Premium` or `Standard`).
+
+The classifier prefers models on the **active provider** first, then walks the rest of the connected pool. If no connected model matches the desired tier — or the active model is already in that tier — the classifier yields nothing and the request falls through to your `/model` selection. Override (`@provider:model`), modality redirects (e.g. images → vision models), and explicit `[[rule]]` entries in `routing.toml` all beat the classifier when they apply.
+
+**Caveats.** Coding keyword matching is **substring-based** in v1 — `function` matches `functional`, `error` matches `terror`. If you need stricter matching (whole-word only, custom keyword list, custom thresholds), use explicit `[[rule]]` entries instead; rules run earlier and beat the classifier.
+
+Disable any time by setting `heuristics = false` (or removing the line) and running `/route reload`.
+
 ### Multi-provider pool (Phase 1)
 
 As of v0.15.0 Savvagent maintains a *connection pool* — you can `/connect`
