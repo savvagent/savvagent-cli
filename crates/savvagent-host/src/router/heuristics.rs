@@ -132,7 +132,7 @@ pub fn pick_for_kind(
 
 #[cfg(test)]
 mod tests {
-    use crate::router::heuristics::{classify, pick_for_kind, HeuristicKind};
+    use crate::router::heuristics::{HeuristicKind, classify, pick_for_kind};
 
     #[test]
     fn classify_returns_none_for_empty_input() {
@@ -150,7 +150,10 @@ mod tests {
 
     #[test]
     fn classify_short_factoid_respects_200_char_threshold() {
-        assert_eq!(classify("is this short?"), Some(HeuristicKind::ShortFactoid));
+        assert_eq!(
+            classify("is this short?"),
+            Some(HeuristicKind::ShortFactoid)
+        );
         // 201 chars + `?` is over the cutoff → no match.
         let long = format!("is {}?", "x".repeat(200));
         assert_eq!(classify(&long), None);
@@ -187,10 +190,7 @@ mod tests {
     fn classify_coding_beats_short_factoid_when_both_match() {
         // 24 chars, contains `?`, AND contains the keyword `debug`.
         // The more specific signal (Coding) must win.
-        assert_eq!(
-            classify("can you debug this?"),
-            Some(HeuristicKind::Coding)
-        );
+        assert_eq!(classify("can you debug this?"), Some(HeuristicKind::Coding));
     }
 
     #[test]
@@ -236,11 +236,16 @@ mod tests {
     }
 
     #[test]
-    fn pick_for_kind_short_factoid_prefers_cheap_then_free() {
-        // anthropic: opus (Premium, default + active), haiku (Cheap)
+    fn pick_for_kind_short_factoid_prefers_free_then_cheap() {
+        // anthropic exposes opus (Premium, active), haiku (Cheap), and
+        // a local (Free) model. Free wins over Cheap for short-factoid.
         let a_id = pid("anthropic");
         let a_caps = caps_with_tiers(
-            &[("opus", CostTier::Premium), ("haiku", CostTier::Cheap)],
+            &[
+                ("opus", CostTier::Premium),
+                ("haiku", CostTier::Cheap),
+                ("local", CostTier::Free),
+            ],
             0,
         );
         let providers = vec![ProviderView {
@@ -251,7 +256,7 @@ mod tests {
         let pick = pick_for_kind(HeuristicKind::ShortFactoid, &a_id, "opus", &providers)
             .expect("should pick");
         assert_eq!(pick.provider, a_id);
-        assert_eq!(pick.model, "haiku");
+        assert_eq!(pick.model, "local");
     }
 
     #[test]
@@ -271,8 +276,8 @@ mod tests {
             capabilities: &a_caps,
         }];
 
-        let pick = pick_for_kind(HeuristicKind::Coding, &a_id, "haiku", &providers)
-            .expect("should pick");
+        let pick =
+            pick_for_kind(HeuristicKind::Coding, &a_id, "haiku", &providers).expect("should pick");
         assert_eq!(pick.provider, a_id);
         assert_eq!(pick.model, "opus");
     }
@@ -374,8 +379,13 @@ mod tests {
             capabilities: &a_caps,
         }];
 
-        let pick = pick_for_kind(HeuristicKind::ShortFactoid, &a_id, "ghost-model", &providers)
-            .expect("should still pick");
+        let pick = pick_for_kind(
+            HeuristicKind::ShortFactoid,
+            &a_id,
+            "ghost-model",
+            &providers,
+        )
+        .expect("should still pick");
         assert_eq!(pick.model, "haiku");
     }
 }
