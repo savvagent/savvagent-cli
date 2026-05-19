@@ -1393,21 +1393,60 @@ fn format_rule_match(m: &savvagent_host::RuleMatch) -> String {
 /// Resolve the effective model id for `provider_id`. Precedence (highest first):
 ///   SAVVAGENT_MODEL env > ~/.savvagent/models.toml > routing.toml#default > spec.default_model.
 fn resolve_initial_model_for(spec: &ProviderSpec) -> String {
+    resolve_initial_model_for_with_caps(spec, None).0
+}
+
+/// Same as [`resolve_initial_model_for`] but validates the
+/// `routing.toml#default` step against the provider's actual capabilities
+/// when `caps` is `Some`. Returns `(model, maybe_warning)` — the warning is
+/// `Some` when `routing.toml#default` named a model that isn't in the
+/// provider's catalog and the resolver fell back to `spec.default_model`.
+/// The TUI surfaces the warning as a styled note so the user sees the
+/// mismatch instead of a vendor `ModelNotFound` error on the first turn.
+fn resolve_initial_model_for_with_caps(
+    spec: &ProviderSpec,
+    caps: Option<&savvagent_host::capabilities::ProviderCapabilities>,
+) -> (String, Option<String>) {
     if let Ok(env_model) = std::env::var("SAVVAGENT_MODEL")
         && !env_model.is_empty()
     {
-        return env_model;
+        // SAVVAGENT_MODEL diagnostics live in legacy_model::resolve_legacy_model
+        // at bootstrap time; this path is the per-provider /connect resolution
+        // and trusts whatever the user set.
+        return (env_model, None);
     }
     let pref = models_pref::ModelsPref::load();
     if let Some(persisted) = pref.get(spec.id) {
-        return persisted.to_string();
+        // /model only writes models from the active provider's catalog, so
+        // this entry is trusted.
+        return (persisted.to_string(), None);
     }
     if let Some(d) = crate::routing_pref::load_default_pick()
         && d.provider.as_str() == spec.id
     {
-        return d.model;
+        // Validate against the provider's catalog when we have it. A typo
+        // in routing.toml#default (e.g. "anthropic/from-routing-toml")
+        // would otherwise surface as a vendor ModelNotFound on the first
+        // turn; falling back here keeps the user moving and the warning
+        // tells them where to look.
+        if let Some(c) = caps {
+            if c.model(&d.model).is_some() {
+                return (d.model, None);
+            }
+            let warning = format!(
+                "routing.toml default '{}/{}' references a model not in {}'s \
+                 catalog; falling back to '{}'. Edit ~/.savvagent/routing.toml \
+                 and run /route reload to silence this.",
+                d.provider.as_str(),
+                d.model,
+                spec.id,
+                spec.default_model,
+            );
+            return (spec.default_model.to_string(), Some(warning));
+        }
+        return (d.model, None);
     }
-    spec.default_model.to_string()
+    (spec.default_model.to_string(), None)
 }
 
 /// Update the active model on the existing host without rebuilding it.
@@ -1856,6 +1895,11 @@ async fn perform_connect(
         }
     };
 
+    // Capture capabilities before `reg` is moved into the host so the
+    // model-resolution step (step 4) can validate the resolved model
+    // against this provider's catalog.
+    let registered_caps = reg.capabilities.clone();
+
     // 3. Add to the pool, or build a first host when no host exists yet.
     //    The pool is additive — no history clear, no host replacement.
     let is_first_connect = current_host(host_slot).await.is_none();
@@ -1863,12 +1907,17 @@ async fn perform_connect(
         // No host yet — startup produced no registrations (e.g. user
         // dismissed the migration picker with startup_providers = []).
         // Build a fresh single-entry pool host.
+        let (initial_model, maybe_warning) =
+            resolve_initial_model_for_with_caps(spec, Some(&registered_caps));
+        if let Some(w) = maybe_warning {
+            app.push_note(w);
+        }
         let mut cfg = tool_bins.apply(
             HostConfig::new(
                 ProviderEndpoint::StreamableHttp {
                     url: "inproc://pool".into(),
                 },
-                resolve_initial_model_for(spec),
+                initial_model,
             )
             .with_project_root(project_root.to_path_buf())
             .with_app_version(env!("CARGO_PKG_VERSION")),
@@ -1941,15 +1990,24 @@ async fn perform_connect(
             );
         }
         app.active_provider_id = Some(spec.id);
-        app.model = resolve_initial_model_for(spec);
-        refresh_cached_models(app, host_slot).await;
+        let (model, maybe_warning) =
+            resolve_initial_model_for_with_caps(spec, Some(&registered_caps));
+        if let Some(w) = maybe_warning {
+            app.push_note(w);
+        }
+        app.model = model.clone();
+        // Note: cached_models is refreshed unconditionally below (after
+        // the should_promote block) so every successful /connect refreshes
+        // the /model picker.
         // Align the splash sandbox indicator with the newly-started host.
         if let Some(host) = current_host(host_slot).await {
             app.refresh_splash_sandbox_from_host(host.sandbox_config());
-            // Update the host's active_provider too. is_first_connect=true
-            // built a fresh host with this provider as the only pool entry
-            // (already active), so set_active_provider is a no-op there;
-            // the drift-repair branch is where it matters.
+            // Update the host's active_provider AND current_model. The
+            // is_first_connect=true branch built a fresh host with the
+            // resolved model already set, so set_active_provider /
+            // set_model are no-ops there; the drift-repair branch is
+            // where both matter (the old host's current_model may still
+            // be the stale value from startup).
             if let Ok(host_pid) = savvagent_protocol::ProviderId::new(spec.id) {
                 if let Err(err) = host.set_active_provider(&host_pid).await {
                     tracing::warn!(
@@ -1959,6 +2017,7 @@ async fn perform_connect(
                     );
                 }
             }
+            host.set_model(model).await;
         }
         // Tell provider plugins to flip their active marker.
         if let Ok(pid) = savvagent_plugin::ProviderId::new(spec.id) {
@@ -1973,6 +2032,12 @@ async fn perform_connect(
             }
         }
     }
+    // Refresh the `/model` picker on every successful connect (not just
+    // promotion). Pre-fix this was nested inside the should_promote branch,
+    // so the second `/connect` (where the active provider stays put) added
+    // a provider to the pool whose models never made it into the picker —
+    // `/model` looked stale or empty depending on what was cached before.
+    refresh_cached_models(app, host_slot).await;
     app.push_note(rust_i18n::t!("notes.connected-to", name = spec.display_name).to_string());
 
     // 5. Dispatch ProviderRegistered + Connect for plugin subscribers.
@@ -3391,5 +3456,80 @@ anthropic = "from-models-toml"
         // No models.toml, no routing.toml, no env — spec wins.
         let got = resolve_initial_model_for(&anthropic_spec());
         assert_eq!(got, "claude-haiku-4-5");
+    }
+
+    fn caps_for(models: &[&str], default: &str) -> savvagent_host::ProviderCapabilities {
+        use savvagent_host::capabilities::{CostTier, ModelCapabilities, ProviderCapabilities};
+        ProviderCapabilities::new(
+            models
+                .iter()
+                .map(|m| ModelCapabilities {
+                    id: (*m).into(),
+                    display_name: (*m).into(),
+                    supports_vision: false,
+                    supports_audio: false,
+                    context_window: 0,
+                    cost_tier: CostTier::Standard,
+                })
+                .collect(),
+            default.into(),
+        )
+        .expect("valid caps")
+    }
+
+    #[test]
+    fn routing_toml_default_falls_back_when_model_not_in_catalog() {
+        // Reproduces the rollup-blocker: user had
+        // `default = "anthropic/from-routing-toml"` in routing.toml from
+        // dogfood testing. Pre-fix the resolver returned that string,
+        // Anthropic returned ModelNotFound on the first turn. Post-fix
+        // the resolver falls back to spec.default_model and returns a
+        // warning naming the offending entry.
+        let _lock = HOME_LOCK.lock().unwrap();
+        let _home = HomeGuard::new();
+        clear_env();
+        write_under_home("routing.toml", r#"default = "anthropic/from-routing-toml""#);
+
+        let caps = caps_for(&["claude-haiku-4-5", "claude-opus-4-7"], "claude-haiku-4-5");
+        let (model, warning) = resolve_initial_model_for_with_caps(&anthropic_spec(), Some(&caps));
+        assert_eq!(
+            model, "claude-haiku-4-5",
+            "should fall back to spec default"
+        );
+        let w = warning.expect("warning must be surfaced");
+        assert!(
+            w.contains("from-routing-toml") && w.contains("/route reload"),
+            "warning must name the offending value + tell the user how to fix it; got: {w}"
+        );
+    }
+
+    #[test]
+    fn routing_toml_default_passes_through_when_model_is_in_catalog() {
+        // The happy path: routing.toml#default names a real model on the
+        // provider. Resolver returns it as-is with no warning.
+        let _lock = HOME_LOCK.lock().unwrap();
+        let _home = HomeGuard::new();
+        clear_env();
+        write_under_home("routing.toml", r#"default = "anthropic/claude-opus-4-7""#);
+
+        let caps = caps_for(&["claude-haiku-4-5", "claude-opus-4-7"], "claude-haiku-4-5");
+        let (model, warning) = resolve_initial_model_for_with_caps(&anthropic_spec(), Some(&caps));
+        assert_eq!(model, "claude-opus-4-7");
+        assert!(warning.is_none(), "no warning expected; got {warning:?}");
+    }
+
+    #[test]
+    fn caps_none_preserves_pre_fix_passthrough_behavior() {
+        // When `caps` is None (e.g. early-startup paths that don't have a
+        // ProviderRegistration yet), the resolver must not be stricter
+        // than before — it returns whatever routing.toml says.
+        let _lock = HOME_LOCK.lock().unwrap();
+        let _home = HomeGuard::new();
+        clear_env();
+        write_under_home("routing.toml", r#"default = "anthropic/from-routing-toml""#);
+
+        let (model, warning) = resolve_initial_model_for_with_caps(&anthropic_spec(), None);
+        assert_eq!(model, "from-routing-toml");
+        assert!(warning.is_none());
     }
 }
