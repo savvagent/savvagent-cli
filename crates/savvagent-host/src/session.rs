@@ -616,7 +616,13 @@ impl Host {
                     capabilities: entry.capabilities(),
                 })
                 .collect();
-            crate::router::Router::pick(parsed.override_, &views, &active_id, &active_model)
+            crate::router::Router::pick(
+                parsed.override_,
+                &views,
+                &active_id,
+                &active_model,
+                crate::router::modality::RequiredModalities::default(),
+            )
             // pool guard dropped at end of this block
         };
 
