@@ -10,12 +10,13 @@
 //! - Layer 1 — `@provider[:model]` override (Override reason)
 //! - Layer 2 — required-modality redirect (Modality reason)
 //! - Layer 3 — user rules from `~/.savvagent/routing.toml` (Rule reason)
-//! - Layer 4 — heuristic classifier (not yet implemented)
+//! - Layer 4 — heuristic classifier, opt-in via `heuristics = true` in
+//!             routing.toml (Heuristic reason)
 //! - Layer 5 — fall through to the active provider + its default model
 //!   (Default reason)
 //!
-//! `RoutingReason` is `#[non_exhaustive]` so adding the heuristic
-//! variant later is additive, not breaking.
+//! `RoutingReason` is `#[non_exhaustive]` so adding new heuristic kinds
+//! later is additive, not breaking.
 
 use savvagent_protocol::ProviderId;
 
@@ -50,6 +51,11 @@ pub enum RoutingReason {
         /// The matching rule's `name` field.
         name: String,
     },
+    /// The opt-in heuristic classifier matched this turn. (Layer 4.)
+    Heuristic {
+        /// Which heuristic category fired (short factoid vs. coding).
+        kind: crate::router::heuristics::HeuristicKind,
+    },
     /// No higher-priority layer matched; fell through to the active
     /// provider + its default model.
     Default,
@@ -61,6 +67,7 @@ impl std::fmt::Display for RoutingReason {
             RoutingReason::Override => f.write_str("Override"),
             RoutingReason::Modality { kind } => write!(f, "Modality({kind})"),
             RoutingReason::Rule { name } => write!(f, "Rule({name})"),
+            RoutingReason::Heuristic { kind } => write!(f, "Heuristic({kind})"),
             RoutingReason::Default => f.write_str("Default"),
         }
     }
@@ -750,5 +757,18 @@ mod tests {
             "anything",
         );
         assert_eq!(r.reason, RoutingReason::Default);
+    }
+
+    #[test]
+    fn routing_reason_heuristic_displays() {
+        use crate::router::heuristics::HeuristicKind;
+        let r = RoutingReason::Heuristic {
+            kind: HeuristicKind::ShortFactoid,
+        };
+        assert_eq!(format!("{r}"), "Heuristic(short)");
+        let r = RoutingReason::Heuristic {
+            kind: HeuristicKind::Coding,
+        };
+        assert_eq!(format!("{r}"), "Heuristic(coding)");
     }
 }
