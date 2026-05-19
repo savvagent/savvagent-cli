@@ -130,16 +130,12 @@ fn reg(
     ProviderRegistration::new(
         ProviderId::new(id).unwrap(),
         display,
-        Arc::new(RecordingProvider { seen_model: seen })
-            as Arc<dyn ProviderClient + Send + Sync>,
+        Arc::new(RecordingProvider { seen_model: seen }) as Arc<dyn ProviderClient + Send + Sync>,
         caps,
     )
 }
 
-async fn collect_events(
-    rx: &mut mpsc::Receiver<TurnEvent>,
-    timeout_ms: u64,
-) -> Vec<TurnEvent> {
+async fn collect_events(rx: &mut mpsc::Receiver<TurnEvent>, timeout_ms: u64) -> Vec<TurnEvent> {
     let mut out = Vec::new();
     while let Ok(Some(ev)) =
         tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), rx.recv()).await

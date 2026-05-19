@@ -121,12 +121,8 @@ impl Router {
 
         // Modality layer.
         if let Some(kind) = required.primary_kind()
-            && let Some((p, m)) = modality::pick_vision_capable(
-                required,
-                active_provider,
-                active_model,
-                providers,
-            )
+            && let Some((p, m)) =
+                modality::pick_vision_capable(required, active_provider, active_model, providers)
         {
             return RoutingDecision {
                 provider_id: p,

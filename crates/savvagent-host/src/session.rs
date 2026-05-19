@@ -688,7 +688,10 @@ impl Host {
         // model that lacks vision), surface a styled note so the user can
         // see why the next call may fail.
         if required.has_image
-            && !matches!(decision.reason, crate::router::RoutingReason::Modality { .. })
+            && !matches!(
+                decision.reason,
+                crate::router::RoutingReason::Modality { .. }
+            )
         {
             let lacks_vision = {
                 let pool = self.pool.read().await;
@@ -697,9 +700,7 @@ impl Host {
                     .map(|m| !m.supports_vision)
                     .unwrap_or(false)
             };
-            if lacks_vision
-                && let Some(tx) = &events
-            {
+            if lacks_vision && let Some(tx) = &events {
                 let message = format!(
                     "{}/{} doesn't support image input; the request may fail. \
                      Connect a vision-capable model or use @<provider:model> \
