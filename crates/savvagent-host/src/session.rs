@@ -518,7 +518,9 @@ impl Host {
     /// streaming events are emitted; use [`Self::run_turn_streaming`] for the
     /// TUI's incremental-render path.
     pub async fn run_turn(&self, user_input: impl Into<String>) -> Result<TurnOutcome, HostError> {
-        self.run_turn_inner(user_input.into(), None).await
+        let text = user_input.into();
+        self.run_turn_inner(vec![ContentBlock::Text { text }], None)
+            .await
     }
 
     /// Run a turn while emitting [`TurnEvent`]s onto `events`. Token-level
@@ -529,7 +531,9 @@ impl Host {
         user_input: impl Into<String>,
         events: mpsc::Sender<TurnEvent>,
     ) -> Result<TurnOutcome, HostError> {
-        self.run_turn_inner(user_input.into(), Some(events)).await
+        let text = user_input.into();
+        self.run_turn_inner(vec![ContentBlock::Text { text }], Some(events))
+            .await
     }
 
     /// Ask the active provider for its model list.
@@ -559,7 +563,7 @@ impl Host {
 
     async fn run_turn_inner(
         &self,
-        user_input: String,
+        user_content: Vec<savvagent_protocol::ContentBlock>,
         events: Option<mpsc::Sender<TurnEvent>>,
     ) -> Result<TurnOutcome, HostError> {
         // Publish the events channel (if any) for the lazy bash-net
@@ -577,7 +581,11 @@ impl Host {
         // Parse the `@`-prefix against the currently-connected pool.
         // Aliases are flattened across every connected provider so
         // `@opus` works even if the active provider is Gemini.
-        let parsed = {
+        //
+        // Phase 4: if the leading block is text, run the @-prefix parser
+        // on it and replace it with the stripped body. Non-text leading
+        // blocks (e.g. image-first turns) skip @-parsing entirely.
+        let (override_, user_content) = {
             let pool = self.pool.read().await;
             let views: Vec<crate::router::ProviderView<'_>> = pool
                 .iter()
@@ -590,13 +598,23 @@ impl Host {
                 .values()
                 .flat_map(|entry| entry.aliases().to_vec())
                 .collect();
-            crate::router::prefix::parse_at_prefix(&user_input, &views, &aliases)
+
+            let mut blocks = user_content;
+            let mut override_ = None;
+            if let Some(ContentBlock::Text { text }) = blocks.first() {
+                let parsed = crate::router::prefix::parse_at_prefix(text, &views, &aliases);
+                override_ = parsed.override_;
+                if let Some(ContentBlock::Text { text }) = blocks.first_mut() {
+                    *text = parsed.body;
+                }
+            }
+            (override_, blocks)
             // Pool read guard dropped at end of this block.
         };
 
         messages.push(Message {
             role: Role::User,
-            content: vec![ContentBlock::Text { text: parsed.body }],
+            content: user_content,
         });
 
         // Run the router. The decision pins the provider + model for the
@@ -618,7 +636,7 @@ impl Host {
                 })
                 .collect();
             crate::router::Router::pick(
-                parsed.override_,
+                override_,
                 &views,
                 &active_id,
                 &active_model,
