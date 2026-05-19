@@ -141,6 +141,13 @@ pub struct PendingModelChange {
     pub persist: bool,
 }
 
+/// Queued routing-rules action emitted by `Effect::ReloadRoutingRules`
+/// or `Effect::ShowRoutingRules`. The `run_app` loop drains these
+/// flags after each `apply_effects` call because `apply_effects`
+/// doesn't have host access.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PendingRoutingAction;
+
 /// Snapshot of a pending [`TurnEvent::PermissionRequested`] used to render
 /// the modal and resolve the host's outstanding `oneshot`.
 #[derive(Debug, Clone)]
@@ -434,6 +441,13 @@ pub struct App {
     /// which owns the `host_slot` / `project_root` / `tool_bins` the
     /// effect-application layer doesn't have access to.
     pub pending_model_change: Option<PendingModelChange>,
+
+    /// Queued by `Effect::ReloadRoutingRules`; drained by
+    /// `main.rs::apply_pending_routing_reload`.
+    pub pending_routing_reload: Option<PendingRoutingAction>,
+    /// Queued by `Effect::ShowRoutingRules`; drained by
+    /// `main.rs::apply_pending_routing_show`.
+    pub pending_routing_show: Option<PendingRoutingAction>,
 }
 
 impl App {
@@ -504,6 +518,8 @@ impl App {
             registered_providers: std::collections::HashMap::new(),
             cached_models: Vec::new(),
             pending_model_change: None,
+            pending_routing_reload: None,
+            pending_routing_show: None,
         };
         app.refresh_commands();
         app
@@ -1173,6 +1189,33 @@ impl App {
     pub fn push_styled_note(&mut self, line: savvagent_plugin::StyledLine) {
         let text: String = line.spans.iter().map(|s| s.text.as_str()).collect();
         self.push_note(text);
+    }
+
+    /// Scan the entries backwards for the most recent `Entry::RouteBadge`
+    /// and parse it into `(provider, model, reason)`. The badge format is
+    /// `"provider/model — Reason"` (see `apply_turn_event`'s
+    /// `RouteSelected` arm at line 543). Returns `None` when no badge is
+    /// present in this session yet, or when the format can't be parsed.
+    pub fn most_recent_routing_decision(&self) -> Option<(String, String, String)> {
+        let badge = self.entries.iter().rev().find_map(|e| match e {
+            Entry::RouteBadge(s) => Some(s.as_str()),
+            _ => None,
+        })?;
+        let (left, reason) = badge.split_once(" — ")?;
+        let (provider, model) = left.split_once('/')?;
+        Some((provider.to_string(), model.to_string(), reason.to_string()))
+    }
+
+    /// Owning vec of provider ids currently in the host pool. Source:
+    /// the field populated by the `RegisterProvider` arm of
+    /// `apply_effects` (effects.rs:95-149). The real field name is
+    /// `registered_providers: HashMap<String, Box<dyn ProviderClient>>`
+    /// (around line 421); keys are the stable provider-id strings.
+    pub fn connected_provider_ids(&self) -> Vec<savvagent_protocol::ProviderId> {
+        self.registered_providers
+            .keys()
+            .filter_map(|s| savvagent_protocol::ProviderId::new(s).ok())
+            .collect()
     }
 
     /// Clear the conversation log.
@@ -1847,5 +1890,24 @@ mod tests {
         );
 
         rust_i18n::set_locale("en");
+    }
+
+    #[test]
+    fn most_recent_routing_decision_parses_badge() {
+        let mut app = fresh_app();
+        app.entries.push(Entry::RouteBadge(
+            "anthropic/claude-opus-4-7 — Override".into(),
+        ));
+        app.entries.push(Entry::Assistant("hi".into()));
+        let got = app.most_recent_routing_decision().expect("parses");
+        assert_eq!(got.0, "anthropic");
+        assert_eq!(got.1, "claude-opus-4-7");
+        assert_eq!(got.2, "Override");
+    }
+
+    #[test]
+    fn most_recent_routing_decision_none_when_no_badge() {
+        let app = fresh_app();
+        assert!(app.most_recent_routing_decision().is_none());
     }
 }

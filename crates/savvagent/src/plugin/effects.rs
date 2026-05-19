@@ -7,7 +7,7 @@ use std::collections::HashMap;
 
 use savvagent_plugin::{Effect, HostEvent, PluginId, PluginKind, ScreenArgs};
 
-use crate::app::{App, PendingModelChange};
+use crate::app::{App, PendingModelChange, PendingRoutingAction};
 use crate::plugin::builtin::command_palette::screen::{PaletteCommand, PaletteScreen};
 use crate::plugin::builtin::plugins_manager::screen::{PluginRow, PluginsManagerScreen};
 use crate::plugin::builtin::plugins_manager::{persistence, summarize_contributions};
@@ -91,6 +91,12 @@ async fn apply_one(app: &mut App, eff: Effect, depth: u8) -> Result<(), String> 
             // `apply_effects` doesn't receive `host_slot`, `project_root`,
             // or `tool_bins`.
             app.pending_model_change = Some(PendingModelChange { id, persist });
+        }
+        Effect::ReloadRoutingRules => {
+            app.pending_routing_reload = Some(PendingRoutingAction);
+        }
+        Effect::ShowRoutingRules => {
+            app.pending_routing_show = Some(PendingRoutingAction);
         }
         Effect::RegisterProvider { id, display_name } => {
             // Map ProviderId → owning PluginId by convention. Every built-in

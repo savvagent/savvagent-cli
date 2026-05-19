@@ -685,6 +685,8 @@ async fn dispatch_slash_command(
                     ));
                 }
                 apply_pending_model_change(app, host_slot, project_root, tool_bins).await;
+                apply_pending_routing_reload(app, host_slot).await;
+                apply_pending_routing_show(app, host_slot).await;
                 return;
             }
             Err(crate::plugin::slash::SlashError::Unknown(_)) => {
@@ -1249,6 +1251,126 @@ async fn apply_pending_model_change(
                 );
             }
         }
+    }
+}
+
+/// Drain `app.pending_routing_reload` (set by `Effect::ReloadRoutingRules`)
+/// and reload `~/.savvagent/routing.toml` via the host. No-op when nothing
+/// is queued. Mirrors `apply_pending_model_change`'s drain pattern.
+async fn apply_pending_routing_reload(app: &mut App, host_slot: &HostSlot) {
+    if app.pending_routing_reload.take().is_none() {
+        return;
+    }
+    let Some(host) = current_host(host_slot).await else {
+        app.push_note(
+            rust_i18n::t!("routing.reload-failed", err = "host not connected yet").to_string(),
+        );
+        return;
+    };
+    match host.reload_routing_rules().await {
+        Ok(count) => {
+            app.push_note(rust_i18n::t!("routing.reloaded", count = count.to_string()).to_string());
+        }
+        Err(e) => {
+            app.push_note(rust_i18n::t!("routing.reload-failed", err = e.to_string()).to_string());
+        }
+    }
+}
+
+/// Drain `app.pending_routing_show` (set by `Effect::ShowRoutingRules`)
+/// and render the routing-rules summary. No-op when nothing is queued.
+async fn apply_pending_routing_show(app: &mut App, host_slot: &HostSlot) {
+    if app.pending_routing_show.take().is_none() {
+        return;
+    }
+    let Some(host) = current_host(host_slot).await else {
+        app.push_note(rust_i18n::t!("routing.show-no-rules").to_string());
+        return;
+    };
+    let rules = host.routing_rules_snapshot().await;
+    render_routing_show(app, &rules);
+}
+
+/// Render `/route show` output as plain styled notes onto `App`. Pure
+/// function over the snapshot — no further host access required.
+fn render_routing_show(app: &mut App, rules: &savvagent_host::RoutingRules) {
+    if rules.rules.is_empty() {
+        app.push_note(rust_i18n::t!("routing.show-no-rules").to_string());
+    } else {
+        app.push_note(rust_i18n::t!("routing.show-header").to_string());
+        let connected: Vec<savvagent_protocol::ProviderId> = app.connected_provider_ids();
+        for (i, rule) in rules.rules.iter().enumerate() {
+            let idx = i + 1;
+            let match_desc = format_rule_match(&rule.match_);
+            let key = if connected.contains(&rule.use_.provider) {
+                "routing.show-rule-line"
+            } else {
+                "routing.show-rule-skipped"
+            };
+            let line = rust_i18n::t!(
+                key,
+                index = idx.to_string(),
+                name = rule.name.as_str(),
+                r#match = match_desc,
+                provider = rule.use_.provider.as_str(),
+                model = rule.use_.model.as_str(),
+            )
+            .to_string();
+            app.push_note(line);
+        }
+    }
+    match &rules.default {
+        Some(d) => app.push_note(
+            rust_i18n::t!(
+                "routing.show-default",
+                provider = d.provider.as_str(),
+                model = d.model.as_str()
+            )
+            .to_string(),
+        ),
+        None => app.push_note(rust_i18n::t!("routing.show-no-default").to_string()),
+    }
+    if rules.heuristics {
+        app.push_note(rust_i18n::t!("routing.show-heuristics-pending").to_string());
+    }
+    match app.most_recent_routing_decision() {
+        Some((provider, model, reason)) => app.push_note(
+            rust_i18n::t!(
+                "routing.show-last",
+                provider = provider,
+                model = model,
+                reason = reason
+            )
+            .to_string(),
+        ),
+        None => app.push_note(rust_i18n::t!("routing.show-no-last").to_string()),
+    }
+}
+
+fn format_rule_match(m: &savvagent_host::RuleMatch) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(b) = m.has_image {
+        parts.push(format!("has_image={b}"));
+    }
+    if let Some(b) = m.has_pdf {
+        parts.push(format!("has_pdf={b}"));
+    }
+    if let Some(b) = m.has_audio {
+        parts.push(format!("has_audio={b}"));
+    }
+    if !m.keywords.is_empty() {
+        parts.push(format!("keywords=[{}]", m.keywords.join(",")));
+    }
+    if let Some(n) = m.max_input_chars {
+        parts.push(format!("max_input_chars={n}"));
+    }
+    if let Some(n) = m.min_input_chars {
+        parts.push(format!("min_input_chars={n}"));
+    }
+    if parts.is_empty() {
+        "<any>".to_string()
+    } else {
+        parts.join(", ")
     }
 }
 
@@ -2285,6 +2407,8 @@ async fn run_app(
                 tracing::warn!(error = %e, "apply_effects from screen failed");
             }
             apply_pending_model_change(app, &host_slot, &project_root, &tool_bins).await;
+            apply_pending_routing_reload(app, &host_slot).await;
+            apply_pending_routing_show(app, &host_slot).await;
             continue;
         }
 
@@ -2436,6 +2560,8 @@ async fn run_app(
                                         &tool_bins,
                                     )
                                     .await;
+                                    apply_pending_routing_reload(app, &host_slot).await;
+                                    apply_pending_routing_show(app, &host_slot).await;
                                     handled = true;
                                 }
                             }
