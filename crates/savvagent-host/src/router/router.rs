@@ -44,6 +44,11 @@ pub enum RoutingReason {
         /// Which modality forced the redirect (e.g. `Image`).
         kind: modality::RequiredModalityKind,
     },
+    /// A user-defined rule from `routing.toml` matched this turn.
+    Rule {
+        /// The matching rule's `name` field.
+        name: String,
+    },
     /// No higher-priority layer matched; fell through to the active
     /// provider + its default model.
     Default,
@@ -54,6 +59,7 @@ impl std::fmt::Display for RoutingReason {
         match self {
             RoutingReason::Override => f.write_str("Override"),
             RoutingReason::Modality { kind } => write!(f, "Modality({kind})"),
+            RoutingReason::Rule { name } => write!(f, "Rule({name})"),
             RoutingReason::Default => f.write_str("Default"),
         }
     }
@@ -482,5 +488,13 @@ mod tests {
         assert_eq!(r.provider_id, a_id);
         assert_eq!(r.model_id, "haiku");
         assert_eq!(r.reason, RoutingReason::Default);
+    }
+
+    #[test]
+    fn routing_reason_rule_displays() {
+        let r = RoutingReason::Rule {
+            name: "deep-reasoning".to_string(),
+        };
+        assert_eq!(format!("{r}"), "Rule(deep-reasoning)");
     }
 }
