@@ -2252,6 +2252,17 @@ async fn run_app(
         }
     }
 
+    // Populate `App::cached_models` from the bootstrap host's pool so the
+    // `/model` picker has rows the moment the user opens it. Previously
+    // `cached_models` started empty and was only refreshed by /connect,
+    // /use, /model, and perform_model_change — so opening `/model` before
+    // any of those ran (the common "I just launched the TUI, providers
+    // came up via keyring auto-connect" case) showed the "no models
+    // available" placeholder even though the host had a fully-populated
+    // pool. No-op when there's no host (e.g. bootstrap returned None
+    // because Fix A's startup_connect filter emptied the pool).
+    refresh_cached_models(app, &host_slot).await;
+
     loop {
         // Fire ContextSizeChanged whenever the chars/4 estimate moves so
         // home_footer (and any future status-line subscriber) can refresh
