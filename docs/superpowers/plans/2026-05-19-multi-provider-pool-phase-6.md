@@ -74,7 +74,7 @@ pub use rules::{
 };
 ```
 
-Also update the module-level docstring comment above the imports if present — change `override → modality → rules → default` to `override → modality → rules → heuristic → default`.
+The module-level docstring at the top of `mod.rs` already reads `override → modality → rules → heuristic → default` (Phase 5 forward-declared it). No edit needed there; if the wording differs in the future, update it to match.
 
 - [ ] **Step 2: Write the failing tests**
 
@@ -516,17 +516,7 @@ pub fn pick_for_kind(
 }
 ```
 
-**Note on `models()` accessor:** `ProviderCapabilities` exposes its models through a `model(id)` accessor and a `models()` slice accessor. Check `crates/savvagent-host/src/capabilities.rs` and confirm both are public; if `models()` does not exist, add a `pub fn models(&self) -> &[ModelCapabilities]` accessor in a separate one-line edit and include it in this commit. (The existing `model(id)` accessor is used by Phase 4's modality picker — keep it.)
-
-If `models()` does not already exist, add it in `crates/savvagent-host/src/capabilities.rs` right after `model(&self, …)`:
-
-```rust
-    /// Borrow the full models slice. Used by routing layers that need to
-    /// iterate every model on a provider (e.g. the heuristic classifier).
-    pub fn models(&self) -> &[ModelCapabilities] {
-        &self.models
-    }
-```
+**Note on `models()` accessor:** `ProviderCapabilities::models() -> &[ModelCapabilities]` is **already present** at `crates/savvagent-host/src/capabilities.rs:137`. No edit to `capabilities.rs` is needed; the `git add … capabilities.rs` in Step 5 is therefore a no-op (and the file should not appear in the commit).
 
 - [ ] **Step 4: Run tests to verify they pass**
 
@@ -537,7 +527,7 @@ Expected: all 14 tests pass (7 from Task 1 + 7 new).
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/savvagent-host/src/router/heuristics.rs crates/savvagent-host/src/capabilities.rs
+git add crates/savvagent-host/src/router/heuristics.rs
 git commit -m "feat(host): heuristics::pick_for_kind + tier-priority picker (Phase 6)"
 ```
 
@@ -624,7 +614,7 @@ impl std::fmt::Display for RoutingReason {
 }
 ```
 
-Update the doc comment at the top of the file to reflect the no-longer-unimplemented Layer 4:
+Update the doc comment at the top of the file (`router.rs` lines 1-18) to reflect the no-longer-unimplemented Layer 4. The existing block reads `Layer 4 — heuristic classifier (not yet implemented)`; replace the whole layers section with:
 
 ```rust
 //! Layers (first match wins):
@@ -1393,7 +1383,7 @@ Append to the `render_routing_show_tests` module in `crates/savvagent/src/main.r
     fn heuristic_active_line_shown_when_heuristics_true() {
         // Lock the locale to en so substring assertions are stable in
         // parallel test runs (per feedback_test_locale_isolation).
-        let _g = crate::tests::HOME_LOCK.lock().expect("home lock");
+        let _g = crate::test_helpers::HOME_LOCK.lock().expect("home lock");
         rust_i18n::set_locale("en");
 
         let mut app = build_app();
@@ -1420,7 +1410,7 @@ Append to the `render_routing_show_tests` module in `crates/savvagent/src/main.r
 
     #[test]
     fn heuristic_line_omitted_when_heuristics_false() {
-        let _g = crate::tests::HOME_LOCK.lock().expect("home lock");
+        let _g = crate::test_helpers::HOME_LOCK.lock().expect("home lock");
         rust_i18n::set_locale("en");
 
         let mut app = build_app();
@@ -1441,13 +1431,7 @@ Append to the `render_routing_show_tests` module in `crates/savvagent/src/main.r
     }
 ```
 
-**Confirm `HOME_LOCK` location.** Phase 5 tests reference `crate::tests::HOME_LOCK` from inside `render_routing_show_tests`. If grep shows it lives elsewhere (e.g. `crate::ui::tests::HOME_LOCK`), update the path. Run:
-
-```bash
-grep -n "HOME_LOCK" crates/savvagent/src/main.rs crates/savvagent/src/tests/ 2>/dev/null | head
-```
-
-…and adjust the `_g = …` line accordingly.
+`HOME_LOCK` lives at `crate::test_helpers::HOME_LOCK` (defined in `crates/savvagent/src/test_helpers.rs`). The test code above already uses that path; no further hunting needed.
 
 - [ ] **Step 2: Run tests to verify they fail**
 
