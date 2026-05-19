@@ -1241,13 +1241,15 @@ git commit -m "feat(host): wire routing_rules into Host + Router::pick"
 
 ---
 
-## Task 5: `Effect` variants + `apply_effects` handlers
+## Task 5: `Effect` variants + pending-flag drain (host-touching surface)
 
 **Files:**
 - Modify: `crates/savvagent-plugin/src/effect.rs`
-- Modify: `crates/savvagent/src/plugin/effects.rs`
+- Modify: `crates/savvagent/src/app.rs` (add pending flags + helpers)
+- Modify: `crates/savvagent/src/plugin/effects.rs` (set pending flags)
+- Modify: `crates/savvagent/src/main.rs` (add drain functions; wire into `run_app`)
 
-Add the two new effect variants and their runtime handlers. The handlers carry the host snapshot reads and the styled-line construction.
+**Important:** `pub async fn apply_effects(app: &mut App, effects: Vec<Effect>)` has no `host_slot` parameter — verified at `crates/savvagent/src/plugin/effects.rs:32`, and the file's own comment at lines 91-93 documents this for `Effect::SetActiveModel`: "`apply_effects` doesn't receive `host_slot`, `project_root`, or `tool_bins`." The canonical pattern is therefore to queue a flag on `App` and have `main.rs::run_app` drain it (see `app.pending_model_change` + `main.rs::apply_pending_model_change` at `main.rs:1138`). Phase 5 mirrors that pattern for routing.
 
 - [ ] **Step 1: Add `Effect` variants**
 
@@ -1255,12 +1257,13 @@ In `crates/savvagent-plugin/src/effect.rs`, inside `pub enum Effect { ... }`, ad
 
 ```rust
     /// Re-read `~/.savvagent/routing.toml` and swap the host's stored
-    /// rules. The runtime emits a `PushNote` with the rule count or
-    /// the parse error after applying.
+    /// rules. Sets `App::pending_routing_reload` so `main.rs::run_app`
+    /// can drain it with host access (see `Effect::SetActiveModel` for
+    /// the canonical pattern this mirrors).
     ReloadRoutingRules,
     /// Print the active routing rules and the most recent decision as
-    /// styled notes. The runtime sources the most recent decision from
-    /// `App::log`'s transcript entries.
+    /// styled notes. Sets `App::pending_routing_show` for the same
+    /// reason as `ReloadRoutingRules`.
     ShowRoutingRules,
 ```
 
@@ -1281,54 +1284,148 @@ Add unit tests at the bottom of the same file's `mod tests`:
 Run: `cargo test -p savvagent-plugin --lib effect::tests`
 Expected: PASS.
 
-- [ ] **Step 2: Find `apply_effects` and add handler arms**
+- [ ] **Step 2: Add the pending flags + helpers on `App`**
 
-Open `crates/savvagent/src/plugin/effects.rs`. Locate the `match effect { ... }` block inside `pub async fn apply_effects(...)`. Add two arms:
+In `crates/savvagent/src/app.rs`, find the `PendingModelChange` definition (line 137) and add a unit-struct sibling immediately below it:
+
+```rust
+/// Queued routing-rules action emitted by `Effect::ReloadRoutingRules`
+/// or `Effect::ShowRoutingRules`. The `run_app` loop drains these
+/// flags after each `apply_effects` call because `apply_effects`
+/// doesn't have host access.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PendingRoutingAction;
+```
+
+Find the `App { ... }` struct body and add two fields near `pending_model_change`:
+
+```rust
+    /// Queued by `Effect::ReloadRoutingRules`; drained by
+    /// `main.rs::apply_pending_routing_reload`.
+    pub pending_routing_reload: Option<PendingRoutingAction>,
+    /// Queued by `Effect::ShowRoutingRules`; drained by
+    /// `main.rs::apply_pending_routing_show`.
+    pub pending_routing_show: Option<PendingRoutingAction>,
+```
+
+Initialize them in `App::new` (alongside `pending_model_change: None,`):
+
+```rust
+            pending_routing_reload: None,
+            pending_routing_show: None,
+```
+
+Now add a helper for parsing routing badges. After `push_styled_note` (around line 1173), add:
+
+```rust
+    /// Scan the entries backwards for the most recent `Entry::RouteBadge`
+    /// and parse it into `(provider, model, reason)`. The badge format is
+    /// `"provider/model — Reason"` (see `apply_turn_event`'s
+    /// `RouteSelected` arm at line 543). Returns `None` when no badge is
+    /// present in this session yet, or when the format can't be parsed.
+    pub fn most_recent_routing_decision(&self) -> Option<(String, String, String)> {
+        let badge = self.entries.iter().rev().find_map(|e| match e {
+            Entry::RouteBadge(s) => Some(s.as_str()),
+            _ => None,
+        })?;
+        let (left, reason) = badge.split_once(" — ")?;
+        let (provider, model) = left.split_once('/')?;
+        Some((provider.to_string(), model.to_string(), reason.to_string()))
+    }
+```
+
+Add a tiny unit test in the same file's `#[cfg(test)] mod tests` near other `Entry`-related tests:
+
+```rust
+    #[test]
+    fn most_recent_routing_decision_parses_badge() {
+        let mut app = App::new_for_test();
+        app.entries
+            .push(Entry::RouteBadge("anthropic/claude-opus-4-7 — Override".into()));
+        app.entries.push(Entry::Assistant("hi".into()));
+        let got = app.most_recent_routing_decision().expect("parses");
+        assert_eq!(got.0, "anthropic");
+        assert_eq!(got.1, "claude-opus-4-7");
+        assert_eq!(got.2, "Override");
+    }
+
+    #[test]
+    fn most_recent_routing_decision_none_when_no_badge() {
+        let app = App::new_for_test();
+        assert!(app.most_recent_routing_decision().is_none());
+    }
+```
+
+(If `App::new_for_test` doesn't exist, search the file for an existing test constructor — likely `App::new()` with default args.)
+
+- [ ] **Step 3: Implement the effect handlers in `apply_effects` (flag-set only)**
+
+In `crates/savvagent/src/plugin/effects.rs`, locate the `match eff { ... }` block in `apply_one` (around line 48). Add two arms — both simply set the pending flag, matching the `Effect::SetActiveModel` pattern at lines 88-94:
 
 ```rust
         Effect::ReloadRoutingRules => {
-            let Some(host) = current_host(host_slot).await else {
-                app.push_log_entry(crate::Entry::Note(rust_i18n::t!("routing.reload-failed", err = "no host yet").to_string()));
-                return Ok(());
-            };
-            match host.reload_routing_rules().await {
-                Ok(count) => {
-                    let msg = rust_i18n::t!("routing.reloaded", count = count.to_string()).to_string();
-                    app.push_log_entry(crate::Entry::Note(msg));
-                }
-                Err(e) => {
-                    let msg = rust_i18n::t!("routing.reload-failed", err = e.to_string()).to_string();
-                    app.push_log_entry(crate::Entry::Note(msg));
-                }
-            }
+            app.pending_routing_reload = Some(crate::app::PendingRoutingAction);
         }
         Effect::ShowRoutingRules => {
-            let Some(host) = current_host(host_slot).await else {
-                app.push_log_entry(crate::Entry::Note(rust_i18n::t!("routing.show-no-rules").to_string()));
-                return Ok(());
-            };
-            let rules = host.routing_rules_snapshot().await;
-            push_routing_show(app, &rules).await;
+            app.pending_routing_show = Some(crate::app::PendingRoutingAction);
         }
 ```
 
-Then add a helper function in the same file (top-level, near other helpers):
+Verify `PendingRoutingAction` is reachable via `crate::app::PendingRoutingAction` (re-export at the top of `effects.rs` if needed, mirroring how `PendingModelChange` is imported on line 10).
+
+- [ ] **Step 4: Add the drain functions in `main.rs`**
+
+In `crates/savvagent/src/main.rs`, immediately after `apply_pending_model_change` (around line 1138), add the two drain functions:
 
 ```rust
-/// Render `/route show` output as styled notes. Header + one line per
-/// rule + default line + last-decision line.
-async fn push_routing_show(app: &mut crate::App, rules: &savvagent_host::RoutingRules) {
+/// Drain `app.pending_routing_reload` (set by `Effect::ReloadRoutingRules`)
+/// and reload `~/.savvagent/routing.toml` via the host. No-op when nothing
+/// is queued. Mirrors `apply_pending_model_change`'s drain pattern.
+async fn apply_pending_routing_reload(app: &mut App, host_slot: &HostSlot) {
+    if app.pending_routing_reload.take().is_none() {
+        return;
+    }
+    let Some(host) = current_host(host_slot).await else {
+        app.push_note(
+            rust_i18n::t!("routing.reload-failed", err = "host not connected yet").to_string(),
+        );
+        return;
+    };
+    match host.reload_routing_rules().await {
+        Ok(count) => {
+            app.push_note(
+                rust_i18n::t!("routing.reloaded", count = count.to_string()).to_string(),
+            );
+        }
+        Err(e) => {
+            app.push_note(rust_i18n::t!("routing.reload-failed", err = e.to_string()).to_string());
+        }
+    }
+}
+
+/// Drain `app.pending_routing_show` (set by `Effect::ShowRoutingRules`)
+/// and render the routing-rules summary. No-op when nothing is queued.
+async fn apply_pending_routing_show(app: &mut App, host_slot: &HostSlot) {
+    if app.pending_routing_show.take().is_none() {
+        return;
+    }
+    let Some(host) = current_host(host_slot).await else {
+        app.push_note(rust_i18n::t!("routing.show-no-rules").to_string());
+        return;
+    };
+    let rules = host.routing_rules_snapshot().await;
+    render_routing_show(app, &rules);
+}
+
+/// Render `/route show` output as plain styled notes onto `App`. Pure
+/// function over the snapshot — no further host access required.
+fn render_routing_show(app: &mut App, rules: &savvagent_host::RoutingRules) {
     if rules.rules.is_empty() {
-        app.push_log_entry(crate::Entry::Note(
-            rust_i18n::t!("routing.show-no-rules").to_string(),
-        ));
-        // Fall through to print default + heuristics + last-decision.
+        app.push_note(rust_i18n::t!("routing.show-no-rules").to_string());
     } else {
-        app.push_log_entry(crate::Entry::Note(
-            rust_i18n::t!("routing.show-header").to_string(),
-        ));
+        app.push_note(rust_i18n::t!("routing.show-header").to_string());
         let connected: Vec<savvagent_protocol::ProviderId> =
-            app.pool_provider_ids().cloned().collect();
+            app.connected_provider_ids().cloned().collect();
         for (i, rule) in rules.rules.iter().enumerate() {
             let idx = i + 1;
             let match_desc = format_rule_match(&rule.match_);
@@ -1341,53 +1438,39 @@ async fn push_routing_show(app: &mut crate::App, rules: &savvagent_host::Routing
                 key,
                 index = idx.to_string(),
                 name = rule.name.as_str(),
-                match = match_desc,
+                r#match = match_desc,
                 provider = rule.use_.provider.as_str(),
                 model = rule.use_.model.as_str(),
             )
             .to_string();
-            app.push_log_entry(crate::Entry::Note(line));
+            app.push_note(line);
         }
     }
-
-    // Default line.
     match &rules.default {
-        Some(d) => {
-            let line = rust_i18n::t!(
+        Some(d) => app.push_note(
+            rust_i18n::t!(
                 "routing.show-default",
                 provider = d.provider.as_str(),
                 model = d.model.as_str()
             )
-            .to_string();
-            app.push_log_entry(crate::Entry::Note(line));
-        }
-        None => app.push_log_entry(crate::Entry::Note(
-            rust_i18n::t!("routing.show-no-default").to_string(),
-        )),
+            .to_string(),
+        ),
+        None => app.push_note(rust_i18n::t!("routing.show-no-default").to_string()),
     }
-
-    // Heuristics state.
     if rules.heuristics {
-        app.push_log_entry(crate::Entry::Note(
-            rust_i18n::t!("routing.show-heuristics-pending").to_string(),
-        ));
+        app.push_note(rust_i18n::t!("routing.show-heuristics-pending").to_string());
     }
-
-    // Last-decision line: scan App::log backwards for a routing badge.
     match app.most_recent_routing_decision() {
-        Some((provider, model, reason)) => {
-            let line = rust_i18n::t!(
+        Some((provider, model, reason)) => app.push_note(
+            rust_i18n::t!(
                 "routing.show-last",
                 provider = provider,
                 model = model,
                 reason = reason
             )
-            .to_string();
-            app.push_log_entry(crate::Entry::Note(line));
-        }
-        None => app.push_log_entry(crate::Entry::Note(
-            rust_i18n::t!("routing.show-no-last").to_string(),
-        )),
+            .to_string(),
+        ),
+        None => app.push_note(rust_i18n::t!("routing.show-no-last").to_string()),
     }
 }
 
@@ -1419,65 +1502,52 @@ fn format_rule_match(m: &savvagent_host::RuleMatch) -> String {
 }
 ```
 
-(`app.pool_provider_ids()` and `app.most_recent_routing_decision()` are TUI helpers — see Steps 3 & 4 of this task to add them.)
-
-- [ ] **Step 3: Add `App::pool_provider_ids` helper**
-
-In `crates/savvagent/src/app.rs`, find a place near `pub fn cached_models(&self)` and add:
+Also add an `App::connected_provider_ids` helper. In `crates/savvagent/src/app.rs`, near `most_recent_routing_decision` (added in Step 2), add:
 
 ```rust
-    /// Iterator over the connected pool's provider ids. Used by
-    /// `apply_effects` to label routing rules that target a
-    /// disconnected provider.
-    pub fn pool_provider_ids(&self) -> impl Iterator<Item = &savvagent_protocol::ProviderId> {
+    /// Iterator over the provider ids currently in the host pool. The
+    /// list is populated by the `RegisterProvider` effect handler and
+    /// thinned by the disconnect path. Used by `render_routing_show`
+    /// to label rules whose target provider isn't connected.
+    pub fn connected_provider_ids(&self) -> impl Iterator<Item = &savvagent_protocol::ProviderId> {
+        // Locate the existing connected-providers store. Look for the
+        // App field populated by the `RegisterProvider` apply_effects
+        // branch (around effects.rs:95-149). If it's a Vec<ProviderId>
+        // named differently, adapt this method body to point at it.
         self.connected_providers.iter()
     }
 ```
 
-If `self.connected_providers` is not the right path, search for the App field that holds the connected provider list (likely populated from the host's pool at startup / on `ProviderRegistered` events) and adapt accordingly.
+If `self.connected_providers` does not exist by that name, look for the field that is populated by the `RegisterProvider` arm of `apply_effects` (lines 95-149 of `effects.rs`). The field shape might be `HashMap<PluginId, ProviderId>` or similar; adapt the helper to return an iterator over the unique `ProviderId`s.
 
-- [ ] **Step 4: Add `App::most_recent_routing_decision` helper**
+- [ ] **Step 5: Wire the drains into `run_app`**
 
-In `crates/savvagent/src/app.rs`, near the helpers added in Step 3, add:
+In `crates/savvagent/src/main.rs`, locate every site that calls `apply_pending_model_change(app, &host_slot, ...)` (three call sites confirmed: ~line 687, ~line 2287, ~line 2432). Immediately after each call, add the two new drain calls:
 
 ```rust
-    /// Scan the log backwards for the most recent assistant turn entry
-    /// and return its routing badge `(provider, model, reason)` if one
-    /// is present. Phase 3+ wires `TurnEvent::RouteSelected` into each
-    /// assistant entry's badge fields.
-    pub fn most_recent_routing_decision(
-        &self,
-    ) -> Option<(String, String, String)> {
-        for entry in self.log.iter().rev() {
-            if let Entry::Assistant(a) = entry
-                && let Some(b) = a.routing_badge.as_ref()
-            {
-                return Some((b.provider.clone(), b.model.clone(), b.reason.clone()));
-            }
-        }
-        None
-    }
+                apply_pending_routing_reload(app, &host_slot).await;
+                apply_pending_routing_show(app, &host_slot).await;
 ```
 
-If the assistant entry's badge fields have different names, adapt — the goal is "return the most recent badge". If the routing badge is stored as a single `String` rather than parsed parts, parse it here with a simple split.
+Adapt the variable name (`host_slot` vs `&host_slot`) to whatever the surrounding context uses.
 
-- [ ] **Step 5: Run tests**
+- [ ] **Step 6: Run tests**
 
 Run: `cargo test -p savvagent-plugin --lib effect`
-Run: `cargo test -p savvagent --lib plugin::effects`
-Expected: PASS. (If `effects.rs` has no test module, no new tests are required for this task — the integration test in Task 8 exercises this end-to-end.)
+Run: `cargo test -p savvagent --lib`
+Expected: PASS. The integration test in Task 8 exercises the host machinery directly; the App/plugin pieces here are validated by unit tests + the manual smoke test in the final verification block.
 
-- [ ] **Step 6: Lint and format**
+- [ ] **Step 7: Lint and format**
 
 Run: `rustup run stable cargo fmt --all`
 Run: `rustup run stable cargo clippy --workspace --all-targets -- -D warnings`
 Expected: clean.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
-git add crates/savvagent-plugin/src/effect.rs crates/savvagent/src/plugin/effects.rs crates/savvagent/src/app.rs
-git commit -m "feat(plugin): Effect::ReloadRoutingRules + ShowRoutingRules handlers"
+git add crates/savvagent-plugin/src/effect.rs crates/savvagent/src/app.rs crates/savvagent/src/plugin/effects.rs crates/savvagent/src/main.rs
+git commit -m "feat(tui): pending-flag drain for routing reload/show effects"
 ```
 
 ---
@@ -1559,8 +1629,11 @@ impl Plugin for RoutePlugin {
             "reload" => Ok(vec![Effect::ReloadRoutingRules]),
             other => {
                 let msg = rust_i18n::t!("routing.route-usage").to_string();
+                // `StyledLine::plain` is the only public constructor in
+                // savvagent-plugin/src/styled.rs; the muted styling for
+                // notes is applied by App::push_styled_note's renderer.
                 Ok(vec![Effect::PushNote {
-                    line: StyledLine::muted(format!("{msg} (got `{other}`)")),
+                    line: StyledLine::plain(format!("{msg} (got `{other}`)")),
                 }])
             }
         }
@@ -2138,10 +2211,10 @@ Expected: clean build (cargo regenerates the lockfile with new versions).
 
 - [ ] **Step 2: Add `0.19.0` CHANGELOG entry**
 
-In `CHANGELOG.md`, add at the top (under `# Changelog` / before `## 0.18.0`):
+In `CHANGELOG.md`, add at the top (under `# Changelog` / before `## 0.18.0`). Use whatever today's actual date is when you run this task — example below uses `2026-05-19`:
 
 ```markdown
-## 0.19.0 - 2026-05-18
+## 0.19.0 - 2026-05-19
 
 ### Added
 
