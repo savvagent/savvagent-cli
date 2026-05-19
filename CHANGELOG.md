@@ -6,6 +6,23 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 (pre-1.0: `0.MINOR.PATCH`, where MINOR captures features + breaking
 boundary changes and PATCH captures fixes).
 
+## 0.20.0 - 2026-05-19
+
+### Added
+
+- **Heuristic classifier (Layer 4 of the router)**. Opt-in via `heuristics = true` in `~/.savvagent/routing.toml`. Short questions (≤200 chars + `?`) route to a cheap model (`CostTier::Free` or `Cheap`); coding-flavored prompts (substring match against `refactor`, `implement`, `debug`, `fix bug`, `compile`, `stack trace`, `function`, `class`, `error`) route to a premium model (`Premium` or `Standard`). Same-provider preferred; sibling providers are walked only when the active provider has no matching model. Off by default.
+- **`RoutingReason::Heuristic { kind }`** variant on the existing `#[non_exhaustive]` enum. Transcript badge renders `Heuristic(short)` / `Heuristic(coding)`.
+- **`/route show`** now describes the active classifier (categories + triggers) when `heuristics = true`. When `heuristics = false`, no heuristic line is printed.
+
+### Changed
+
+- `Router::pick` runs a new Layer-4 step between rules and default. Layered precedence is unchanged: `@`-override, Modality, and matching user Rules all still beat the heuristic when they apply.
+
+### Notes
+
+- Coding-keyword matching is **substring-based** in v1 — `function` matches `functional`, `error` matches `terror`. Users who want stricter matching write explicit `[[rule]]` entries; rules run earlier (Layer 3) and beat the heuristic.
+- The `routing.show-heuristics-pending` locale key remains in the catalog for backward compat but is no longer emitted by any code path.
+
 ## 0.19.0 - 2026-05-19
 
 ### Added

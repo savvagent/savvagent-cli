@@ -24,10 +24,10 @@ pub mod pool;
 pub mod router;
 pub use pool::{DisconnectMode, PoolEntry, PoolError, ProviderLease};
 pub use router::{
-    BadModel, DefaultPick, LegacyModelResolution, ProviderView, ROUTING_RULES_SCHEMA_VERSION,
-    RequiredModalities, RequiredModalityKind, Router, RoutingDecision, RoutingOverride,
-    RoutingReason, RoutingRule, RoutingRules, RoutingRulesError, RuleMatch, RuleSignals,
-    pick_vision_capable, required_modalities, resolve_legacy_model,
+    BadModel, DefaultPick, HeuristicKind, LegacyModelResolution, ProviderView,
+    ROUTING_RULES_SCHEMA_VERSION, RequiredModalities, RequiredModalityKind, Router,
+    RoutingDecision, RoutingOverride, RoutingReason, RoutingRule, RoutingRules, RoutingRulesError,
+    RuleMatch, RuleSignals, pick_vision_capable, required_modalities, resolve_legacy_model,
 };
 mod default_prompt;
 mod logging;

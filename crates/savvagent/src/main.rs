@@ -1347,7 +1347,7 @@ fn render_routing_show(app: &mut App, rules: &savvagent_host::RoutingRules) {
         None => app.push_note(rust_i18n::t!("routing.show-no-default").to_string()),
     }
     if rules.heuristics {
-        app.push_note(rust_i18n::t!("routing.show-heuristics-pending").to_string());
+        app.push_note(rust_i18n::t!("routing.show-heuristics-active").to_string());
     }
     match app.most_recent_routing_decision() {
         Some((provider, model, reason)) => app.push_note(
@@ -3199,6 +3199,60 @@ mod render_routing_show_tests {
                 && last.contains("claude-opus-4-7")
                 && last.contains("Rule(my-rule)"),
             "last-decision note should include parsed badge fields: {last}"
+        );
+    }
+
+    #[test]
+    fn heuristic_active_line_shown_when_heuristics_true() {
+        // rust_i18n::set_locale is process-global; serialize via
+        // HOME_LOCK so a parallel test changing the locale can't
+        // poison the English substring assertions below.
+        let _g = crate::test_helpers::HOME_LOCK.lock().expect("home lock");
+        rust_i18n::set_locale("en");
+
+        let mut app = build_app();
+        let rules = RoutingRules {
+            default: None,
+            heuristics: true,
+            rules: vec![],
+        };
+        render_routing_show(&mut app, &rules);
+        let notes = collect_notes(&app);
+        let saw_active = notes
+            .iter()
+            .any(|n| n.to_lowercase().contains("heuristics: enabled"));
+        assert!(
+            saw_active,
+            "expected an active-heuristics line; got {notes:?}"
+        );
+        // The "future release" placeholder line must NOT appear when
+        // heuristics=true; that string belongs to the no-longer-emitted
+        // routing.show-heuristics-pending key.
+        assert!(
+            !notes.iter().any(|n| n.contains("future release")),
+            "'future release' placeholder must not be emitted when heuristics is on; got {notes:?}"
+        );
+    }
+
+    #[test]
+    fn heuristic_line_omitted_when_heuristics_false() {
+        let _g = crate::test_helpers::HOME_LOCK.lock().expect("home lock");
+        rust_i18n::set_locale("en");
+
+        let mut app = build_app();
+        let rules = RoutingRules {
+            default: None,
+            heuristics: false,
+            rules: vec![],
+        };
+        render_routing_show(&mut app, &rules);
+        let notes = collect_notes(&app);
+        let saw_any_heuristics = notes
+            .iter()
+            .any(|n| n.to_lowercase().contains("heuristics"));
+        assert!(
+            !saw_any_heuristics,
+            "no heuristic line should be emitted when heuristics is off; got {notes:?}"
         );
     }
 }
