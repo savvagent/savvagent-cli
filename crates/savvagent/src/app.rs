@@ -1961,6 +1961,30 @@ mod tests {
     }
 
     #[test]
+    fn most_recent_routing_decision_parses_heuristic_badge() {
+        // Round-trip pin against `savvagent_host::router::heuristics::HeuristicKind`'s
+        // `Display`: a rename of "short"/"coding" would silently break the badge
+        // parser without this test. The Display output is a cross-crate contract.
+        let mut app = fresh_app();
+        app.entries.push(Entry::RouteBadge(
+            "anthropic/claude-haiku-4-5 — Heuristic(short)".into(),
+        ));
+        let got = app.most_recent_routing_decision().expect("parses");
+        assert_eq!(got.0, "anthropic");
+        assert_eq!(got.1, "claude-haiku-4-5");
+        assert_eq!(got.2, "Heuristic(short)");
+
+        let mut app = fresh_app();
+        app.entries.push(Entry::RouteBadge(
+            "anthropic/claude-opus-4-7 — Heuristic(coding)".into(),
+        ));
+        let got = app.most_recent_routing_decision().expect("parses");
+        assert_eq!(got.0, "anthropic");
+        assert_eq!(got.1, "claude-opus-4-7");
+        assert_eq!(got.2, "Heuristic(coding)");
+    }
+
+    #[test]
     fn most_recent_routing_decision_warns_on_unparseable_badge() {
         // Badge that lacks the " — " separator. The contract under
         // test is "returns None on parse failure"; the parser also

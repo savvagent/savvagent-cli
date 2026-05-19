@@ -3204,8 +3204,9 @@ mod render_routing_show_tests {
 
     #[test]
     fn heuristic_active_line_shown_when_heuristics_true() {
-        // Lock the locale to en so substring assertions are stable in
-        // parallel test runs (per feedback_test_locale_isolation).
+        // rust_i18n::set_locale is process-global; serialize via
+        // HOME_LOCK so a parallel test changing the locale can't
+        // poison the English substring assertions below.
         let _g = crate::test_helpers::HOME_LOCK.lock().expect("home lock");
         rust_i18n::set_locale("en");
 
@@ -3224,10 +3225,12 @@ mod render_routing_show_tests {
             saw_active,
             "expected an active-heuristics line; got {notes:?}"
         );
-        // The Phase 5 placeholder must NOT appear when heuristics=true.
+        // The "future release" placeholder line must NOT appear when
+        // heuristics=true; that string belongs to the no-longer-emitted
+        // routing.show-heuristics-pending key.
         assert!(
             !notes.iter().any(|n| n.contains("future release")),
-            "Phase 5 placeholder must not be emitted when heuristics is on; got {notes:?}"
+            "'future release' placeholder must not be emitted when heuristics is on; got {notes:?}"
         );
     }
 
