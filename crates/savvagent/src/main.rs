@@ -1917,16 +1917,48 @@ async fn perform_connect(
     // 4. Update TUI state. Pool is additive — do NOT clear app.entries,
     //    live_text, or call clear_history. The conversation continues on the
     //    existing active provider.
+    //
+    // Drift detection: if the host's `active_provider` no longer resolves
+    // to a pool entry (`active_capabilities()` is None — pre-Fix A this
+    // could happen at startup when the policy filter emptied the pool but
+    // left active pointing at a filtered-out id), promote the just-connected
+    // provider to active so the next turn doesn't hit `NoActiveProvider`.
+    // The condition is also a defense-in-depth catch for any future code
+    // path that might drop the active provider out of the pool without
+    // updating `active_provider`.
+    let active_is_in_pool = match current_host(host_slot).await {
+        Some(host) => host.active_capabilities().await.is_some(),
+        None => false,
+    };
     app.connected = true;
-    if app.active_provider_id.is_none() {
-        // First connection — set this provider as active, resolve the model,
-        // and refresh caches.
+    let should_promote = app.active_provider_id.is_none() || !active_is_in_pool;
+    if should_promote {
+        if !active_is_in_pool && app.active_provider_id.is_some() {
+            tracing::warn!(
+                old_active = ?app.active_provider_id,
+                new_active = spec.id,
+                "perform_connect: host active_provider was not in pool; promoting just-connected provider"
+            );
+        }
         app.active_provider_id = Some(spec.id);
         app.model = resolve_initial_model_for(spec);
         refresh_cached_models(app, host_slot).await;
         // Align the splash sandbox indicator with the newly-started host.
         if let Some(host) = current_host(host_slot).await {
             app.refresh_splash_sandbox_from_host(host.sandbox_config());
+            // Update the host's active_provider too. is_first_connect=true
+            // built a fresh host with this provider as the only pool entry
+            // (already active), so set_active_provider is a no-op there;
+            // the drift-repair branch is where it matters.
+            if let Ok(host_pid) = savvagent_protocol::ProviderId::new(spec.id) {
+                if let Err(err) = host.set_active_provider(&host_pid).await {
+                    tracing::warn!(
+                        error = %err,
+                        new_active = spec.id,
+                        "perform_connect: host.set_active_provider failed"
+                    );
+                }
+            }
         }
         // Tell provider plugins to flip their active marker.
         if let Ok(pid) = savvagent_plugin::ProviderId::new(spec.id) {

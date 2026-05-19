@@ -377,14 +377,44 @@ impl Host {
                     );
                 }
             }
-            // Active provider = first entry that was connected; if none were
-            // connected, fall back to the first registered provider id.
+            // Refuse to start with an empty pool when registrations were
+            // supplied. The previous fallback set `active_provider` to a
+            // registration that the policy had just filtered out, leaving
+            // the host in a state where every turn hits
+            // `HostError::NoActiveProvider` because `pool.get(active)` is
+            // None. The caller (TUI startup) interprets this Err as "no
+            // host yet"; the first `/connect` builds a fresh single-entry
+            // pool via the `is_first_connect = true` branch.
+            if map.is_empty() {
+                let registered: Vec<&str> =
+                    config.providers.iter().map(|r| r.id.as_str()).collect();
+                let policy_descr = match &config.startup_connect {
+                    StartupConnectPolicy::All => "All".to_string(),
+                    StartupConnectPolicy::None => "None".to_string(),
+                    StartupConnectPolicy::OptIn(ids) => format!(
+                        "OptIn({:?})",
+                        ids.iter().map(|i| i.as_str()).collect::<Vec<_>>()
+                    ),
+                    StartupConnectPolicy::LastUsed(ids) => format!(
+                        "LastUsed({:?})",
+                        ids.iter().map(|i| i.as_str()).collect::<Vec<_>>()
+                    ),
+                };
+                return Err(HostError::Startup(anyhow::anyhow!(
+                    "no provider passed the startup_connect filter \
+                     (policy={policy_descr}, registered={registered:?}); \
+                     adjust startup_providers or run /connect interactively"
+                )));
+            }
+            // Active provider = first registered entry that passed the
+            // filter. `map.is_empty()` was rejected above, so this find()
+            // is guaranteed to match.
             let active = config
                 .providers
                 .iter()
                 .find(|r| map.contains_key(&r.id))
                 .map(|r| r.id.clone())
-                .unwrap_or_else(|| config.providers[0].id.clone());
+                .expect("non-empty map guaranteed by check above");
             (map, active)
         } else {
             // Legacy fallback: rmcp HTTP transport, single "default" entry.

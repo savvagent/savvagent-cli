@@ -734,3 +734,55 @@ async fn set_active_provider_preserves_history() {
         host.messages().await.len()
     );
 }
+
+#[tokio::test]
+async fn host_start_refuses_empty_post_filter_pool() {
+    // Reproduces the rollup-blocker: bootstrap built `providers=[local]`
+    // (the only one whose key was available) but the user's
+    // `~/.savvagent/config.toml` carried `startup_providers=["anthropic"]`.
+    // The startup_connect filter dropped `local`, leaving the pool empty.
+    // Prior to the fix, Host::start fell back to `active_provider="local"`
+    // and every turn hit `HostError::NoActiveProvider`. The contract now is
+    // "refuse to start in a broken state" so the TUI can return None and
+    // the first `/connect` builds a fresh single-entry pool.
+    let mut cfg = HostConfig::new(
+        ProviderEndpoint::StreamableHttp {
+            url: "http://unused".into(),
+        },
+        "m",
+    );
+    cfg.providers = vec![reg("local", "m")];
+    cfg.startup_connect = StartupConnectPolicy::OptIn(vec![ProviderId::new("anthropic").unwrap()]);
+    let err = match Host::start(cfg).await {
+        Ok(_) => panic!("must refuse empty pool"),
+        Err(e) => e,
+    };
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("startup_connect filter") && msg.contains("local"),
+        "error must name the filter + registered candidates; got: {msg}"
+    );
+}
+
+#[tokio::test]
+async fn host_start_refuses_when_policy_none_filters_everything() {
+    // Defense-in-depth: even when the user explicitly picks
+    // StartupConnectPolicy::None, registering providers + None policy is
+    // a degenerate combo that produces an empty pool with a bogus active.
+    // The cleaner UX is to start with config.providers=[] (legacy
+    // single-default path); this Err nudges callers to stop building
+    // registrations they don't intend to connect.
+    let mut cfg = HostConfig::new(
+        ProviderEndpoint::StreamableHttp {
+            url: "http://unused".into(),
+        },
+        "m",
+    );
+    cfg.providers = vec![reg("anthropic", "m"), reg("gemini", "m")];
+    cfg.startup_connect = StartupConnectPolicy::None;
+    let err = match Host::start(cfg).await {
+        Ok(_) => panic!("must refuse empty pool"),
+        Err(e) => e,
+    };
+    assert!(format!("{err:#}").contains("None"));
+}
