@@ -37,8 +37,14 @@ mod tests {
 
     #[test]
     fn returns_path_under_home() {
+        // HOME_LOCK serializes against every other test that mutates
+        // HOME. Without it this test races with the resolver tests in
+        // main.rs (which read routing.toml from $HOME) and intermittently
+        // makes them fail — the resolver sees `/tmp/savvagent-test-home`
+        // instead of the HomeGuard's tempdir.
+        let _lock = HOME_LOCK.lock().unwrap();
         let original_home = std::env::var_os("HOME");
-        // SAFETY: single-threaded test
+        // SAFETY: HOME_LOCK is held above; no other test mutates HOME concurrently.
         unsafe {
             std::env::set_var("HOME", "/tmp/savvagent-test-home");
         }

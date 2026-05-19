@@ -38,6 +38,7 @@ mod migration;
 mod models_pref;
 mod palette;
 mod plugin;
+mod prompt_history;
 mod providers;
 mod routing_pref;
 mod splash;
@@ -154,6 +155,7 @@ async fn main() -> Result<()> {
     let initial_locale = crate::plugin::builtin::language::catalog::detect_initial();
     rust_i18n::set_locale(&initial_locale);
     let mut app = App::new(header_model, transcript_dir, initial_locale);
+    app.load_prompt_history(&project_root);
 
     {
         use crate::plugin::manifests::Indexes;
@@ -701,6 +703,7 @@ async fn dispatch_slash_command(
                     ));
                 }
                 apply_pending_model_change(app, host_slot, project_root, tool_bins).await;
+                apply_pending_pool_add(app, host_slot).await;
                 apply_pending_routing_reload(app, host_slot).await;
                 apply_pending_routing_show(app, host_slot).await;
                 return;
@@ -1268,6 +1271,154 @@ async fn apply_pending_model_change(
             }
         }
     }
+}
+
+/// Drain `app.pending_pool_add` (set by `Effect::RegisterProvider`) and
+/// add the provider to the host's pool. No-op when nothing is queued or
+/// when no host exists yet.
+///
+/// Rebuilds the `ProviderRegistration` via the matching plugin's
+/// `try_build_registration` so the host pool gets a fresh
+/// `Arc<dyn ProviderClient + Send + Sync>` — the silent-connect path's
+/// boxed `dyn ProviderClient` can't be converted directly. The duplicate
+/// client build is the price for fixing the silent-failure path where
+/// `/connect <provider>` with a stored key only landed in
+/// `App::registered_providers` and never the host pool.
+async fn apply_pending_pool_add(app: &mut App, host_slot: &HostSlot) {
+    use crate::plugin::builtin::{
+        provider_anthropic::ProviderAnthropicPlugin, provider_gemini::ProviderGeminiPlugin,
+        provider_local::ProviderLocalPlugin, provider_openai::ProviderOpenAiPlugin,
+    };
+
+    let Some(pending) = app.pending_pool_add.take() else {
+        return;
+    };
+    let Some(host) = current_host(host_slot).await else {
+        // No host yet — the modal-submit path's perform_connect handles
+        // first-connect host construction. If we end up here with no
+        // host, the silent path fired before any modal connect ever
+        // ran, which the user can recover from by re-running /connect
+        // explicitly (or restarting).
+        tracing::warn!(
+            provider = %pending.id.as_str(),
+            "Effect::RegisterProvider arrived before any host exists; skipping pool add"
+        );
+        return;
+    };
+
+    let spec = match PROVIDERS.iter().find(|s| s.id == pending.id.as_str()) {
+        Some(s) => s,
+        None => {
+            tracing::warn!(provider = %pending.id.as_str(),
+                "Effect::RegisterProvider: id not in PROVIDERS catalog; cannot rebuild registration");
+            return;
+        }
+    };
+
+    let reg = match spec.id {
+        "anthropic" => {
+            ProviderAnthropicPlugin::new()
+                .try_build_registration()
+                .await
+        }
+        "gemini" => ProviderGeminiPlugin::new().try_build_registration().await,
+        "openai" => ProviderOpenAiPlugin::new().try_build_registration().await,
+        "local" => ProviderLocalPlugin::new().try_build_registration().await,
+        other => {
+            tracing::warn!(
+                provider = other,
+                "apply_pending_pool_add: unknown provider id; cannot rebuild registration"
+            );
+            return;
+        }
+    };
+    let reg = match reg {
+        Ok(Some(r)) => r,
+        Ok(None) => {
+            // Key vanished from keyring between RegisterProvider being
+            // emitted and this drainer running. Rare; surface a note so
+            // the user knows what happened.
+            app.push_note(
+                rust_i18n::t!("notes.connect-keyring-not-found", id = spec.id).to_string(),
+            );
+            return;
+        }
+        Err(e) => {
+            app.push_note(
+                rust_i18n::t!("notes.connect-failed", id = spec.id, err = format!("{e:#}"))
+                    .to_string(),
+            );
+            return;
+        }
+    };
+
+    let registered_caps = reg.capabilities.clone();
+
+    match host.add_provider(reg).await {
+        Ok(()) => {}
+        Err(savvagent_host::PoolError::AlreadyRegistered(_)) => {
+            // Already in the pool — the auto-connect at startup
+            // (bootstrap_pool_host) already added it. Nothing to do.
+            // Don't push a note; this is the common "double-emit" path
+            // where HostStarting auto-connect + bootstrap added the same
+            // provider via two routes.
+            tracing::debug!(provider = %pending.id.as_str(),
+                "apply_pending_pool_add: provider already in pool (likely bootstrap dup)");
+            return;
+        }
+        Err(e) => {
+            app.push_note(
+                rust_i18n::t!("notes.connect-failed", id = spec.id, err = format!("{e}"))
+                    .to_string(),
+            );
+            return;
+        }
+    }
+
+    // Drift-repair + first-connect promotion, mirroring perform_connect's logic.
+    let active_is_in_pool = host.active_capabilities().await.is_some();
+    let should_promote = app.active_provider_id.is_none() || !active_is_in_pool;
+    if should_promote {
+        if !active_is_in_pool && app.active_provider_id.is_some() {
+            tracing::warn!(
+                old_active = ?app.active_provider_id,
+                new_active = spec.id,
+                "apply_pending_pool_add: host active_provider was not in pool; promoting just-added provider"
+            );
+        }
+        app.active_provider_id = Some(spec.id);
+        let (model, maybe_warning) =
+            resolve_initial_model_for_with_caps(spec, Some(&registered_caps));
+        if let Some(w) = maybe_warning {
+            app.push_note(w);
+        }
+        app.model = model.clone();
+        if let Ok(host_pid) = savvagent_protocol::ProviderId::new(spec.id) {
+            if let Err(err) = host.set_active_provider(&host_pid).await {
+                tracing::warn!(
+                    error = %err,
+                    new_active = spec.id,
+                    "apply_pending_pool_add: host.set_active_provider failed"
+                );
+            }
+        }
+        host.set_model(model).await;
+        app.refresh_splash_sandbox_from_host(host.sandbox_config());
+        if let Ok(pid) = savvagent_plugin::ProviderId::new(spec.id) {
+            if let Err(err) = crate::plugin::effects::dispatch_host_event(
+                app,
+                savvagent_plugin::HostEvent::ActiveProviderChanged { id: pid },
+                0,
+            )
+            .await
+            {
+                tracing::warn!(error = %err,
+                    "ActiveProviderChanged dispatch from apply_pending_pool_add failed");
+            }
+        }
+    }
+    refresh_cached_models(app, host_slot).await;
+    app.push_note(rust_i18n::t!("notes.connected-to", name = pending.display_name).to_string());
 }
 
 /// Drain `app.pending_routing_reload` (set by `Effect::ReloadRoutingRules`)
@@ -2252,6 +2403,16 @@ async fn run_app(
         }
     }
 
+    // Drain any pool-add queued by HostStarting subscribers (e.g. provider
+    // plugins' silent-connect path emitting Effect::RegisterProvider for
+    // keyring-stored credentials). Without this, the silent path's
+    // Effect::RegisterProvider only updated App::registered_providers and
+    // never the host's pool, leaving /model empty and turns unable to
+    // route to silently-connected providers. Idempotent w.r.t. providers
+    // bootstrap_pool_host already added (apply_pending_pool_add handles
+    // PoolError::AlreadyRegistered as a debug no-op).
+    apply_pending_pool_add(app, &host_slot).await;
+
     // Populate `App::cached_models` from the bootstrap host's pool so the
     // `/model` picker has rows the moment the user opens it. Previously
     // `cached_models` started empty and was only refreshed by /connect,
@@ -2541,6 +2702,7 @@ async fn run_app(
                 tracing::warn!(error = %e, "apply_effects from screen failed");
             }
             apply_pending_model_change(app, &host_slot, &project_root, &tool_bins).await;
+            apply_pending_pool_add(app, &host_slot).await;
             apply_pending_routing_reload(app, &host_slot).await;
             apply_pending_routing_show(app, &host_slot).await;
             continue;
@@ -2591,6 +2753,11 @@ async fn run_app(
                             if value.is_empty() || app.is_loading {
                                 continue;
                             }
+                            // Record every submission (slash commands too — they
+                            // were typed at the prompt and the user expects Up to
+                            // recall them like a shell). `append` no-ops on empty
+                            // input and dedupes consecutive duplicates.
+                            app.prompt_history.append(value.clone());
                             if value.starts_with('/') {
                                 app.input_textarea = make_input_textarea(Vec::<String>::new());
                                 dispatch_slash_command(
@@ -2668,6 +2835,27 @@ async fn run_app(
                             app.input_textarea.input(evt);
                             app.open_file_picker();
                         }
+                        // Up/Down at the prompt: recall previous/next history
+                        // entry when the input is empty (Up) or while an active
+                        // browse's marker still matches the textarea content.
+                        // Any modifier (Shift/Ctrl/Alt) falls through so chorded
+                        // bindings and future selection support are untouched.
+                        KeyCode::Up if key.modifiers.is_empty() => {
+                            let current = app.input_textarea.lines().join("\n");
+                            if let Some(text) = app.prompt_history.recall_prev(&current) {
+                                app.set_input_text_for_history(&text);
+                            } else {
+                                app.input_textarea.input(evt);
+                            }
+                        }
+                        KeyCode::Down if key.modifiers.is_empty() => {
+                            let current = app.input_textarea.lines().join("\n");
+                            if let Some(text) = app.prompt_history.recall_next(&current) {
+                                app.set_input_text_for_history(&text);
+                            } else {
+                                app.input_textarea.input(evt);
+                            }
+                        }
                         _ => {
                             // Try keybinding router (OnHome → Global) before
                             // falling through to the textarea. This is what
@@ -2694,6 +2882,7 @@ async fn run_app(
                                         &tool_bins,
                                     )
                                     .await;
+                                    apply_pending_pool_add(app, &host_slot).await;
                                     apply_pending_routing_reload(app, &host_slot).await;
                                     apply_pending_routing_show(app, &host_slot).await;
                                     handled = true;

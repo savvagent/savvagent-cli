@@ -12,6 +12,7 @@ use savvagent_host::{NetOverride, SandboxConfig, ToolCallStatus, TranscriptFile,
 use serde_json::Value;
 use tui_textarea::{TextArea, WrapMode};
 
+use crate::prompt_history::PromptHistory;
 use crate::providers::{PROVIDERS, ProviderSpec};
 
 /// Minimum height (rows, including borders) for the main prompt input.
@@ -139,6 +140,37 @@ pub struct PendingModelChange {
     pub id: String,
     /// Whether the change should be persisted to `~/.savvagent/models.toml`.
     pub persist: bool,
+}
+
+/// Queued pool-add request emitted by `Effect::RegisterProvider` when a
+/// provider plugin's silent-connect path (stored keyring credential or
+/// keyless local provider) fires. `apply_effects` only has access to
+/// `App`, so it stuffs the constructed client into `App::registered_providers`
+/// for the TUI's per-plugin view but can't reach `host_slot` to add the
+/// provider to the host's pool. The drainer in
+/// `main.rs::apply_pending_pool_add` does the host-side work: dispatches
+/// on the provider id to rebuild a fresh `ProviderRegistration` via the
+/// matching plugin's `try_build_registration`, calls `host.add_provider`,
+/// and refreshes the `/model` picker.
+///
+/// Without this, `/connect <provider>` via the silent path (key already
+/// stored) was a silent failure: the client landed in
+/// `App::registered_providers` but never in `Host::pool`, so `/model`
+/// didn't see the provider and turns couldn't route to it.
+///
+/// Carrying only `id` (no client) is intentional. The drainer rebuilds a
+/// fresh client via `try_build_registration` — cheap, and it sidesteps
+/// the `Box<dyn ProviderClient>` → `Arc<dyn ProviderClient + Send + Sync>`
+/// conversion that the host pool requires. The take-client side-effect
+/// in `Effect::RegisterProvider` is preserved so `App::registered_providers`
+/// stays populated for sites that read it (currently `render_routing_show`).
+pub struct PendingPoolAdd {
+    /// Provider id (`"anthropic"`, `"gemini"`, etc.) — drains into the
+    /// per-id dispatch in `apply_pending_pool_add`.
+    pub id: savvagent_plugin::ProviderId,
+    /// Human-readable display name carried in the effect payload; used
+    /// for the "Connected to …" note when the add succeeds.
+    pub display_name: String,
 }
 
 /// Queued routing-rules action emitted by `Effect::ReloadRoutingRules`
@@ -442,12 +474,27 @@ pub struct App {
     /// effect-application layer doesn't have access to.
     pub pending_model_change: Option<PendingModelChange>,
 
+    /// Queued by `Effect::RegisterProvider`; drained by
+    /// `main.rs::apply_pending_pool_add` which has host-slot access.
+    /// Carries the constructed [`savvagent_mcp::ProviderClient`] over
+    /// the no-host-slot boundary so the silent-connect path can add the
+    /// provider to the host pool (not just the TUI's `registered_providers`
+    /// view).
+    pub pending_pool_add: Option<PendingPoolAdd>,
+
     /// Queued by `Effect::ReloadRoutingRules`; drained by
     /// `main.rs::apply_pending_routing_reload`.
     pub pending_routing_reload: Option<PendingRoutingAction>,
     /// Queued by `Effect::ShowRoutingRules`; drained by
     /// `main.rs::apply_pending_routing_show`.
     pub pending_routing_show: Option<PendingRoutingAction>,
+
+    /// Per-project shell-style prompt history. Up at an empty input recalls
+    /// the most recent entry; Up/Down then navigate while the recalled text
+    /// is still the live textarea content (any edit cancels the browse).
+    /// Loaded after `App::new` via [`App::load_prompt_history`] once
+    /// `project_root` is known. Appended in the Enter-submit path.
+    pub prompt_history: PromptHistory,
 }
 
 impl App {
@@ -518,11 +565,46 @@ impl App {
             registered_providers: std::collections::HashMap::new(),
             cached_models: Vec::new(),
             pending_model_change: None,
+            pending_pool_add: None,
             pending_routing_reload: None,
             pending_routing_show: None,
+            prompt_history: PromptHistory::default(),
         };
         app.refresh_commands();
         app
+    }
+
+    /// Load prompt history for `project_root`. Called from `main.rs` once
+    /// the project root is known. Idempotent — calling it twice just
+    /// reloads from disk.
+    pub fn load_prompt_history(&mut self, project_root: &std::path::Path) {
+        self.prompt_history = PromptHistory::load(project_root);
+    }
+
+    /// Replace the prompt textarea with `text` and park the cursor past the
+    /// last character. Splits on `\n` so a multi-line recalled history
+    /// entry restores as multiple textarea lines rather than one line with
+    /// embedded newline glyphs. Used by the Up/Down history-recall path.
+    pub fn set_input_text_for_history(&mut self, text: &str) {
+        let lines: Vec<String> = if text.is_empty() {
+            Vec::new()
+        } else {
+            text.split('\n').map(str::to_string).collect()
+        };
+        self.input_textarea = make_input_textarea(lines);
+        let row = self
+            .input_textarea
+            .lines()
+            .len()
+            .saturating_sub(1) as u16;
+        let col = self
+            .input_textarea
+            .lines()
+            .last()
+            .map(|l| l.len())
+            .unwrap_or(0) as u16;
+        self.input_textarea
+            .move_cursor(tui_textarea::CursorMove::Jump(row, col));
     }
 
     /// Install the plugin runtime. Called once at startup from `main`.

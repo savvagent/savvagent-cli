@@ -132,6 +132,16 @@ async fn apply_one(app: &mut App, eff: Effect, depth: u8) -> Result<(), String> 
             };
             if let Some(client) = client {
                 app.register_provider(id.clone(), display_name.clone(), client);
+                // Queue a pool add so the next drainer with host_slot
+                // access (main.rs::apply_pending_pool_add) can call
+                // host.add_provider. Without this, the silent-connect
+                // path stuffs the client into App::registered_providers
+                // but the host's pool never learns about the provider —
+                // /model doesn't list it and turns can't route to it.
+                app.pending_pool_add = Some(crate::app::PendingPoolAdd {
+                    id: id.clone(),
+                    display_name: display_name.clone(),
+                });
                 // Notify subscribers via HostEvent::ProviderRegistered so e.g.
                 // internal:connect can refresh its candidate list, then fire
                 // HostEvent::Connect so HUD subscribers (notably
