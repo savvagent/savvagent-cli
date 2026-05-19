@@ -545,6 +545,26 @@ impl Host {
             .await
     }
 
+    /// Submit a user turn composed of arbitrary [`ContentBlock`]s — text,
+    /// images, or any future modality. Streams [`TurnEvent`]s onto `events`
+    /// the same way [`Self::run_turn_streaming`] does.
+    ///
+    /// The `@`-prefix parser runs only on the **leading** block if it is
+    /// `Text`; non-text leading blocks (e.g. an image-first turn) skip
+    /// `@`-parsing entirely.
+    ///
+    /// Phase 4 ships this entrypoint as host-side machinery. The TUI does
+    /// not yet expose an image-attachment UI; this method is intended for
+    /// (a) the modality routing integration test, and (b) a future image
+    /// upload feature in the TUI.
+    pub async fn run_turn_streaming_with_blocks(
+        &self,
+        content: Vec<savvagent_protocol::ContentBlock>,
+        events: mpsc::Sender<TurnEvent>,
+    ) -> Result<TurnOutcome, HostError> {
+        self.run_turn_inner(content, Some(events)).await
+    }
+
     /// Ask the active provider for its model list.
     ///
     /// Returns the provider's default error when `list_models` is not
@@ -2984,5 +3004,48 @@ mod transcript_tests {
         let record = host.load_transcript(&path).await.unwrap();
         assert_eq!(record.messages, messages);
         assert_eq!(record.schema_version, TRANSCRIPT_SCHEMA_VERSION);
+    }
+
+    /// `run_turn_streaming_with_blocks` must push the caller's blocks
+    /// verbatim onto the user message — no transformation, no extra
+    /// text-only wrapping. This pins the public surface that a future
+    /// image-attachment UI will use to submit image-bearing turns.
+    #[tokio::test]
+    async fn run_turn_streaming_with_blocks_pushes_user_message_verbatim() {
+        use savvagent_protocol::{ImageSource, MediaType};
+        let dir = tempdir().unwrap();
+        let host = Host::with_components(
+            tmp_config(dir.path()),
+            Box::new(NoopProvider) as Box<dyn ProviderClient + Send + Sync>,
+        )
+        .await
+        .unwrap();
+
+        let (tx, mut _rx) = mpsc::channel(8);
+        let blocks = vec![
+            ContentBlock::Text {
+                text: "what is this?".into(),
+            },
+            ContentBlock::Image {
+                source: ImageSource::Base64 {
+                    media_type: MediaType::Png,
+                    data: "AAAA".into(),
+                },
+            },
+        ];
+        host.run_turn_streaming_with_blocks(blocks.clone(), tx)
+            .await
+            .expect("turn runs");
+
+        // The just-submitted user message must contain the blocks we
+        // passed in, in order. The leading text has no `@`-prefix, so
+        // the parser leaves it untouched.
+        let messages = host.messages().await;
+        let user_msg = messages
+            .iter()
+            .rev()
+            .find(|m| matches!(m.role, Role::User))
+            .expect("at least one user message");
+        assert_eq!(user_msg.content, blocks);
     }
 }
