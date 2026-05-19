@@ -18,6 +18,8 @@
 
 use savvagent_protocol::ProviderId;
 
+use crate::router::modality;
+
 /// An explicit routing override the user expressed via an `@`-prefix.
 /// Always wins over every other layer in [`Router::pick`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,7 +42,7 @@ pub enum RoutingReason {
     /// support; the router redirected to a model that does.
     Modality {
         /// Which modality forced the redirect (e.g. `Image`).
-        kind: crate::router::modality::RequiredModalityKind,
+        kind: modality::RequiredModalityKind,
     },
     /// No higher-priority layer matched; fell through to the active
     /// provider + its default model.
@@ -101,7 +103,7 @@ impl Router {
         providers: &[crate::router::ProviderView<'_>],
         active_provider: &ProviderId,
         active_model: &str,
-        required: crate::router::modality::RequiredModalities,
+        required: modality::RequiredModalities,
     ) -> RoutingDecision {
         if let Some(o) = override_ {
             if let Some(view) = providers.iter().find(|p| p.id == &o.provider) {
@@ -118,22 +120,19 @@ impl Router {
         }
 
         // Modality layer.
-        if !required.is_empty() {
-            if let Some((p, m)) = crate::router::modality::pick_vision_capable(
+        if let Some(kind) = required.primary_kind()
+            && let Some((p, m)) = modality::pick_vision_capable(
                 required,
                 active_provider,
                 active_model,
                 providers,
-            ) {
-                let kind = required
-                    .primary_kind()
-                    .expect("required.is_empty() == false implies primary_kind() = Some");
-                return RoutingDecision {
-                    provider_id: p,
-                    model_id: m,
-                    reason: RoutingReason::Modality { kind },
-                };
-            }
+            )
+        {
+            return RoutingDecision {
+                provider_id: p,
+                model_id: m,
+                reason: RoutingReason::Modality { kind },
+            };
         }
 
         RoutingDecision {

@@ -23,6 +23,7 @@ use crate::permissions::{
 use crate::pool::{DisconnectMode, PoolEntry, PoolError, ProviderLease};
 use crate::project;
 use crate::provider::RmcpProviderClient;
+use crate::router::modality;
 use crate::sandbox::SandboxConfig;
 use crate::tools::{
     BashNetContext, BashNetResolver, BashNetResolverHandle, NetOverride, ToolRegistry,
@@ -621,7 +622,7 @@ impl Host {
                 &views,
                 &active_id,
                 &active_model,
-                crate::router::modality::RequiredModalities::default(),
+                modality::RequiredModalities::default(),
             )
             // pool guard dropped at end of this block
         };
