@@ -1505,20 +1505,26 @@ fn format_rule_match(m: &savvagent_host::RuleMatch) -> String {
 Also add an `App::connected_provider_ids` helper. In `crates/savvagent/src/app.rs`, near `most_recent_routing_decision` (added in Step 2), add:
 
 ```rust
-    /// Iterator over the provider ids currently in the host pool. The
-    /// list is populated by the `RegisterProvider` effect handler and
-    /// thinned by the disconnect path. Used by `render_routing_show`
-    /// to label rules whose target provider isn't connected.
-    pub fn connected_provider_ids(&self) -> impl Iterator<Item = &savvagent_protocol::ProviderId> {
-        // Locate the existing connected-providers store. Look for the
-        // App field populated by the `RegisterProvider` apply_effects
-        // branch (around effects.rs:95-149). If it's a Vec<ProviderId>
-        // named differently, adapt this method body to point at it.
-        self.connected_providers.iter()
+    /// Owning vec of provider ids currently in the host pool. Owning
+    /// (not borrowing) so the caller can clone before any `.await` that
+    /// might take a different App reference. Source: the field
+    /// populated by the `RegisterProvider` arm of `apply_effects`
+    /// (effects.rs:95-149). The real field name in this codebase is
+    /// `registered_providers: HashMap<String, Box<dyn ProviderClient>>`
+    /// (`app.rs:421`); the keys are the stable provider-id strings.
+    pub fn connected_provider_ids(&self) -> Vec<savvagent_protocol::ProviderId> {
+        self.registered_providers
+            .keys()
+            .filter_map(|s| savvagent_protocol::ProviderId::new(s).ok())
+            .collect()
     }
 ```
 
-If `self.connected_providers` does not exist by that name, look for the field that is populated by the `RegisterProvider` arm of `apply_effects` (lines 95-149 of `effects.rs`). The field shape might be `HashMap<PluginId, ProviderId>` or similar; adapt the helper to return an iterator over the unique `ProviderId`s.
+Update the call site in `render_routing_show` to consume the vec directly (instead of `.cloned().collect()`):
+
+```rust
+        let connected: Vec<savvagent_protocol::ProviderId> = app.connected_provider_ids();
+```
 
 - [ ] **Step 5: Wire the drains into `run_app`**
 
@@ -1675,7 +1681,7 @@ mod tests {
 }
 ```
 
-The `StyledLine::muted` constructor exists today (see other built-in plugins for usage); if its actual signature is different (e.g. `StyledLine::new(text, ThemeColor::Muted)`), adapt the call here.
+Verified: `StyledLine::plain` is the only public constructor in `crates/savvagent-plugin/src/styled.rs`. Muted styling for notes is applied by `App::push_styled_note`'s renderer, not by a separate constructor.
 
 - [ ] **Step 2: Register the module in the builtin index**
 
