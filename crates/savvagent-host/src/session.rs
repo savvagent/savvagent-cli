@@ -599,7 +599,12 @@ impl Host {
     /// surfacing.
     pub async fn reload_routing_rules(&self) -> Result<usize, crate::router::RoutingRulesError> {
         let Some(path) = self.config.routing_rules_path.clone() else {
-            // Nothing to reload from; clear in-memory and report zero.
+            // Nothing to reload from. Clear in-memory so a caller that
+            // toggles `routing_rules_path` between Some and None at runtime
+            // sees the intended "no rules" state. In normal TUI operation
+            // this branch is unreachable because the TUI always sets the
+            // path at startup; only tests / headless embedders ever hit
+            // this code path.
             let mut g = self.routing_rules.write().await;
             *g = crate::router::RoutingRules::empty();
             return Ok(0);

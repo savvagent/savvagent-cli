@@ -1206,11 +1206,21 @@ impl App {
         Some((provider.to_string(), model.to_string(), reason.to_string()))
     }
 
-    /// Owning vec of provider ids currently in the host pool. Source:
-    /// the field populated by the `RegisterProvider` arm of
-    /// `apply_effects` (effects.rs:95-149). The real field name is
-    /// `registered_providers: HashMap<String, Box<dyn ProviderClient>>`
-    /// (around line 421); keys are the stable provider-id strings.
+    /// Owning vec of provider ids that the TUI knows are connected. Source:
+    /// the `registered_providers` field, populated by the `RegisterProvider`
+    /// arm of `apply_effects`. This is **not** a direct view of the host
+    /// pool — a provider plugin must emit `Effect::RegisterProvider` for
+    /// the id to appear here. In normal TUI operation that effect is fired
+    /// by each provider plugin's `on_event(HostStarting)` callback once a
+    /// keyring credential is found, so this list aligns with the host pool
+    /// the user sees. Code paths that build a `Host` directly (tests,
+    /// headless examples) bypass `apply_effects` and will see this list
+    /// empty even when the pool has connected providers — that's the
+    /// expected behavior, since the TUI is the source of truth for the
+    /// view layer.
+    ///
+    /// Used by `render_routing_show` (in `main.rs`) to label routing rules
+    /// whose target provider isn't connected.
     pub fn connected_provider_ids(&self) -> Vec<savvagent_protocol::ProviderId> {
         self.registered_providers
             .keys()

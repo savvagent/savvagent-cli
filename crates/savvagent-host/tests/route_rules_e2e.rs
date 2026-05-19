@@ -312,3 +312,52 @@ use = "anthropic/claude-haiku-4-5"
     reloader.await.expect("reloader task joins cleanly");
     // No panic and no deadlock — bounded loop above must terminate.
 }
+
+#[tokio::test]
+async fn reload_with_parse_error_keeps_prior_rules() {
+    let a_seen = Arc::new(Mutex::new(None));
+    let a_reg = reg(
+        "anthropic",
+        caps_one("claude-haiku-4-5"),
+        Arc::clone(&a_seen),
+    );
+
+    let (_d, path) = write_routing_toml(
+        r#"
+[[rule]]
+name = "valid"
+match = { keywords = ["x"] }
+use = "anthropic/claude-haiku-4-5"
+"#,
+    );
+
+    let mut cfg = HostConfig::new(
+        ProviderEndpoint::StreamableHttp {
+            url: "http://unused".into(),
+        },
+        "claude-haiku-4-5",
+    );
+    cfg.providers = vec![a_reg];
+    cfg.startup_connect = StartupConnectPolicy::All;
+    cfg.routing_rules_path = Some(path.clone());
+
+    let host = Host::start(cfg).await.expect("host starts");
+    // Sanity: the valid file loaded.
+    assert_eq!(host.routing_rules_snapshot().await.rules.len(), 1);
+
+    // Overwrite the file with invalid TOML.
+    std::fs::write(&path, "this is not [[ valid ]] toml = unterminated").unwrap();
+    let err = host.reload_routing_rules().await;
+    assert!(err.is_err(), "expected reload to surface the parse error");
+
+    // The prior rules must still be in place.
+    let after = host.routing_rules_snapshot().await;
+    assert_eq!(
+        after.rules.len(),
+        1,
+        "prior rules should survive parse error"
+    );
+    assert_eq!(after.rules[0].name, "valid");
+
+    host.shutdown().await;
+}
