@@ -1,7 +1,7 @@
-//! Routing layers. Phase 5 ships Layer 3 of the parent spec's router stack. The rules
-//! are parsed once at `Host::start` and re-parsed on `/route reload`;
-//! the evaluator is a pure function called from `Router::pick` after
-//! `@`-override and modality have had their say.
+//! Routing layers. Owns the layered [`router::Router`] (override →
+//! modality → rules → heuristic → default) plus the supporting modules
+//! that each layer pulls in (rules from `~/.savvagent/routing.toml`,
+//! modality detection, `@`-prefix parsing, etc.).
 
 pub mod legacy_model;
 pub mod modality;
@@ -17,6 +17,6 @@ pub use modality::{
 };
 pub use router::{Router, RoutingDecision, RoutingOverride, RoutingReason};
 pub use rules::{
-    DefaultPick, ROUTING_RULES_SCHEMA_VERSION, RoutingRule, RoutingRules, RoutingRulesError,
-    RuleMatch, RuleSignals,
+    BadModel, DefaultPick, ROUTING_RULES_SCHEMA_VERSION, RoutingRule, RoutingRules,
+    RoutingRulesError, RuleMatch, RuleSignals,
 };

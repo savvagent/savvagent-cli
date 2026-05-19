@@ -5,16 +5,17 @@
 //! a `(provider, model, reason)` triple that the host pins for the
 //! duration of the user turn.
 //!
-//! Phase 4 ships three of the five planned layers:
+//! Layers (first match wins):
 //!
 //! - Layer 1 — `@provider[:model]` override (Override reason)
 //! - Layer 2 — required-modality redirect (Modality reason)
+//! - Layer 3 — user rules from `~/.savvagent/routing.toml` (Rule reason)
+//! - Layer 4 — heuristic classifier (not yet implemented)
 //! - Layer 5 — fall through to the active provider + its default model
 //!   (Default reason)
 //!
-//! Layers 3-4 (user rules, heuristics) are reserved for Phases 5-6;
-//! `RoutingReason` is `#[non_exhaustive]` so adding them later is
-//! additive, not breaking.
+//! `RoutingReason` is `#[non_exhaustive]` so adding the heuristic
+//! variant later is additive, not breaking.
 
 use savvagent_protocol::ProviderId;
 
@@ -90,7 +91,7 @@ impl Router {
     /// 2. **Modality** — same-provider redirect when the active model
     ///    lacks a required modality.
     /// 3. **Rules** — first matching rule from `~/.savvagent/routing.toml`.
-    /// 4. (Phase 6 will insert Heuristic here.)
+    /// 4. **Heuristic** — not yet implemented.
     /// 5. **Default** — active provider + active model.
     pub fn pick(
         override_: Option<RoutingOverride>,
@@ -101,7 +102,6 @@ impl Router {
         rules: &crate::router::rules::RoutingRules,
         user_text: &str,
     ) -> RoutingDecision {
-        // Layer 1: explicit override.
         if let Some(o) = override_ {
             if let Some(view) = providers.iter().find(|p| p.id == &o.provider) {
                 let model_id = o
@@ -116,7 +116,6 @@ impl Router {
             // Stale override; fall through.
         }
 
-        // Layer 2: modality redirect (same-provider only).
         if let Some(kind) = required.primary_kind()
             && let Some((p, m)) =
                 modality::pick_vision_capable(required, active_provider, active_model, providers)
@@ -128,8 +127,8 @@ impl Router {
             };
         }
 
-        // Layer 3: user rules. `providers` is the same `&[ProviderView]`
-        // the rules layer needs — no extra allocation.
+        // `providers` is the same `&[ProviderView]` the rules layer
+        // needs — no extra allocation.
         let signals = crate::router::rules::RuleSignals {
             required,
             user_text,
@@ -142,7 +141,6 @@ impl Router {
             };
         }
 
-        // Layer 5: default.
         RoutingDecision {
             provider_id: active_provider.clone(),
             model_id: active_model.to_string(),
@@ -479,8 +477,8 @@ mod tests {
     #[test]
     fn pick_modality_does_not_silently_cross_provider() {
         // Active = anthropic with no vision-capable model; gemini connected
-        // with a vision model. Phase 4's same-provider-only policy refuses
-        // the silent cross-provider jump — falls through to Default.
+        // with a vision model. The same-provider-only policy refuses the
+        // silent cross-provider jump — falls through to Default.
         let a_id = ProviderId::new("anthropic").unwrap();
         let g_id = ProviderId::new("gemini").unwrap();
         let a_caps = caps_with_vision("haiku", false);

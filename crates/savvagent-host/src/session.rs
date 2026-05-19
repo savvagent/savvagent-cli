@@ -332,7 +332,9 @@ pub struct Host {
     /// once at `Host::start` and swapped atomically by
     /// `reload_routing_rules`. Snapshotted (cloned) before any `.await`
     /// in `run_turn_inner`, same discipline as `active_provider` etc.
-    routing_rules: Arc<tokio::sync::RwLock<crate::router::RoutingRules>>,
+    /// No outer `Arc` — `&self` access through the `tokio::RwLock` is
+    /// sufficient; the host itself is already shared via `Arc<Host>`.
+    routing_rules: tokio::sync::RwLock<crate::router::RoutingRules>,
     /// One-shot startup notes (e.g. routing.toml parse failures) that the
     /// TUI should drain and surface as styled notes once `App` exists.
     /// Plain `std::sync::Mutex` because access is one-shot at startup —
@@ -474,7 +476,7 @@ impl Host {
             next_request_id: Arc::new(AtomicU64::new(1)),
             cancel_signal: tokio::sync::Mutex::new(cancel_signal_map),
             turn_handles: tokio::sync::Mutex::new(HashMap::new()),
-            routing_rules: Arc::new(tokio::sync::RwLock::new(routing_rules)),
+            routing_rules: tokio::sync::RwLock::new(routing_rules),
             startup_notes: std::sync::Mutex::new(startup_notes),
         };
         host.wire_self_into_resolver().await;
@@ -565,7 +567,7 @@ impl Host {
             next_request_id: Arc::new(AtomicU64::new(1)),
             cancel_signal: tokio::sync::Mutex::new(cancel_signal_map),
             turn_handles: tokio::sync::Mutex::new(HashMap::new()),
-            routing_rules: Arc::new(tokio::sync::RwLock::new(routing_rules)),
+            routing_rules: tokio::sync::RwLock::new(routing_rules),
             startup_notes: std::sync::Mutex::new(startup_notes),
         };
         host.wire_self_into_resolver().await;
@@ -603,9 +605,9 @@ impl Host {
     /// `Text`; non-text leading blocks (e.g. an image-first turn) skip
     /// `@`-parsing entirely.
     ///
-    /// Phase 4 ships this entrypoint as host-side machinery. The TUI does
-    /// not yet expose an image-attachment UI; this method is intended for
-    /// (a) the modality routing integration test, and (b) a future image
+    /// This entrypoint is host-side machinery. The TUI does not yet
+    /// expose an image-attachment UI; this method is intended for (a)
+    /// the modality routing integration test, and (b) a future image
     /// upload feature in the TUI.
     pub async fn run_turn_streaming_with_blocks(
         &self,
@@ -616,10 +618,10 @@ impl Host {
     }
 
     /// Re-read `routing_rules_path` and atomically swap the in-memory
-    /// rules. Returns the new rule count on success. On parse error the
-    /// existing rules are kept (deliberate refinement vs Phase 5 spec
-    /// startup behavior) and the error is returned to the caller for
-    /// surfacing.
+    /// rules. Returns the new rule count on success. Parse errors are
+    /// returned to the caller without clearing the existing in-memory
+    /// rules — preserves the previously-good set rather than silently
+    /// dropping it on a typo.
     pub async fn reload_routing_rules(&self) -> Result<usize, crate::router::RoutingRulesError> {
         let Some(path) = self.config.routing_rules_path.clone() else {
             // No path configured — there is nothing to re-read. Returning
@@ -702,8 +704,8 @@ impl Host {
         // Aliases are flattened across every connected provider so
         // `@opus` works even if the active provider is Gemini.
         //
-        // Phase 4: if the leading block is text, run the @-prefix parser
-        // on it and replace it with the stripped body. Non-text leading
+        // If the leading block is text, run the @-prefix parser on it
+        // and replace it with the stripped body. Non-text leading
         // blocks (e.g. image-first turns) skip @-parsing entirely.
         let (override_, user_content) = {
             let pool = self.pool.read().await;
@@ -737,13 +739,13 @@ impl Host {
             content: user_content,
         });
 
-        // Phase 4: detect modality requirements on the just-built `messages`.
+        // Detect modality requirements on the just-built `messages`.
         let required = modality::required_modalities(&messages);
 
-        // Phase 5: build per-turn signals for the rules layer. user_text
-        // is the concatenated text of the latest user message — image-
-        // only turns end up with the empty string, which is fine
-        // (keyword predicates won't match; bounds predicates still work).
+        // Build per-turn signals for the rules layer. user_text is the
+        // concatenated text of the latest user message — image-only
+        // turns end up with the empty string, which is fine (keyword
+        // predicates won't match; bounds predicates still work).
         let user_text: String = messages
             .iter()
             .rev()

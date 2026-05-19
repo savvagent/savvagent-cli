@@ -1,4 +1,4 @@
-//! End-to-end Phase 5 routing-rules integration tests.
+//! End-to-end routing-rules integration tests.
 //!
 //! Three scenarios:
 //!

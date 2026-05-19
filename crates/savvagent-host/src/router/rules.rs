@@ -1,18 +1,18 @@
 //! User-edited routing rules from `~/.savvagent/routing.toml`.
 //!
-//! Phase 5 ships Layer 3 of the parent spec's router stack. The rules
-//! are parsed once at `Host::start` and re-parsed on `/route reload`;
-//! the evaluator is a pure function called from `Router::pick` after
-//! `@`-override and modality have had their say.
+//! Layer 3 of the router stack. The rules are parsed once at
+//! `Host::start` and re-parsed on `/route reload`; the evaluator is a
+//! pure function called from `Router::pick` after `@`-override and
+//! modality have had their say.
 //!
-//! The struct shape matches the parent spec's `routing.toml` example
-//! verbatim plus a `version = 1` field for forward-compat. Predicate
-//! fields use `Option<bool>` so `match = { has_image = true }` is
-//! distinguishable from "predicate absent" (the alternative — bare
-//! `bool` defaulting to `false` — would conflate "match only image
-//! turns" with "match only non-image turns").
+//! The struct shape matches the spec's `routing.toml` example verbatim
+//! plus a `version = 1` field for forward-compat. Predicate fields use
+//! `Option<bool>` so `match = { has_image = true }` is distinguishable
+//! from "predicate absent" (the alternative — bare `bool` defaulting
+//! to `false` — would conflate "match only image turns" with "match
+//! only non-image turns").
 //!
-//! `RuleMatch` is `#[non_exhaustive]` so Phase 6 predicates can land
+//! `RuleMatch` is `#[non_exhaustive]` so future predicates can land
 //! additively.
 
 use std::path::{Path, PathBuf};
@@ -22,8 +22,10 @@ use serde::Deserialize;
 
 use crate::router::modality::RequiredModalities;
 
-/// Current `routing.toml` schema version. Loaders reject files with a
-/// higher version + a styled warning + empty fallback.
+/// Current `routing.toml` schema version. Loaders return
+/// [`RoutingRulesError::UnsupportedVersion`] for any file declaring a
+/// higher version; the host startup path turns that into a tracing
+/// warning and an empty rule set.
 pub const ROUTING_RULES_SCHEMA_VERSION: u32 = 1;
 
 /// In-memory representation of `~/.savvagent/routing.toml`.
@@ -31,7 +33,8 @@ pub const ROUTING_RULES_SCHEMA_VERSION: u32 = 1;
 pub struct RoutingRules {
     /// Optional default `provider/model` from the file's `default = "..."`.
     pub default: Option<DefaultPick>,
-    /// Whether the user opted into the Phase 6 heuristic classifier.
+    /// Whether the user opted into the heuristic classifier (Layer 4,
+    /// not yet implemented).
     pub heuristics: bool,
     /// Rules in TOML order; first match wins during evaluation.
     pub rules: Vec<RoutingRule>,
@@ -44,6 +47,42 @@ pub struct DefaultPick {
     pub provider: ProviderId,
     /// The provider-relative model id.
     pub model: String,
+}
+
+impl DefaultPick {
+    /// Build a `DefaultPick` from a validated `(provider, model)` pair.
+    /// Returns `Err(BadModel)` when `model` is empty or contains `/`.
+    /// The loader's internal path validates with extra context (file
+    /// path, rule index, rule name) and emits `RoutingRulesError`
+    /// directly — external callers should use this constructor instead
+    /// of building the struct field-by-field so the same invariants
+    /// hold regardless of construction site.
+    pub fn new(provider: ProviderId, model: impl Into<String>) -> Result<Self, BadModel> {
+        let model = model.into();
+        if model.is_empty() {
+            return Err(BadModel::Empty);
+        }
+        if model.contains('/') {
+            return Err(BadModel::ContainsSlash { got: model });
+        }
+        Ok(Self { provider, model })
+    }
+}
+
+/// Validation failure when constructing a `DefaultPick` via
+/// [`DefaultPick::new`].
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum BadModel {
+    /// Model id was empty.
+    #[error("model id is empty")]
+    Empty,
+    /// Model id contained a `/` (would be ambiguous with provider/model parsing).
+    #[error("model id `{got}` contains '/'")]
+    ContainsSlash {
+        /// The offending value.
+        got: String,
+    },
 }
 
 /// One `[[rule]]` entry from `routing.toml`.
@@ -63,9 +102,15 @@ pub struct RoutingRule {
 pub struct RuleMatch {
     /// Require / forbid the latest user message to carry an image.
     pub has_image: Option<bool>,
-    /// Require / forbid PDF (reserved; never matches in v1).
+    /// Require / forbid PDF. Reserved: in v1 the modality detector
+    /// never sets `RequiredModalities::has_pdf = true`, so
+    /// `has_pdf = true` predicates never match; `has_pdf = false`
+    /// matches every turn until the detector grows the field.
     pub has_pdf: Option<bool>,
-    /// Require / forbid audio (reserved; never matches in v1).
+    /// Require / forbid audio. Reserved: in v1 the modality detector
+    /// never sets `RequiredModalities::has_audio = true`, so
+    /// `has_audio = true` predicates never match; `has_audio = false`
+    /// matches every turn until the detector grows the field.
     pub has_audio: Option<bool>,
     /// Case-insensitive substring match against the latest user
     /// message's concatenated text. Empty Vec = no keyword constraint.
@@ -150,6 +195,17 @@ pub enum RoutingRulesError {
     /// was `None`. The host has nothing to re-read.
     #[error("no routing.toml path configured")]
     NoPathConfigured,
+    /// `default = "..."` at the top of the file is not `provider/model`.
+    /// Reported with file path + the bad value rather than a synthetic
+    /// rule index, so the error message points the user at the `default`
+    /// field instead of "rule 0 `default`".
+    #[error("routing.toml at {path:?}: `default` must be `provider/model`, got `{got}`")]
+    BadDefaultSyntax {
+        /// File path.
+        path: PathBuf,
+        /// The bad `default` value.
+        got: String,
+    },
 }
 
 // ----- TOML wire shape (serde-only; never exposed via the public API) -----
@@ -192,7 +248,8 @@ struct WireMatch {
 }
 
 impl RoutingRules {
-    /// Empty rules. Behaves like Phase 4 (no rule ever matches).
+    /// Empty rules. No rule ever matches; the rules layer of
+    /// `Router::pick` is effectively a no-op.
     pub fn empty() -> Self {
         Self::default()
     }
@@ -228,7 +285,15 @@ impl RoutingRules {
             });
         }
         let default = match wire.default {
-            Some(s) if !s.trim().is_empty() => Some(parse_provider_model(path, 0, "default", &s)?),
+            Some(s) if !s.trim().is_empty() => match parse_provider_model_internal(&s) {
+                Ok(d) => Some(d),
+                Err(_) => {
+                    return Err(RoutingRulesError::BadDefaultSyntax {
+                        path: path.to_path_buf(),
+                        got: s,
+                    });
+                }
+            },
             _ => None,
         };
         let mut rules = Vec::with_capacity(wire.rules.len());
@@ -336,44 +401,42 @@ fn match_satisfied(
     true
 }
 
+/// Parse `provider/model` with no surrounding file context. Returns
+/// `Err(())` for any structural problem — wrong number of `/`, empty
+/// halves, or an invalid provider id. The caller wraps the failure in
+/// the appropriate context-bearing `RoutingRulesError` variant.
+fn parse_provider_model_internal(raw: &str) -> Result<DefaultPick, ()> {
+    // Exactly one `/` is required. `split_once` would still succeed for
+    // `"a/b/c"` (split at the first `/`); the count check here makes
+    // the "multiple slashes" path explicit and matches the docs.
+    if raw.matches('/').count() != 1 {
+        return Err(());
+    }
+    // SAFETY: count check above guarantees exactly one `/`, so
+    // `split_once` cannot return `None` here.
+    let (p, m) = raw
+        .split_once('/')
+        .expect("count check above guarantees exactly one '/'");
+    let provider = ProviderId::new(p.trim()).map_err(|_| ())?;
+    let model = m.trim().to_string();
+    if model.is_empty() {
+        return Err(());
+    }
+    Ok(DefaultPick { provider, model })
+}
+
 fn parse_provider_model(
     path: &Path,
     rule_index: usize,
     name: &str,
     raw: &str,
 ) -> Result<DefaultPick, RoutingRulesError> {
-    if raw.matches('/').count() != 1 {
-        return Err(RoutingRulesError::BadUseSyntax {
-            path: path.to_path_buf(),
-            index: rule_index,
-            name: name.to_string(),
-            got: raw.to_string(),
-        });
-    }
-    let (p, m) = raw
-        .split_once('/')
-        .ok_or_else(|| RoutingRulesError::BadUseSyntax {
-            path: path.to_path_buf(),
-            index: rule_index,
-            name: name.to_string(),
-            got: raw.to_string(),
-        })?;
-    let provider = ProviderId::new(p.trim()).map_err(|_| RoutingRulesError::BadUseSyntax {
+    parse_provider_model_internal(raw).map_err(|()| RoutingRulesError::BadUseSyntax {
         path: path.to_path_buf(),
         index: rule_index,
         name: name.to_string(),
         got: raw.to_string(),
-    })?;
-    let model = m.trim().to_string();
-    if model.is_empty() {
-        return Err(RoutingRulesError::BadUseSyntax {
-            path: path.to_path_buf(),
-            index: rule_index,
-            name: name.to_string(),
-            got: raw.to_string(),
-        });
-    }
-    Ok(DefaultPick { provider, model })
+    })
 }
 
 #[cfg(test)]
@@ -666,5 +729,45 @@ use = "anthropic/claude/latest"
         );
         let err = RoutingRules::load_from_path(&path).expect_err("rejects");
         assert!(matches!(err, RoutingRulesError::BadUseSyntax { .. }));
+    }
+
+    #[test]
+    fn default_pick_new_accepts_valid_pair() {
+        let p = ProviderId::new("anthropic").unwrap();
+        let d = DefaultPick::new(p.clone(), "claude-opus-4-7").expect("valid");
+        assert_eq!(d.provider, p);
+        assert_eq!(d.model, "claude-opus-4-7");
+    }
+
+    #[test]
+    fn default_pick_new_rejects_empty_model() {
+        let p = ProviderId::new("anthropic").unwrap();
+        let err = DefaultPick::new(p, "").expect_err("rejects");
+        assert!(matches!(err, BadModel::Empty));
+    }
+
+    #[test]
+    fn default_pick_new_rejects_slash_in_model() {
+        let p = ProviderId::new("anthropic").unwrap();
+        let err = DefaultPick::new(p, "a/b").expect_err("rejects");
+        assert!(matches!(err, BadModel::ContainsSlash { .. }));
+    }
+
+    #[test]
+    fn rejects_bad_default_with_dedicated_variant() {
+        // `default = "anthropic"` (no slash). Must surface as
+        // `BadDefaultSyntax`, not `BadUseSyntax`, so the error message
+        // points the user at the `default` field rather than at a fake
+        // "rule 0".
+        let (_d, path) = tmp_routing(
+            r#"
+default = "anthropic"
+"#,
+        );
+        let err = RoutingRules::load_from_path(&path).expect_err("rejects");
+        assert!(
+            matches!(err, RoutingRulesError::BadDefaultSyntax { .. }),
+            "expected BadDefaultSyntax, got {err:?}"
+        );
     }
 }
