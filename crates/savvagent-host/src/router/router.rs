@@ -35,6 +35,12 @@ pub struct RoutingOverride {
 pub enum RoutingReason {
     /// The user supplied an explicit `@`-prefix that resolved cleanly.
     Override,
+    /// The user's input required a modality the current model doesn't
+    /// support; the router redirected to a model that does.
+    Modality {
+        /// Which modality forced the redirect (e.g. `Image`).
+        kind: crate::router::modality::RequiredModalityKind,
+    },
     /// No higher-priority layer matched; fell through to the active
     /// provider + its default model.
     Default,
@@ -44,6 +50,7 @@ impl std::fmt::Display for RoutingReason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             RoutingReason::Override => f.write_str("Override"),
+            RoutingReason::Modality { kind } => write!(f, "Modality({kind})"),
             RoutingReason::Default => f.write_str("Default"),
         }
     }
@@ -116,6 +123,15 @@ mod tests {
     fn routing_reason_displays() {
         assert_eq!(format!("{}", RoutingReason::Override), "Override");
         assert_eq!(format!("{}", RoutingReason::Default), "Default");
+    }
+
+    #[test]
+    fn routing_reason_modality_displays() {
+        use crate::router::modality::RequiredModalityKind;
+        let r = RoutingReason::Modality {
+            kind: RequiredModalityKind::Image,
+        };
+        assert_eq!(format!("{r}"), "Modality(image)");
     }
 
     #[test]
