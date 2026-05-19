@@ -85,32 +85,23 @@ pub struct Router;
 impl Router {
     /// Pick a `(provider, model, reason)` triple for a turn.
     ///
-    /// Phase 4 active layers:
-    /// - **Override** — if `override_` is `Some` and resolves to a
-    ///   connected provider, use it. The model is the override's model
-    ///   if specified, else the provider's default model. **An override
-    ///   always wins, even if the user attached an image and the chosen
-    ///   model lacks vision** — that's the user's explicit call.
-    /// - **Modality** — if no override, and `required` is non-empty, and
-    ///   the (active_provider, active_model) pair lacks the required
-    ///   modality, redirect to a sibling model **on the same provider**.
-    ///   Cross-provider redirects are not done silently — when the active
-    ///   provider has no vision-capable model, this layer falls through
-    ///   to Default and the host emits `TurnEvent::ModalityWarning` so
-    ///   the user sees why their image-bearing turn likely won't succeed.
-    /// - **Default** — otherwise, use `active_provider` + `active_model`.
-    ///
-    /// A stale override that points at a now-disconnected provider falls
-    /// through to Modality / Default (defensive — `parse_at_prefix`
-    /// already filters these, but defending against a TOCTOU window
-    /// between parse and pick is cheap).
+    /// Layers (first match wins):
+    /// 1. **Override** — `@`-prefix from the user input.
+    /// 2. **Modality** — same-provider redirect when the active model
+    ///    lacks a required modality.
+    /// 3. **Rules** — first matching rule from `~/.savvagent/routing.toml`.
+    /// 4. (Phase 6 will insert Heuristic here.)
+    /// 5. **Default** — active provider + active model.
     pub fn pick(
         override_: Option<RoutingOverride>,
         providers: &[crate::router::ProviderView<'_>],
         active_provider: &ProviderId,
         active_model: &str,
         required: modality::RequiredModalities,
+        rules: &crate::router::rules::RoutingRules,
+        user_text: &str,
     ) -> RoutingDecision {
+        // Layer 1: explicit override.
         if let Some(o) = override_ {
             if let Some(view) = providers.iter().find(|p| p.id == &o.provider) {
                 let model_id = o
@@ -122,10 +113,10 @@ impl Router {
                     reason: RoutingReason::Override,
                 };
             }
-            // Stale override — provider gone since parse. Fall through.
+            // Stale override; fall through.
         }
 
-        // Modality layer.
+        // Layer 2: modality redirect (same-provider only).
         if let Some(kind) = required.primary_kind()
             && let Some((p, m)) =
                 modality::pick_vision_capable(required, active_provider, active_model, providers)
@@ -137,6 +128,21 @@ impl Router {
             };
         }
 
+        // Layer 3: user rules. `providers` is the same `&[ProviderView]`
+        // the rules layer needs — no extra allocation.
+        let signals = crate::router::rules::RuleSignals {
+            required,
+            user_text,
+        };
+        if let Some((name, pick)) = rules.evaluate(&signals, providers) {
+            return RoutingDecision {
+                provider_id: pick.provider,
+                model_id: pick.model,
+                reason: RoutingReason::Rule { name },
+            };
+        }
+
+        // Layer 5: default.
         RoutingDecision {
             provider_id: active_provider.clone(),
             model_id: active_model.to_string(),
@@ -151,6 +157,7 @@ mod tests {
     use crate::capabilities::{CostTier, ModelCapabilities, ProviderCapabilities};
     use crate::router::ProviderView;
     use crate::router::modality::RequiredModalities;
+    use crate::router::rules::RoutingRules;
 
     #[test]
     fn routing_reason_displays() {
@@ -236,6 +243,8 @@ mod tests {
             &a_id,
             "claude-opus-4-7",
             RequiredModalities::default(),
+            &RoutingRules::empty(),
+            "",
         );
         assert_eq!(r.provider_id, a_id);
         assert_eq!(r.model_id, "claude-opus-4-7");
@@ -269,6 +278,8 @@ mod tests {
             &a_id,
             "claude-opus-4-7",
             RequiredModalities::default(),
+            &RoutingRules::empty(),
+            "",
         );
         assert_eq!(r.provider_id, g_id);
         assert_eq!(r.model_id, "gemini-2.0-flash");
@@ -302,6 +313,8 @@ mod tests {
             &a_id,
             "claude-opus-4-7",
             RequiredModalities::default(),
+            &RoutingRules::empty(),
+            "",
         );
         assert_eq!(r.provider_id, g_id);
         assert_eq!(r.model_id, "gemini-2.0-flash");
@@ -333,6 +346,8 @@ mod tests {
             &a_id,
             "claude-opus-4-7",
             RequiredModalities::default(),
+            &RoutingRules::empty(),
+            "",
         );
         assert_eq!(r.provider_id, a_id);
         assert_eq!(r.model_id, "claude-opus-4-7");
@@ -381,6 +396,8 @@ mod tests {
                 has_image: true,
                 ..Default::default()
             },
+            &RoutingRules::empty(),
+            "",
         );
         assert_eq!(r.provider_id, a_id);
         assert_eq!(r.model_id, "opus");
@@ -425,6 +442,8 @@ mod tests {
                 has_image: true,
                 ..Default::default()
             },
+            &RoutingRules::empty(),
+            "",
         );
         assert_eq!(r.provider_id, o_id);
         assert_eq!(r.model_id, "o3");
@@ -449,6 +468,8 @@ mod tests {
                 has_image: true,
                 ..Default::default()
             },
+            &RoutingRules::empty(),
+            "",
         );
         assert_eq!(r.provider_id, a_id);
         assert_eq!(r.model_id, "opus");
@@ -484,6 +505,8 @@ mod tests {
                 has_image: true,
                 ..Default::default()
             },
+            &RoutingRules::empty(),
+            "",
         );
         assert_eq!(r.provider_id, a_id);
         assert_eq!(r.model_id, "haiku");
@@ -496,5 +519,238 @@ mod tests {
             name: "deep-reasoning".to_string(),
         };
         assert_eq!(format!("{r}"), "Rule(deep-reasoning)");
+    }
+
+    use crate::router::rules::{DefaultPick, RoutingRule, RuleMatch};
+
+    fn rules_with_one_rule(name: &str, pick: DefaultPick, match_: RuleMatch) -> RoutingRules {
+        RoutingRules {
+            default: None,
+            heuristics: false,
+            rules: vec![RoutingRule {
+                name: name.to_string(),
+                match_,
+                use_: pick,
+            }],
+        }
+    }
+
+    #[test]
+    fn pick_rule_matches_and_routes() {
+        let a_id = ProviderId::new("anthropic").unwrap();
+        let g_id = ProviderId::new("gemini").unwrap();
+        let a_caps = caps("haiku");
+        let g_caps = caps("flash");
+        let views = vec![
+            ProviderView {
+                id: &a_id,
+                capabilities: &a_caps,
+            },
+            ProviderView {
+                id: &g_id,
+                capabilities: &g_caps,
+            },
+        ];
+        let rules = rules_with_one_rule(
+            "refactor",
+            DefaultPick {
+                provider: g_id.clone(),
+                model: "flash".into(),
+            },
+            RuleMatch {
+                keywords: vec!["refactor".into()],
+                ..Default::default()
+            },
+        );
+        let r = Router::pick(
+            None,
+            &views,
+            &a_id,
+            "haiku",
+            RequiredModalities::default(),
+            &rules,
+            "please refactor this",
+        );
+        assert_eq!(r.provider_id, g_id);
+        assert_eq!(r.model_id, "flash");
+        assert_eq!(
+            r.reason,
+            RoutingReason::Rule {
+                name: "refactor".into()
+            }
+        );
+    }
+
+    #[test]
+    fn pick_override_beats_matching_rule() {
+        let a_id = ProviderId::new("anthropic").unwrap();
+        let g_id = ProviderId::new("gemini").unwrap();
+        let a_caps = caps("haiku");
+        let g_caps = caps("flash");
+        let views = vec![
+            ProviderView {
+                id: &a_id,
+                capabilities: &a_caps,
+            },
+            ProviderView {
+                id: &g_id,
+                capabilities: &g_caps,
+            },
+        ];
+        let rules = rules_with_one_rule(
+            "x",
+            DefaultPick {
+                provider: g_id.clone(),
+                model: "flash".into(),
+            },
+            RuleMatch {
+                keywords: vec!["x".into()],
+                ..Default::default()
+            },
+        );
+        let override_ = RoutingOverride {
+            provider: a_id.clone(),
+            model: Some("haiku".into()),
+        };
+        let r = Router::pick(
+            Some(override_),
+            &views,
+            &a_id,
+            "haiku",
+            RequiredModalities::default(),
+            &rules,
+            "xenon",
+        );
+        assert_eq!(r.reason, RoutingReason::Override);
+        assert_eq!(r.provider_id, a_id);
+    }
+
+    #[test]
+    fn pick_modality_beats_matching_rule() {
+        // Active = anthropic with both haiku (no vision) and opus (vision).
+        // Image attached. A keyword rule also matches. Modality (Layer 2)
+        // wins — rules run later in pick order.
+        use crate::router::modality::RequiredModalityKind;
+        let a_id = ProviderId::new("anthropic").unwrap();
+        let a_caps = ProviderCapabilities::new(
+            vec![
+                ModelCapabilities {
+                    id: "haiku".into(),
+                    display_name: "haiku".into(),
+                    supports_vision: false,
+                    supports_audio: false,
+                    context_window: 0,
+                    cost_tier: CostTier::Standard,
+                },
+                ModelCapabilities {
+                    id: "opus".into(),
+                    display_name: "opus".into(),
+                    supports_vision: true,
+                    supports_audio: false,
+                    context_window: 0,
+                    cost_tier: CostTier::Standard,
+                },
+            ],
+            "haiku".into(),
+        )
+        .expect("valid caps");
+        let g_id = ProviderId::new("gemini").unwrap();
+        let g_caps = caps("flash");
+        let views = vec![
+            ProviderView {
+                id: &a_id,
+                capabilities: &a_caps,
+            },
+            ProviderView {
+                id: &g_id,
+                capabilities: &g_caps,
+            },
+        ];
+        let rules = rules_with_one_rule(
+            "x",
+            DefaultPick {
+                provider: g_id.clone(),
+                model: "flash".into(),
+            },
+            RuleMatch {
+                keywords: vec!["x".into()],
+                ..Default::default()
+            },
+        );
+        let r = Router::pick(
+            None,
+            &views,
+            &a_id,
+            "haiku",
+            RequiredModalities {
+                has_image: true,
+                ..Default::default()
+            },
+            &rules,
+            "xenon",
+        );
+        assert_eq!(r.provider_id, a_id);
+        assert_eq!(r.model_id, "opus");
+        assert_eq!(
+            r.reason,
+            RoutingReason::Modality {
+                kind: RequiredModalityKind::Image
+            }
+        );
+    }
+
+    #[test]
+    fn pick_falls_through_when_rule_target_disconnected() {
+        // Rule points at gemini; only anthropic connected. Rule is
+        // silently skipped; Default fires.
+        let a_id = ProviderId::new("anthropic").unwrap();
+        let g_id = ProviderId::new("gemini").unwrap();
+        let a_caps = caps("haiku");
+        let views = vec![ProviderView {
+            id: &a_id,
+            capabilities: &a_caps,
+        }];
+        let rules = rules_with_one_rule(
+            "x",
+            DefaultPick {
+                provider: g_id,
+                model: "flash".into(),
+            },
+            RuleMatch {
+                keywords: vec!["x".into()],
+                ..Default::default()
+            },
+        );
+        let r = Router::pick(
+            None,
+            &views,
+            &a_id,
+            "haiku",
+            RequiredModalities::default(),
+            &rules,
+            "xenon",
+        );
+        assert_eq!(r.reason, RoutingReason::Default);
+        assert_eq!(r.provider_id, a_id);
+    }
+
+    #[test]
+    fn pick_empty_rules_falls_through_to_default() {
+        let a_id = ProviderId::new("anthropic").unwrap();
+        let a_caps = caps("haiku");
+        let views = vec![ProviderView {
+            id: &a_id,
+            capabilities: &a_caps,
+        }];
+        let r = Router::pick(
+            None,
+            &views,
+            &a_id,
+            "haiku",
+            RequiredModalities::default(),
+            &RoutingRules::empty(),
+            "anything",
+        );
+        assert_eq!(r.reason, RoutingReason::Default);
     }
 }
