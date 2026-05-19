@@ -11,7 +11,7 @@
 //! - Layer 2 — required-modality redirect (Modality reason)
 //! - Layer 3 — user rules from `~/.savvagent/routing.toml` (Rule reason)
 //! - Layer 4 — heuristic classifier, opt-in via `heuristics = true` in
-//!             routing.toml (Heuristic reason)
+//!   routing.toml (Heuristic reason)
 //! - Layer 5 — fall through to the active provider + its default model
 //!   (Default reason)
 //!
