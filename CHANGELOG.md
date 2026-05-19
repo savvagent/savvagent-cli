@@ -6,6 +6,38 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 (pre-1.0: `0.MINOR.PATCH`, where MINOR captures features + breaking
 boundary changes and PATCH captures fixes).
 
+## 0.18.0 - 2026-05-18
+
+### Added
+
+- **Automatic modality routing for image inputs.** When your message
+  contains an image and the active provider's chosen model doesn't
+  support vision, the router auto-redirects the turn to a sibling
+  model on the **same provider** that does. Cross-provider redirects
+  are not done automatically — that crosses a billing boundary the
+  user picked. The transcript badge shows `Modality(image)` when a
+  same-provider redirect happens.
+- **`TurnEvent::ModalityWarning`.** Surfaced as a muted note in the TUI
+  when an image is attached but the active provider has no
+  vision-capable model, or when an `@`-override pinned a
+  vision-incapable model. The request still runs; the warning
+  explains why the next call may fail.
+- **`Host::run_turn_streaming_with_blocks(content, events)`.** Public
+  entrypoint that accepts a user turn as a `Vec<ContentBlock>` instead
+  of a string, so a future image-upload UX can deliver image blocks
+  without going through the text-only path.
+
+### Internal
+
+- Phase 4 of the multi-provider-pool roadmap (see
+  `docs/superpowers/specs/2026-05-15-multi-provider-pool-and-auto-routing-design.md`).
+  New `crates/savvagent-host/src/router/modality.rs` module with field
+  names (`has_image`, `has_pdf`, `has_audio`) aligned to Phase 5's
+  `routing.toml` predicates so the user-rules layer can bind to the
+  same struct without rename. `Router::pick` takes a new
+  `RequiredModalities` argument; the `#[non_exhaustive]`
+  `RoutingReason` enum gains a `Modality { kind }` variant.
+
 ## 0.17.0 - 2026-05-17
 
 ### Added

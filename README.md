@@ -153,6 +153,28 @@ and the next turn routes to whichever provider `/use` last selected.
 Each assistant turn shows a muted `▸ provider/model — Reason` line above
 its response so the routing decision is always visible.
 
+### Automatic modality routing
+
+When you attach an image to your message, savvagent inspects the active
+provider's chosen model. If it doesn't support vision (for example
+`claude-haiku-4-5` or `o3`), the router automatically switches to a
+sibling model on the **same provider** that does (e.g. haiku → opus on
+Anthropic). The transcript badge above the response shows
+`Modality(image)` when this happens.
+
+If the active provider has no vision-capable model at all, the request
+goes through to the active model unchanged and a muted note warns that
+the model may reject it. The router does NOT silently jump to a
+different provider — even if another connected provider has a
+vision-capable model, that crosses a billing boundary you didn't pick.
+Use `/use <provider>` to switch to a vision-capable provider, or
+prefix the message with `@<provider>` to route just this turn.
+
+Explicit `@provider:model` overrides always win, even when an image is
+attached. If you pin a vision-incapable model with `@`, the request
+still runs, the warning fires, and the provider's error (if any)
+surfaces normally.
+
 ### Multi-provider pool (Phase 1)
 
 As of v0.15.0 Savvagent maintains a *connection pool* — you can `/connect`
