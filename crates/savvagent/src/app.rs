@@ -1947,4 +1947,28 @@ mod tests {
         let app = fresh_app();
         assert!(app.most_recent_routing_decision().is_none());
     }
+
+    #[test]
+    fn most_recent_routing_decision_parses_rule_badge() {
+        let mut app = fresh_app();
+        app.entries.push(Entry::RouteBadge(
+            "anthropic/claude-opus-4-7 — Rule(deep-reasoning)".into(),
+        ));
+        let got = app.most_recent_routing_decision().expect("parses");
+        assert_eq!(got.0, "anthropic");
+        assert_eq!(got.1, "claude-opus-4-7");
+        assert_eq!(got.2, "Rule(deep-reasoning)");
+    }
+
+    #[test]
+    fn most_recent_routing_decision_warns_on_unparseable_badge() {
+        // Badge that lacks the " — " separator. The contract under
+        // test is "returns None on parse failure"; the parser also
+        // fires a `tracing::warn!` but that side-effect is not
+        // observable here without a tracing harness.
+        let mut app = fresh_app();
+        app.entries
+            .push(Entry::RouteBadge("malformed-no-separator".into()));
+        assert!(app.most_recent_routing_decision().is_none());
+    }
 }

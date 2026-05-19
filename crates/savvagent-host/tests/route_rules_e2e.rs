@@ -17,7 +17,6 @@
 
 use std::io::Write;
 use std::sync::Arc;
-use std::time::Duration;
 
 use async_trait::async_trait;
 use savvagent_host::capabilities::{CostTier, ModelCapabilities, ProviderCapabilities};
@@ -299,7 +298,9 @@ use = "anthropic/claude-haiku-4-5"
             );
             std::fs::write(&reload_path, body).expect("rewrite routing.toml");
             let _ = host_t.reload_routing_rules().await;
-            tokio::time::sleep(Duration::from_millis(5)).await;
+            // `yield_now` instead of `sleep(5ms)` keeps the contention
+            // window without holding up the test on slow CI runners.
+            tokio::task::yield_now().await;
         }
     });
 

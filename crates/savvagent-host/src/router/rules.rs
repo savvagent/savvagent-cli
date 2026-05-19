@@ -770,4 +770,65 @@ default = "anthropic"
             "expected BadDefaultSyntax, got {err:?}"
         );
     }
+
+    #[test]
+    fn evaluate_keywords_are_or_not_and() {
+        // Multi-keyword arrays use OR semantics within a single rule.
+        // (AND-style "all keywords must appear" would require declaring
+        // separate rules; tests pin the OR contract here so a future
+        // refactor doesn't silently flip it.)
+        let (_d, path) = tmp_routing(
+            r#"
+[[rule]]
+name = "alpha-or-beta"
+match = { keywords = ["alpha", "beta"] }
+use = "anthropic/claude-opus-4-7"
+"#,
+        );
+        let r = RoutingRules::load_from_path(&path).unwrap();
+        let a_id = ProviderId::new("anthropic").unwrap();
+        let a_caps = caps_with_models(&["claude-opus-4-7"]);
+        let views = vec![crate::router::ProviderView {
+            id: &a_id,
+            capabilities: &a_caps,
+        }];
+
+        // Both keywords present is fine.
+        assert!(
+            r.evaluate(&signals("alpha and beta", false), &views)
+                .is_some()
+        );
+        // Only one keyword present is fine (OR semantics).
+        assert!(r.evaluate(&signals("alpha only", false), &views).is_some());
+        assert!(r.evaluate(&signals("only beta", false), &views).is_some());
+        // Neither present → no match.
+        assert!(r.evaluate(&signals("gamma", false), &views).is_none());
+    }
+
+    #[test]
+    fn evaluate_empty_keywords_array_means_no_constraint() {
+        // `keywords = []` must behave the same as "predicate absent" —
+        // every turn matches as long as the other predicates pass.
+        let (_d, path) = tmp_routing(
+            r#"
+[[rule]]
+name = "no-keyword-constraint"
+match = { keywords = [], max_input_chars = 100 }
+use = "anthropic/claude-opus-4-7"
+"#,
+        );
+        let r = RoutingRules::load_from_path(&path).unwrap();
+        let a_id = ProviderId::new("anthropic").unwrap();
+        let a_caps = caps_with_models(&["claude-opus-4-7"]);
+        let views = vec![crate::router::ProviderView {
+            id: &a_id,
+            capabilities: &a_caps,
+        }];
+
+        // Empty keywords means "no keyword constraint"; the other
+        // predicate (max_input_chars) still applies.
+        assert!(r.evaluate(&signals("anything", false), &views).is_some());
+        let too_long = "x".repeat(200);
+        assert!(r.evaluate(&signals(&too_long, false), &views).is_none());
+    }
 }

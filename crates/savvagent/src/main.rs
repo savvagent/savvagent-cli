@@ -3041,3 +3041,269 @@ mod model_validation_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod render_routing_show_tests {
+    //! Tests for `render_routing_show` — the pure-over-snapshot
+    //! renderer that pushes `/route show` output onto an `App`. Each
+    //! case exercises a different branch (empty rules, active rule,
+    //! skipped-because-disconnected rule, last-decision badge) and
+    //! asserts on the number + content of the `Entry::Note` lines
+    //! that landed on `app.entries`. Note assertions search for
+    //! load-bearing substrings (rule names, "skipped", etc.) so the
+    //! tests survive minor i18n wording tweaks.
+    use super::*;
+    use crate::app::{App, Entry};
+    use async_trait::async_trait;
+    use savvagent_host::{DefaultPick, RoutingRule, RoutingRules, RuleMatch};
+    use savvagent_mcp::ProviderClient;
+    use savvagent_protocol::{
+        CompleteRequest, CompleteResponse, ListModelsResponse, ProviderError, ProviderId,
+        StreamEvent,
+    };
+    use std::path::PathBuf;
+    use tokio::sync::mpsc;
+
+    /// Stub `ProviderClient` we never call — only used to satisfy the
+    /// `registered_providers` map shape so `connected_provider_ids`
+    /// returns the keys we just inserted.
+    struct StubClient;
+    #[async_trait]
+    impl ProviderClient for StubClient {
+        async fn complete(
+            &self,
+            _: CompleteRequest,
+            _: Option<mpsc::Sender<StreamEvent>>,
+        ) -> Result<CompleteResponse, ProviderError> {
+            unreachable!("stub client never invoked in render_routing_show tests")
+        }
+        async fn list_models(&self) -> Result<ListModelsResponse, ProviderError> {
+            unreachable!("stub client never invoked in render_routing_show tests")
+        }
+    }
+
+    fn build_app() -> App {
+        App::new("test-model".into(), PathBuf::from("/tmp"), "en".to_string())
+    }
+
+    fn register(app: &mut App, id: &str) {
+        app.registered_providers
+            .insert(id.to_string(), Box::new(StubClient));
+    }
+
+    fn collect_notes(app: &App) -> Vec<String> {
+        app.entries
+            .iter()
+            .filter_map(|e| match e {
+                Entry::Note(t) => Some(t.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn rule_with_keyword(name: &str, provider: &str, model: &str, keyword: &str) -> RoutingRule {
+        // `RuleMatch` is `#[non_exhaustive]` outside its defining crate;
+        // construct with `Default::default()` and mutate the one field
+        // we care about.
+        let mut match_ = RuleMatch::default();
+        match_.keywords = vec![keyword.into()];
+        RoutingRule {
+            name: name.into(),
+            match_,
+            use_: DefaultPick::new(ProviderId::new(provider).unwrap(), model).unwrap(),
+        }
+    }
+
+    fn anthropic_rule(name: &str) -> RoutingRule {
+        rule_with_keyword(name, "anthropic", "claude-opus-4-7", "x")
+    }
+
+    fn gemini_rule(name: &str) -> RoutingRule {
+        rule_with_keyword(name, "gemini", "gemini-2.0-flash", "y")
+    }
+
+    #[test]
+    fn empty_rules_prints_no_rules_then_default_then_last() {
+        let mut app = build_app();
+        render_routing_show(&mut app, &RoutingRules::empty());
+        let notes = collect_notes(&app);
+        // No rules → 1 line. No default → 1 line. No last decision → 1 line.
+        assert_eq!(notes.len(), 3, "notes were: {notes:?}");
+        assert!(
+            notes[0].to_lowercase().contains("no routing rules"),
+            "first note should be the no-rules line, got: {}",
+            notes[0]
+        );
+    }
+
+    #[test]
+    fn one_active_rule_prints_rule_line_without_skipped_marker() {
+        let mut app = build_app();
+        register(&mut app, "anthropic");
+
+        let rules = RoutingRules {
+            default: None,
+            heuristics: false,
+            rules: vec![anthropic_rule("my-rule")],
+        };
+        render_routing_show(&mut app, &rules);
+        let notes = collect_notes(&app);
+        // header + 1 rule + no-default + no-last = 4 notes.
+        assert_eq!(notes.len(), 4, "notes were: {notes:?}");
+        let rule_line = &notes[1];
+        assert!(
+            rule_line.contains("my-rule") && rule_line.contains("anthropic"),
+            "rule line missing name/provider: {rule_line}"
+        );
+        assert!(
+            !rule_line.to_lowercase().contains("skipped"),
+            "active rule must not carry the skipped marker: {rule_line}"
+        );
+    }
+
+    #[test]
+    fn one_skipped_rule_prints_skipped_marker() {
+        let mut app = build_app();
+        // Only anthropic registered; rule targets gemini → must be skipped.
+        register(&mut app, "anthropic");
+
+        let rules = RoutingRules {
+            default: None,
+            heuristics: false,
+            rules: vec![gemini_rule("for-gemini")],
+        };
+        render_routing_show(&mut app, &rules);
+        let notes = collect_notes(&app);
+        assert_eq!(notes.len(), 4, "notes were: {notes:?}");
+        let rule_line = &notes[1];
+        assert!(
+            rule_line.to_lowercase().contains("skipped"),
+            "disconnected-target rule must carry the skipped marker: {rule_line}"
+        );
+    }
+
+    #[test]
+    fn last_decision_present_renders_it() {
+        let mut app = build_app();
+        app.entries.push(Entry::RouteBadge(
+            "anthropic/claude-opus-4-7 — Rule(my-rule)".into(),
+        ));
+
+        render_routing_show(&mut app, &RoutingRules::empty());
+        let notes = collect_notes(&app);
+        // No rules + no default + last-decision (parsed from badge) = 3.
+        assert_eq!(notes.len(), 3, "notes were: {notes:?}");
+        let last = notes.last().expect("last present");
+        assert!(
+            last.contains("anthropic")
+                && last.contains("claude-opus-4-7")
+                && last.contains("Rule(my-rule)"),
+            "last-decision note should include parsed badge fields: {last}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod resolve_initial_model_for_tests {
+    //! Pins the four precedence layers of `resolve_initial_model_for`:
+    //! `SAVVAGENT_MODEL` env > `~/.savvagent/models.toml` >
+    //! `routing.toml#default` > `spec.default_model`. All four tests
+    //! use the workspace-wide `HOME_LOCK` guard + `HomeGuard` to
+    //! redirect `$HOME` to a fresh tempdir and serialise against every
+    //! other `$HOME`-mutating test. `SAVVAGENT_MODEL` is set/unset
+    //! inside the same critical section so the env-var precedence
+    //! tests can't leak into a sibling test.
+    use super::*;
+    use crate::providers::ProviderSpec;
+    use crate::test_helpers::{HOME_LOCK, HomeGuard};
+
+    /// `ProviderSpec` we synthesise per-test. Stays inside the module
+    /// so any future field additions only affect the test scaffolding.
+    fn anthropic_spec() -> ProviderSpec {
+        ProviderSpec {
+            id: "anthropic",
+            display_name: "Anthropic (test)",
+            api_key_env: "ANTHROPIC_API_KEY",
+            default_model: "claude-haiku-4-5",
+            api_key_required: true,
+        }
+    }
+
+    /// Write `body` to `~/.savvagent/<filename>` under the current
+    /// `HomeGuard`'s tempdir.
+    fn write_under_home(filename: &str, body: &str) {
+        let home = std::env::var_os("HOME").expect("HOME set by HomeGuard");
+        let dir = std::path::PathBuf::from(home).join(".savvagent");
+        std::fs::create_dir_all(&dir).expect("create .savvagent dir");
+        std::fs::write(dir.join(filename), body).expect("write file");
+    }
+
+    /// Clear `SAVVAGENT_MODEL` so no ambient env pollutes the test.
+    /// Safe because we hold `HOME_LOCK` for the test lifetime.
+    fn clear_env() {
+        // SAFETY: HOME_LOCK is held; no other test mutates env right now.
+        unsafe { std::env::remove_var("SAVVAGENT_MODEL") };
+    }
+
+    #[test]
+    fn env_var_wins_over_everything() {
+        let _lock = HOME_LOCK.lock().unwrap();
+        let _home = HomeGuard::new();
+        clear_env();
+        // Plant a competing models.toml + routing.toml; env must still win.
+        write_under_home(
+            "models.toml",
+            r#"schema_version = 1
+[providers]
+anthropic = "from-models-toml"
+"#,
+        );
+        write_under_home("routing.toml", r#"default = "anthropic/from-routing-toml""#);
+        // SAFETY: HOME_LOCK held.
+        unsafe { std::env::set_var("SAVVAGENT_MODEL", "from-env") };
+
+        let got = resolve_initial_model_for(&anthropic_spec());
+        // Reset env BEFORE asserting so a failure doesn't pollute siblings.
+        clear_env();
+        assert_eq!(got, "from-env");
+    }
+
+    #[test]
+    fn models_toml_wins_over_routing_toml_and_spec() {
+        let _lock = HOME_LOCK.lock().unwrap();
+        let _home = HomeGuard::new();
+        clear_env();
+        write_under_home(
+            "models.toml",
+            r#"schema_version = 1
+[providers]
+anthropic = "from-models-toml"
+"#,
+        );
+        write_under_home("routing.toml", r#"default = "anthropic/from-routing-toml""#);
+
+        let got = resolve_initial_model_for(&anthropic_spec());
+        assert_eq!(got, "from-models-toml");
+    }
+
+    #[test]
+    fn routing_toml_default_wins_over_spec_when_no_models_toml() {
+        let _lock = HOME_LOCK.lock().unwrap();
+        let _home = HomeGuard::new();
+        clear_env();
+        write_under_home("routing.toml", r#"default = "anthropic/from-routing-toml""#);
+
+        let got = resolve_initial_model_for(&anthropic_spec());
+        assert_eq!(got, "from-routing-toml");
+    }
+
+    #[test]
+    fn falls_back_to_spec_default_when_all_empty() {
+        let _lock = HOME_LOCK.lock().unwrap();
+        let _home = HomeGuard::new();
+        clear_env();
+        // No models.toml, no routing.toml, no env — spec wins.
+        let got = resolve_initial_model_for(&anthropic_spec());
+        assert_eq!(got, "claude-haiku-4-5");
+    }
+}

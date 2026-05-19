@@ -256,8 +256,16 @@ mod tests {
         assert!(matches!(effs[0], Effect::PushNote { .. }));
     }
 
-    #[tokio::test]
+    // HOME_LOCK is std::sync::Mutex (shared across the savvagent crate)
+    // and must span the await. Holding it here serialises with every
+    // other HOME-mutating test in this crate; without it the
+    // routing/models-pref tests (which redirect $HOME to a tempdir)
+    // raced these tests' writes to `~/.savvagent/config.toml`.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(flavor = "current_thread")]
     async fn confirm_with_args_uses_provided_ids() {
+        use crate::test_helpers::HOME_LOCK;
+        let _lock = HOME_LOCK.lock().unwrap();
         let mut p = MigrationPickerPlugin::new();
         // Pre-populate cache so dismissed_fallback has material to work with.
         p.detected_cache = vec![
@@ -282,8 +290,11 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(flavor = "current_thread")]
     async fn dismiss_uses_fallback() {
+        use crate::test_helpers::HOME_LOCK;
+        let _lock = HOME_LOCK.lock().unwrap();
         let mut p = MigrationPickerPlugin::new();
         p.detected_cache = vec![
             ProviderId::new("gemini").unwrap(),
