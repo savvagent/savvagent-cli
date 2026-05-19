@@ -333,6 +333,11 @@ pub struct Host {
     /// `reload_routing_rules`. Snapshotted (cloned) before any `.await`
     /// in `run_turn_inner`, same discipline as `active_provider` etc.
     routing_rules: Arc<tokio::sync::RwLock<crate::router::RoutingRules>>,
+    /// One-shot startup notes (e.g. routing.toml parse failures) that the
+    /// TUI should drain and surface as styled notes once `App` exists.
+    /// Plain `std::sync::Mutex` because access is one-shot at startup —
+    /// no async required and no contention with the turn loop.
+    startup_notes: std::sync::Mutex<Vec<String>>,
 }
 
 struct SessionState {
@@ -433,11 +438,19 @@ impl Host {
             .collect();
 
         let initial_model = config.model.clone();
+        let mut startup_notes: Vec<String> = Vec::new();
         let routing_rules = match config.routing_rules_path.as_ref() {
             Some(path) => match crate::router::RoutingRules::load_from_path(path) {
                 Ok(r) => r,
                 Err(e) => {
-                    tracing::warn!(error = %e, "failed to load routing.toml at startup; falling back to empty rules");
+                    tracing::warn!(
+                        error = %e,
+                        path = %path.display(),
+                        "failed to load routing.toml at startup; falling back to empty rules"
+                    );
+                    startup_notes.push(format!(
+                        "routing.toml failed to load: {e}; run /route reload after fixing the file"
+                    ));
                     crate::router::RoutingRules::empty()
                 }
             },
@@ -462,6 +475,7 @@ impl Host {
             cancel_signal: tokio::sync::Mutex::new(cancel_signal_map),
             turn_handles: tokio::sync::Mutex::new(HashMap::new()),
             routing_rules: Arc::new(tokio::sync::RwLock::new(routing_rules)),
+            startup_notes: std::sync::Mutex::new(startup_notes),
         };
         host.wire_self_into_resolver().await;
         Ok(host)
@@ -515,11 +529,19 @@ impl Host {
         cancel_signal_map.insert(default_id.clone(), broadcast::channel(8).0);
 
         let initial_model = config.model.clone();
+        let mut startup_notes: Vec<String> = Vec::new();
         let routing_rules = match config.routing_rules_path.as_ref() {
             Some(path) => match crate::router::RoutingRules::load_from_path(path) {
                 Ok(r) => r,
                 Err(e) => {
-                    tracing::warn!(error = %e, "failed to load routing.toml at startup; falling back to empty rules");
+                    tracing::warn!(
+                        error = %e,
+                        path = %path.display(),
+                        "failed to load routing.toml at startup; falling back to empty rules"
+                    );
+                    startup_notes.push(format!(
+                        "routing.toml failed to load: {e}; run /route reload after fixing the file"
+                    ));
                     crate::router::RoutingRules::empty()
                 }
             },
@@ -544,6 +566,7 @@ impl Host {
             cancel_signal: tokio::sync::Mutex::new(cancel_signal_map),
             turn_handles: tokio::sync::Mutex::new(HashMap::new()),
             routing_rules: Arc::new(tokio::sync::RwLock::new(routing_rules)),
+            startup_notes: std::sync::Mutex::new(startup_notes),
         };
         host.wire_self_into_resolver().await;
         Ok(host)
@@ -599,15 +622,13 @@ impl Host {
     /// surfacing.
     pub async fn reload_routing_rules(&self) -> Result<usize, crate::router::RoutingRulesError> {
         let Some(path) = self.config.routing_rules_path.clone() else {
-            // Nothing to reload from. Clear in-memory so a caller that
-            // toggles `routing_rules_path` between Some and None at runtime
-            // sees the intended "no rules" state. In normal TUI operation
-            // this branch is unreachable because the TUI always sets the
-            // path at startup; only tests / headless embedders ever hit
-            // this code path.
-            let mut g = self.routing_rules.write().await;
-            *g = crate::router::RoutingRules::empty();
-            return Ok(0);
+            // No path configured — there is nothing to re-read. Returning
+            // `NoPathConfigured` lets the TUI render a real failure note
+            // instead of "reloaded 0 rules" which would hide the
+            // mis-configuration. The previous behaviour (clear in-memory
+            // + Ok(0)) silently masked the bug for callers that toggled
+            // `routing_rules_path` to None and then asked for a reload.
+            return Err(crate::router::RoutingRulesError::NoPathConfigured);
         };
         let new_rules = crate::router::RoutingRules::load_from_path(&path)?;
         let count = new_rules.rules.len();
@@ -620,6 +641,19 @@ impl Host {
     /// render its output without holding the lock across an `.await`.
     pub async fn routing_rules_snapshot(&self) -> crate::router::RoutingRules {
         self.routing_rules.read().await.clone()
+    }
+
+    /// Drain any one-shot startup notes (e.g. `routing.toml` parse
+    /// failures recorded during `Host::start`). Returns the accumulated
+    /// messages and clears the buffer. The TUI calls this once after
+    /// `Host::start` returns and surfaces each message as a styled note.
+    pub fn take_startup_notes(&self) -> Vec<String> {
+        std::mem::take(
+            &mut *self
+                .startup_notes
+                .lock()
+                .expect("startup_notes mutex poisoned"),
+        )
     }
 
     /// Ask the active provider for its model list.

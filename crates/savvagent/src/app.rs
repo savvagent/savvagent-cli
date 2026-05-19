@@ -1193,16 +1193,30 @@ impl App {
 
     /// Scan the entries backwards for the most recent `Entry::RouteBadge`
     /// and parse it into `(provider, model, reason)`. The badge format is
-    /// `"provider/model — Reason"` (see `apply_turn_event`'s
-    /// `RouteSelected` arm at line 543). Returns `None` when no badge is
-    /// present in this session yet, or when the format can't be parsed.
+    /// `"provider/model — Reason"`, written by `apply_turn_event`'s
+    /// `RouteSelected` arm. Returns `None` when no badge is present in
+    /// this session yet, or when the format can't be parsed; the latter
+    /// case logs a `tracing::warn!` so a divergence between the writer
+    /// (in `apply_turn_event`) and this reader doesn't fail silently.
     pub fn most_recent_routing_decision(&self) -> Option<(String, String, String)> {
         let badge = self.entries.iter().rev().find_map(|e| match e {
             Entry::RouteBadge(s) => Some(s.as_str()),
             _ => None,
         })?;
-        let (left, reason) = badge.split_once(" — ")?;
-        let (provider, model) = left.split_once('/')?;
+        let Some((left, reason)) = badge.split_once(" — ") else {
+            tracing::warn!(
+                badge = %badge,
+                "route badge missing ' — ' separator; format may have changed"
+            );
+            return None;
+        };
+        let Some((provider, model)) = left.split_once('/') else {
+            tracing::warn!(
+                badge = %badge,
+                "route badge left half missing '/'; format may have changed"
+            );
+            return None;
+        };
         Some((provider.to_string(), model.to_string(), reason.to_string()))
     }
 
@@ -1224,7 +1238,18 @@ impl App {
     pub fn connected_provider_ids(&self) -> Vec<savvagent_protocol::ProviderId> {
         self.registered_providers
             .keys()
-            .filter_map(|s| savvagent_protocol::ProviderId::new(s).ok())
+            .filter_map(|s| match savvagent_protocol::ProviderId::new(s) {
+                Ok(id) => Some(id),
+                Err(e) => {
+                    tracing::warn!(
+                        provider_id = %s,
+                        error = %e,
+                        "registered_providers key failed ProviderId round-trip; \
+                         /route show may mis-label rules targeting this provider"
+                    );
+                    None
+                }
+            })
             .collect()
     }
 

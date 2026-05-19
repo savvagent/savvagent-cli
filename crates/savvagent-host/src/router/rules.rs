@@ -146,6 +146,10 @@ pub enum RoutingRulesError {
         #[source]
         source: std::io::Error,
     },
+    /// `reload_routing_rules` was called but `HostConfig::routing_rules_path`
+    /// was `None`. The host has nothing to re-read.
+    #[error("no routing.toml path configured")]
+    NoPathConfigured,
 }
 
 // ----- TOML wire shape (serde-only; never exposed via the public API) -----

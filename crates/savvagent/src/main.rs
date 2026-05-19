@@ -297,7 +297,10 @@ async fn bootstrap_pool_host(
         let model =
             std::env::var("SAVVAGENT_MODEL").unwrap_or_else(|_| "claude-haiku-4-5".to_string());
         match start_host_remote(url, model.clone(), project_root.to_path_buf(), tool_bins).await {
-            Ok(host) => return Some((host, model, None, Vec::new())),
+            Ok(host) => {
+                let notes = host.take_startup_notes();
+                return Some((host, model, None, notes));
+            }
             Err(e) => {
                 eprintln!("warning: SAVVAGENT_PROVIDER_URL set but connect failed: {e:#}");
             }
@@ -481,12 +484,18 @@ async fn bootstrap_pool_host(
     config.routing_rules_path = crate::routing_pref::routing_toml_path();
 
     match Host::start(config).await {
-        Ok(host) => Some((
-            Arc::new(host),
-            initial_model,
-            initial_provider_id,
-            deferred_notes,
-        )),
+        Ok(host) => {
+            // Surface any one-shot startup notes the host recorded (e.g.
+            // a `routing.toml` parse failure). These are appended to
+            // `deferred_notes` so `run_app` pushes them once `App` exists.
+            deferred_notes.extend(host.take_startup_notes());
+            Some((
+                Arc::new(host),
+                initial_model,
+                initial_provider_id,
+                deferred_notes,
+            ))
+        }
         Err(e) => {
             eprintln!("warning: pool host start failed: {e:#}");
             None
@@ -1291,7 +1300,7 @@ async fn apply_pending_routing_show(app: &mut App, host_slot: &HostSlot) {
         return;
     }
     let Some(host) = current_host(host_slot).await else {
-        app.push_note(rust_i18n::t!("routing.show-no-rules").to_string());
+        app.push_note(rust_i18n::t!("routing.show-no-host").to_string());
         return;
     };
     let rules = host.routing_rules_snapshot().await;
@@ -1869,6 +1878,11 @@ async fn perform_connect(
         cfg.routing_rules_path = crate::routing_pref::routing_toml_path();
         match Host::start(cfg).await {
             Ok(h) => {
+                // Surface any one-shot startup notes (e.g. routing.toml
+                // parse failure) before the host is stashed in host_slot.
+                for note in h.take_startup_notes() {
+                    app.push_note(note);
+                }
                 *host_slot.write().await = Some(Arc::new(h));
             }
             Err(e) => {
