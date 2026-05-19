@@ -23,36 +23,31 @@ The parent spec's "Routing config" section defines the user-facing TOML shape; t
 
 Every choice made without asking lives here. The developer's review of this spec is the review of these assumptions.
 
-1. **Config file location is `~/.savvagent/routing.toml`** (verbatim from the parent spec). Mirrors `sandbox.toml`, `models.toml`, `plugins.toml`, `language.toml` — the established pattern is one file per concern under `~/.savvagent/`.
-2. **Loader and module live in `savvagent-host`, not the TUI.** Same crate as `Router::pick`. `RoutingRules` is loaded once by `Host::start` from `HostConfig::routing_rules_path`, then stored on `Host` behind a single `Arc<RwLock<RoutingRules>>` field (parallels how `Host` owns `pool`, `active_provider`, `current_model` today). `/route reload` mutates the same handle.
-3. **`HostConfig::routing_rules_path: Option<PathBuf>`** — `None` means "don't load any rules; treat as empty." The TUI populates it with the resolved `~/.savvagent/routing.toml` path; the headless example and tests can pass `None`. This mirrors `HostConfig::policy` and `HostConfig::sandbox`'s "None = build a sensible default" convention.
-4. **Schema version field, like sandbox.toml.** `version = 1` at the top of the file; loader rejects unknown future versions with a styled warning + empty fallback, identical to `SandboxConfig`'s pattern. Going schema-first now is cheaper than retro-fitting when we add predicates in Phase 6+.
-5. **`default` field on `routing.toml` is read but treated as a hint, not a hard override.** The parent spec says "Default model. The current `/model` selection, generalized to identify both a provider and a model. Mirrors today's `SAVVAGENT_MODEL` precedence." Phase 5 wires the `default` field from `routing.toml` into the existing `legacy_model.rs` resolver chain at one position: **after** `SAVVAGENT_MODEL` and **before** `~/.savvagent/models.toml`. That is, env beats routing.toml beats models.toml beats `provider.default_model`. Documented in the parent spec's "Legacy environment compatibility" precedence section by extension. If the developer prefers `default` in `routing.toml` to outrank `models.toml` in a different order, this is the place to flag it.
-6. **`heuristics = true` in the file is parsed and stored but not consumed yet** — Phase 6 owns the classifier. Phase 5 records the field on `RoutingRules` and re-routes the data through Phase 6 without re-parsing. This avoids the alternative ("ignore `heuristics` entirely until Phase 6") which would silently swallow a user-typed flag.
-7. **Predicates land exactly as the parent spec lists them**, no additions:
-   - `has_image: bool` (already detected by Phase 4's `RequiredModalities`)
-   - `has_pdf: bool` (always `false` until protocol gains a PDF block; documented as reserved)
-   - `has_audio: bool` (same — reserved)
-   - `keywords: Vec<String>` — case-insensitive substring match against the latest user message's concatenated `Text` blocks (image-only turns have empty text → no keyword can match)
-   - `max_input_chars: usize` — inclusive upper bound on the latest user message's text length
-   - `min_input_chars: usize` — inclusive lower bound
-   Multiple predicate keys within one `match` table compose with **AND** (per parent spec). The lack of OR / NOT / regex is intentional and additive — adding them later is non-breaking because the predicate set is `#[non_exhaustive]` on the type.
-8. **Rules evaluate top-to-bottom, first match wins.** Parent spec is explicit. Stable order = TOML array order. No priority field; if a user wants priority, they reorder.
-9. **`use = "provider/model"` is the only `use` form.** Parent spec example uses `provider/model` consistently. A bare model id without a provider is rejected at parse time with a styled note (same pattern as `legacy_model.rs`'s ambiguity warning) because Phase 3 already proved that bare model ids are ambiguous across providers.
-10. **A rule whose `use` provider is not currently connected is treated like a stale `@`-override:** the rule is *skipped silently* and the next rule is tried. Logging at `info!` level so debuggers can see the skip. This mirrors `Router::pick`'s existing "stale override falls through" behavior; the alternative (failing the turn or surfacing a per-turn warning) felt too punitive for what is normally a transient state (user disconnected the provider mid-session, file mentions it, will reconnect later).
-11. **A rule whose `use` model is unknown to the named provider falls back to that provider's default model + a one-shot styled warning** (logged once per `RoutingRules` load — re-logged after `/route reload`). Parallels the `legacy_model.rs` behavior ("provider exists but model is unknown" → use default + warn).
-12. **`/route` is a *plugin*, not a host-direct slash dispatch.** Per [[feedback_ui_via_plugins]], new TUI features must be plugins. `/route reload` and `/route show` ship as one plugin (`internal:route`) with a single `route` SlashSpec and an args-driven subcommand parser inside `handle_slash`. Same pattern as the plugin runtime already uses for plugins with subcommands.
-13. **`/route show` output renders inline as styled notes**, not in a new screen. Each rule becomes one line: `[N] <name> — match: <key=value, …> → <provider>/<model> [skipped: provider not connected]`. The active default + active heuristics flag print first. The last `RoutingDecision` from this conversation, if any, prints last. Lower-cost than a screen, easier to share via `/save`. Future iteration: a `route-view` screen plugin if dumping inline gets too noisy.
-14. **`Router::pick` gains one new parameter: `rules: &RoutingRules`.** Stateless pure function as today. Existing callers (only `session.rs`) update; the new param is read from the host's `Arc<RwLock<RoutingRules>>` snapshot under the same lock-then-clone pattern used for `active_provider` (snapshot before any `.await`).
-15. **`RoutingReason::Rule { name: String }`** is the new variant. The transcript badge renders `Rule(name-of-rule)`. `#[non_exhaustive]` already enabled in Phase 3 so this is additive.
-16. **No state file changes.** `~/.savvagent/state.toml` is untouched. Routing rules live in their own file because the parent spec is explicit ("Rules are edited in a file; the TUI offers `/route reload` and `/route show` only").
-17. **Per-conversation overrides remain out of scope** (parent spec: "Per-conversation default model override … Orthogonal to multi-provider; can land independently"). Phase 5 ships only the file-driven layer.
-18. **`heuristics` and `default` keys are at the top level of the TOML;** `[[rule]]` is the only array-of-tables. This matches the parent spec's example verbatim.
-19. **Loader is sync I/O** (`std::fs::read_to_string`) at startup, same as `SandboxConfig::load`. `/route reload` is async and runs the same loader on a `tokio::task::spawn_blocking` if the file is large — though in practice routing.toml is <8 KB so it's just a sync call inside an async function.
-20. **i18n strings for the plugin (`slash.route-summary`, the per-line labels, error messages) are added across all four locale files (en/es/pt/hi)**, mirroring how every other slash plugin handles it. en.toml is the canonical source; non-English locales get TODO placeholders if Phase 5 ships before the locale translators see it (per past practice — the existing locale files have TODOs for newer strings already).
-21. **Release version: `release(0.19.0)`** in-tree (consistent with the per-phase scaffolding pattern); the actual tagged release rolls up Phases 1-N once the initiative is done, per [[feedback_phase_release_rollup.md]] and [[project_multi_provider_release.md]] in memory.
-22. **CHANGELOG, README, release notes** updated in the same commit as the version bump per [[feedback_release_notes]] and [[feedback_release_docs]].
-23. **The dead-code rule** ([[feedback_dead_code_in_binary_crate.md]]): any public item the TUI adds for `/route` must be consumed by non-test TUI code OR carry `#[allow(dead_code)]` with a TODO. The plugin pattern already used by `save`/`connect` keeps every new item consumed by the plugin's own `handle_slash` so this is a no-op.
+The following are **verbatim from the parent spec** and are listed only so reviewers can spot drift quickly; they're not open questions: config file is `~/.savvagent/routing.toml`; predicates are `has_image` / `has_pdf` / `has_audio` / `keywords` / `max_input_chars` / `min_input_chars` composing with AND; rules evaluate top-to-bottom with first-match-wins; `use = "provider/model"` is the only `use` form; `[[rule]]` is the only array-of-tables; per-conversation overrides remain out of scope; `~/.savvagent/state.toml` is untouched. Phase 5 does not adjust any of these.
+
+The substantive choices the developer is being asked to confirm:
+
+1. **Loader and module live in `savvagent-host`.** Same crate as `Router::pick`. `RoutingRules` is loaded once by `Host::start` from `HostConfig::routing_rules_path`, then stored on `Host` behind a single `Arc<RwLock<RoutingRules>>` field (parallels how `Host` owns `pool`, `active_provider`, `current_model` today). `/route reload` mutates the same handle. *Why not the TUI:* the router itself, which consumes the rules, is host-local; putting the loader there avoids a parameter-passing dance and matches where `PermissionPolicy` and `SandboxConfig` live.
+2. **`HostConfig::routing_rules_path: Option<PathBuf>`.** `None` means "don't load any rules; treat as empty." Mirrors `HostConfig::policy` and `HostConfig::sandbox`'s "None = build a sensible default" convention.
+3. **Schema version field, like sandbox.toml.** `version = 1` at the top of the file; loader rejects unknown future versions with a styled warning + empty fallback, identical to `SandboxConfig`'s pattern. Going schema-first now is cheaper than retro-fitting predicates in Phase 6+.
+4. **`default` field precedence — slotted at the bottom of the chain.** Phase 5 inserts `routing.toml#default` between `~/.savvagent/models.toml` and the provider's hard-coded `default_model`. New full order:
+   `SAVVAGENT_MODEL` env → `~/.savvagent/models.toml` → `routing.toml#default` → `provider.default_model`.
+   *Rationale:* `models.toml` is what the user just clicked through in `/model` — the most-recent explicit interactive pick should win. `routing.toml#default` is a hand-edited global preference that replaces the provider's hard-coded fallback. Env still wins to keep CLI overrides and tests cheap. This is the **conservative** choice the reviewer asked for; if the developer prefers routing.toml to outrank models.toml, swap the middle two terms — code change is one line in `legacy_model.rs`.
+5. **`heuristics = true` is parsed and stored but not consumed yet.** Phase 6 owns the classifier. Phase 5 records the field on `RoutingRules` so a typo'd flag doesn't silently disappear. Phase 5's `/route show` prints "heuristics: enabled — classifier ships in a future release" so users who toggle it now aren't surprised.
+6. **A rule whose `use` provider is not currently connected is silently skipped** (next rule tried, then Default). Mirrors `Router::pick`'s existing "stale override falls through" behavior. Logged at `info!` level. Alternative (failing the turn or per-turn warning) felt too punitive for a routinely-transient state.
+7. **A rule whose `use` model is unknown to the named provider falls back to that provider's default model + a one-shot warning** (re-logged on every `/route reload`). Parallels `legacy_model.rs`'s "provider exists but model unknown → use default + warn" behavior.
+8. **`/route` is a *plugin*, not a host-direct slash dispatch.** Per [[feedback_ui_via_plugins]]. One plugin (`internal:route`) with a single `route` SlashSpec and an args-driven subcommand parser inside `handle_slash`.
+9. **`/route show` output renders inline as styled notes**, not in a new screen. Each rule becomes one line; the active default and the most recent `RoutingDecision` (sourced from the TUI's existing transcript entries — see assumption #11) print on header/footer lines. Lower-cost than a screen, easier to share via `/save`. Future iteration: a `route-view` screen plugin if rule-list users grow unwieldy.
+10. **`Router::pick` gains one new parameter `rules: &RoutingRules` plus one `user_text: &str`.** Stateless pure function as today. Read from the host's `Arc<RwLock<RoutingRules>>` snapshot under the lock-then-clone-before-await pattern. `user_text` is the concatenated `Text` blocks of the latest user message (already available in `run_turn_inner`).
+11. **`/route show` sources "last decision" from the TUI's existing transcript entries, NOT from a new `Host` field.** The transcript already carries the routing badge per Phase 3; the plugin's handler in `apply_effects` (which has access to `App::log`) scans backwards for the most recent badge entry. *Why this matters:* avoids adding `Host::last_routing_decision()` + `Arc<RwLock<Option<RoutingDecision>>>` + a `set_last_routing_decision` call in `run_turn_inner`. This is the YAGNI win the reviewer flagged.
+12. **`RoutingReason::Rule { name: String }`** is the new variant. The transcript badge renders **`Rule(<name>)`** (parens-and-bare, no quotes — matches Phase 4's `Modality(image)` Display impl).
+13. **Parse-error recovery on `/route reload` keeps the prior rules (deliberate refinement vs parent spec).** The parent spec says "parse errors fall back to no user rules + styled note," which is the right behavior at *startup* (no prior rules to keep). For `/route reload`, dropping rules on a typo would mean a single bad keystroke disables a 30-rule config until the user fixes the file — punitive. Phase 5 keeps the in-memory rules and emits a styled error note so the user can re-edit. Startup behavior is unchanged: file-absent or parse-error → `RoutingRules::empty()`.
+14. **Effect surface is two new variants** (`Effect::ReloadRoutingRules`, `Effect::ShowRoutingRules`) because the plugin's `handle_slash` returns `Vec<Effect>` and has no `&Host` access (verified against `crates/savvagent-plugin/src/plugin.rs`). Both effects are handled in `apply_effects` (which does have host access) the same way `Effect::SaveTranscript` is handled today. *Why not one Effect with a SubCommand enum:* matches existing `Effect::ClearLog`, `Effect::Quit`, `Effect::SaveTranscript` granularity — one effect = one named operation. Adding a subcommand enum here would be the only place in the system using that pattern.
+15. **Loader is straight sync I/O** (`std::fs::read_to_string`) at startup AND inside `/route reload`'s async handler. No `tokio::task::spawn_blocking`. Routing.toml is small (<8 KB) and the loader runs at most once per `/route reload` invocation.
+16. **i18n strings** (`slash.route-summary`, the per-line labels, error messages) are added to en.toml as canonical; es/pt/hi get TODO placeholders if Phase 5 ships before translation. Past phases have done this; rust_i18n falls back to en automatically.
+17. **Release version: `release(0.19.0)`** in-tree (per-phase scaffolding pattern); the actual tagged release rolls up Phases 1-N once the initiative is done — per [[feedback_phase_release_rollup.md]] and [[project_multi_provider_release.md]].
+18. **CHANGELOG, README, release notes** updated in the same commit as the version bump per [[feedback_release_notes]] and [[feedback_release_docs]].
+19. **The dead-code rule** ([[feedback_dead_code_in_binary_crate.md]]): every new public TUI item is consumed by non-test code, no `#[allow(dead_code)]` introduced. The plugin pattern already used by `save`/`connect` keeps every new item consumed by the plugin's own `handle_slash`.
 
 ## Goal & Success Criteria
 
@@ -60,7 +55,7 @@ Ship Layer 3 of the parent spec's router stack: user-edited rules in `~/.savvage
 
 Measurable success criteria:
 
-1. With a routing.toml whose first rule matches `keywords = ["refactor"]` and `use = "anthropic/claude-opus-4-7"`, a turn whose user message contains "refactor this function" routes to `anthropic/claude-opus-4-7` with `reason = Rule("<name>")`, even when the active provider is Gemini and modality/override don't apply.
+1. With a routing.toml whose first rule matches `keywords = ["refactor"]` and `use = "anthropic/claude-opus-4-7"`, a turn whose user message contains "refactor this function" routes to `anthropic/claude-opus-4-7` with the transcript badge rendering `Rule(deep-reasoning)` (or whatever the rule's name field is), even when the active provider is Gemini and modality/override don't apply.
 2. `/route show` lists every parsed rule, marks rules whose target provider isn't connected as `[skipped: provider not connected]`, and prints the active `default` plus the last `RoutingDecision` (if any). Output is locale-aware and themed (Muted for skipped, Default for active).
 3. `/route reload` re-reads `~/.savvagent/routing.toml`, swaps the host's stored `RoutingRules`, and prints a one-line styled note with the rule count. Parse errors fall back to "no user rules" + a styled warning naming the line and column (TOML parser's native error), and the prior rule set is *not* discarded — same recovery pattern as `models.toml`'s `model-pref-save-failed`.
 4. A turn while `/route reload` is running cannot observe a partial rule set: the rule list swap is atomic at the `Arc<RwLock<RoutingRules>>` boundary. (Verified by a tokio test that runs `Router::pick` in a tight loop against an in-memory `Host` while another task calls `Host::reload_routing_rules` repeatedly; both succeed without panics.)
@@ -79,7 +74,7 @@ Measurable success criteria:
 - `RoutingReason::Rule { name: String }` variant + Display impl.
 - Wiring in `session.rs` (`run_turn_inner`) to pass the rules snapshot into `Router::pick`.
 - New `crates/savvagent/src/plugin/builtin/route/` plugin: `RoutePlugin`, `handle_slash` with subcommands `reload` and `show`. Registered in the built-in plugin set alongside `SavePlugin`, `ConnectPlugin`, etc.
-- New `Effect::ReloadRoutingRules` and `Effect::ShowRoutingRules` variants — or, simpler, a single new `Effect::Stack(vec![PushNote{...}])` flow that the runtime applies after the plugin reads from the host directly. Decision below in Architecture; current lean is to add **one** new `Effect::ReloadRoutingRules` effect (which `apply_effects` handles by calling `host.reload_routing_rules().await` then emitting a `PushNote`), and have the plugin compute the `/route show` output itself by reading the host snapshot, returning a `Vec<PushNote>` directly. This minimizes Effect-enum churn.
+- Two new `Effect` variants — `Effect::ReloadRoutingRules`, `Effect::ShowRoutingRules` — handled by `apply_effects`. (Verified: `Plugin::handle_slash` returns `Vec<Effect>` with no `&Host` access, so the plugin cannot read host state itself and effect granularity matches existing patterns like `Effect::SaveTranscript`.)
 - `legacy_model.rs` resolver gets one new step in its precedence chain to consult `routing.toml`'s `default` field. Existing tests + behavior preserved.
 - i18n catalog updates across en/es/pt/hi (placeholder text for non-English locales if not translated in time).
 - New integration test `crates/savvagent-host/tests/route_rules_e2e.rs`.
@@ -237,7 +232,7 @@ Layer order (first match wins):
 
 ### Host integration
 
-`Host` gains `routing_rules: Arc<RwLock<RoutingRules>>`. Construction reads `HostConfig::routing_rules_path` once at `Host::start`; absent path → `RoutingRules::empty()`. New method:
+`Host` gains a single new field: `routing_rules: Arc<RwLock<RoutingRules>>`. Construction reads `HostConfig::routing_rules_path` once at `Host::start`; absent path → `RoutingRules::empty()`. New methods:
 
 ```rust
 impl Host {
@@ -254,6 +249,8 @@ impl Host {
 ```
 
 The snapshot pattern matches the existing `active_provider` / `current_model` reads in `run_turn_inner`: `let rules = self.routing_rules.read().await.clone();` before any `.await` that runs `complete`.
+
+**No `Host::last_routing_decision` method.** The most-recent decision is already in the TUI's transcript (every assistant turn entry from Phase 3 onward carries the routing badge). `apply_effects` reads the relevant `App::log` entry directly when handling `Effect::ShowRoutingRules`.
 
 ### TUI plugin (`internal:route`)
 
@@ -283,10 +280,10 @@ ShowRoutingRules,
 
 Both handled in `crates/savvagent/src/plugin/effects.rs::apply_effects`:
 
-- `ReloadRoutingRules` → `host.reload_routing_rules().await`; append a `PushNote` with the rule count or the parse error.
-- `ShowRoutingRules` → read `host.routing_rules_snapshot().await` and `host.last_routing_decision().await` (new method on `Host`; see below), format as styled lines, push them.
+- `ReloadRoutingRules` → `host.reload_routing_rules().await`; append a `PushNote` with the rule count or the parse error (rules left untouched on parse error — assumption #13).
+- `ShowRoutingRules` → read `host.routing_rules_snapshot().await`, scan `App::log` backwards for the most recent assistant entry's routing badge, format as styled lines, push them.
 
-`Host::last_routing_decision()` is a new field `Arc<RwLock<Option<RoutingDecision>>>` set inside `run_turn_inner` right after `Router::pick`. Cheap, always overwritten, no eviction needed.
+The "last decision" line is sourced from the TUI's existing transcript entries; no new host field, no new method, no new write inside `run_turn_inner` (assumption #11).
 
 ### Data flow for one turn (Phase 5 deltas)
 
@@ -295,33 +292,34 @@ session.rs::run_turn_inner
   ├─ snapshot active_provider, active_model, routing_rules (all clones)
   ├─ build messages, parse @-prefix override
   ├─ required = required_modalities(&messages)
-  ├─ user_text = concat Text blocks of the latest user message
-  ├─ rules_snapshot = host.routing_rules.read().await.clone()    // NEW
+  ├─ user_text = concat Text blocks of the latest user message    // NEW (cheap)
+  ├─ rules_snapshot = host.routing_rules.read().await.clone()     // NEW
   ├─ decision = Router::pick(
   │      override_,
   │      &views,
   │      &active_id,
   │      &active_model,
   │      required,
-  │      &rules_snapshot,                                          // NEW
-  │      &user_text,                                               // NEW
+  │      &rules_snapshot,                                           // NEW
+  │      &user_text,                                                // NEW
   │  )
-  ├─ host.set_last_routing_decision(decision.clone()).await        // NEW
   ├─ emit TurnEvent::RouteSelected { … reason might be Rule(name) }
   ├─ … rest of turn loop unchanged …
 ```
+
+The decision is *not* stashed on the host. The TUI persists it via the existing `RouteSelected` event → transcript-entry path.
 
 ### Legacy-model resolver chain (the only change to `legacy_model.rs`)
 
 Today (after Phase 4): `SAVVAGENT_MODEL` env → `~/.savvagent/models.toml` → `provider.default_model`.
 
-Phase 5 inserts `routing.toml`'s `default` between env and `models.toml`:
+Phase 5 inserts `routing.toml#default` at the **bottom** of the chain, between `models.toml` and the provider's hard-coded default:
 
-`SAVVAGENT_MODEL` env → `routing.toml#default` → `~/.savvagent/models.toml` → `provider.default_model`.
+`SAVVAGENT_MODEL` env → `~/.savvagent/models.toml` → `routing.toml#default` → `provider.default_model`.
 
-Rationale: routing.toml is the explicit per-user routing policy file; if the user puts a `default` there, it's their stated preference and should beat the per-provider `models.toml` recall. Env always wins so test harnesses and one-off CLI overrides still work.
+Rationale: `models.toml` reflects the user's last explicit interactive `/model` pick and is the closest thing to a "current per-provider preference." `routing.toml#default` is a hand-edited global preference that replaces the provider's built-in fallback. Env still wins so CLI tests and one-off overrides keep working.
 
-The resolver gets one new optional parameter (`routing_default: Option<&DefaultPick>`) and chooses it before consulting `models.toml`. Pure function, easy to unit-test.
+The resolver gets one new optional parameter (`routing_default: Option<&DefaultPick>`) consulted after `models.toml`. Pure function, easy to unit-test.
 
 ### i18n keys (added to en.toml; placeholders in es/pt/hi)
 
@@ -410,22 +408,20 @@ Per [[feedback_match_ci_toolchain_locally]] and [[feedback_verify_ci_after_push]
 
 ## Risks & Open Questions
 
-1. **`Effect::ShowRoutingRules` vs reading host directly from the plugin.** The plugin-system pattern is that plugins return `Vec<Effect>` and the runtime applies them; plugins don't reach into the host. But `/route show`'s output is dynamic enough that an `Effect::PushNote` per line built from a host snapshot is wasteful round-trip. The chosen design adds a single `Effect::ShowRoutingRules` and has `apply_effects` do the snapshot + render. Alternative: add a generic `Effect::PushNotes(Vec<StyledLine>)` and have the plugin's `handle_slash` get a `&Host` snapshot via a trait. The current design is the minimum new surface; the alternative is more general but adds a trait dependency that the plugin system hasn't required so far. Flagging for the reviewer.
+1. **`default` precedence (assumption #4).** The conservative position chosen here puts `routing.toml#default` *after* `models.toml`. If the developer prefers the file the user hand-edits to outrank the picker-driven preference, swap the two terms in `legacy_model.rs::resolve_legacy_model`. The decision is one source line plus one test rename; flagging because the parent spec wasn't explicit on the position.
 
-2. **`default` precedence vs `models.toml`.** Spec assumption #5 places `routing.toml#default` ahead of `models.toml`. The other defensible position is the inverse: `models.toml` is the per-provider preference the user just clicked through in the `/model` picker (very explicit), so it should win over a possibly-stale `routing.toml#default`. I picked routing.toml because it's the file the user *edited by hand* — picker-driven prefs feel more disposable. Open for revision.
+2. **Empty `keywords = []` semantics.** Treated as "no keyword constraint." The alternative ("match nothing") is also defensible but more error-prone (a typo that empties the list would silently disable the rule). Documented in the parser; called out in `/route show`. Re-flag if this surfaces in user feedback.
 
-3. **Empty `keywords = []` semantics.** Treated as "no keyword constraint." The alternative ("match nothing") is also defensible but more error-prone (typo deletes the list → silent rule). Documented in the parser; called out in `/route show`.
+3. **Reload error visibility.** A parse error from `/route reload` shows the TOML parser's native error text — line/column carry through, but the message can be cryptic. Phase 5 ships the raw error to match `models.toml` and `sandbox.toml`; a friendlier formatter is a Phase 6+ ergonomic improvement.
 
-4. **Reload error visibility.** A parse error from `/route reload` shows the toml parser's native error text. That text can be cryptic for users who don't read Rust crate docs. Phase 5 ships the raw error; a follow-up could add a friendlier formatter (line+col context with the offending key). Tracking as "nice to have" — current behavior matches `models.toml` and `sandbox.toml`.
+4. **`heuristics = true` without the classifier.** Phase 5 parses the field, prints the "enabled" state in `/route show`, and stores it on `RoutingRules` for Phase 6 to consume. A user who sets the flag in 0.19.0 sees no classifier behavior until 0.20.0; the `/route show` line is the only signal. Acceptable risk per parent-spec phasing.
 
-5. **`heuristics = true` while Phase 6 isn't shipped.** Phase 5 parses it but doesn't use it. A user who sets `heuristics = true` in 0.19.0 will *not* see classifier behavior until 0.20.0 lands. Add a one-line note on `/route show` ("heuristics: enabled — classifier ships in a future release") so the user isn't surprised. Worth doing in Phase 5 even though it's borderline-Phase-6 work.
+5. **`RuleMatch` is `#[non_exhaustive]` from day one.** Makes the type's external semver more permissive at the cost of forcing pattern-matchers to use `..`. The project already uses `#[non_exhaustive]` on `RoutingReason`, `PoolError`, `RequiredModalityKind`, etc., so the discipline is established.
 
-6. **`RuleMatch` is `#[non_exhaustive]` from day one.** This makes the type's external semver more permissive but means consumers (Phase 6, follow-up predicates) can grow the struct without breaking changes. Cost: pattern-matchers must use `..`. Net positive — the project has used `#[non_exhaustive]` on `RoutingReason`, `PoolError`, etc. with no friction.
+6. **`/route show` output length.** For users with many rules (>50) the inline dump grows long. Parent spec called this an A/B; Phase 5 picks inline. If usage warrants, a screen plugin or pagination lands in a follow-up.
 
-7. **`/route show` output length** for users with many rules (>50) gets dumped inline. The parent spec calls this "an A/B" between inline and on-demand; this design picks inline (cheap, matches `/sandbox`-style status dumps). If usage shows long-rules-list users, a Phase 6 follow-up adds pagination or a screen plugin. Not blocking Phase 5.
+7. **Concurrent reload mid-turn.** The atomic-swap design hinges on snapshotting the rules clone *before* any `.await` in `run_turn_inner` — the same pattern `session.rs` uses for `active_provider` and `current_model`. A regression here would silently produce inconsistent routing decisions; the integration test (`route_rules_e2e.rs::reload_during_turn`) guards against it.
 
-8. **Concurrent-reload-during-turn race coverage.** The atomic-swap design depends on snapshotting the rules clone *before* any `.await` in `run_turn_inner`. This is the same pattern the rest of `session.rs` uses (project_tui_design), so the discipline is established — but a regression here would silently produce inconsistent routing decisions. The integration test for the race condition exists specifically to guard against that.
+8. **Cross-provider rule activation without warning.** Phase 4's modality layer refused silent cross-provider hops; Phase 5's user-rules layer *enables* them by design — that's the documented opt-in. The transcript badge identifies the rule that did the routing (`Rule(<name>)`), and `/route show` makes the file's effect inspectable in one command. Residual risk: a user copies a third-party routing.toml and finds turns going to a provider they didn't intend. Mitigation: the badge + `/route show` are the consent/audit surfaces.
 
-9. **Cross-provider rule activation without warning.** Phase 4's modality layer refuses to silently cross provider boundaries; Phase 5's user-rules layer *does* cross boundaries by design (that's the whole point — `[[rule]] match = { has_image = true }, use = "gemini/..."` is the documented way to enable cross-provider vision). The transcript badge already shows the `Rule(<name>)` reason, so the user can always see the rule that did the routing. No additional consent UI ships. Risk: a user copies a routing.toml from a tutorial and finds turns going to a provider they didn't intend. Mitigation: `/route show` makes the file's effect inspectable in one command, and the badge identifies the routing source for every turn.
-
-10. **Locale string drift.** Adding new i18n keys means es/pt/hi files get placeholder strings or English fallbacks. Past phases have shipped with TODOs; that's the project's current bar. A future "i18n catch-up" task closes the gap.
+9. **Locale string drift.** New i18n keys land in en.toml; es/pt/hi get TODO placeholders if Phase 5 ships before translation. Past phases have shipped with TODOs and rust_i18n falls back to en automatically.
