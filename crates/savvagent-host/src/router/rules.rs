@@ -273,7 +273,7 @@ impl RoutingRules {
     pub fn evaluate(
         &self,
         signals: &RuleSignals<'_>,
-        connected: &[&ProviderId],
+        connected: &[crate::router::ProviderView<'_>],
     ) -> Option<(String, DefaultPick)> {
         let text_lower = signals.user_text.to_lowercase();
         let len = signals.user_text.chars().count();
@@ -281,7 +281,7 @@ impl RoutingRules {
             if !match_satisfied(&rule.match_, signals.required, &text_lower, len) {
                 continue;
             }
-            if !connected.iter().any(|p| **p == rule.use_.provider) {
+            if !connected.iter().any(|v| *v.id == rule.use_.provider) {
                 tracing::info!(
                     rule = %rule.name,
                     provider = %rule.use_.provider.as_str(),
@@ -338,6 +338,14 @@ fn parse_provider_model(
     name: &str,
     raw: &str,
 ) -> Result<DefaultPick, RoutingRulesError> {
+    if raw.matches('/').count() != 1 {
+        return Err(RoutingRulesError::BadUseSyntax {
+            path: path.to_path_buf(),
+            index: rule_index,
+            name: name.to_string(),
+            got: raw.to_string(),
+        });
+    }
     let (p, m) = raw
         .split_once('/')
         .ok_or_else(|| RoutingRulesError::BadUseSyntax {
@@ -376,6 +384,25 @@ mod tests {
         let mut f = std::fs::File::create(&path).expect("create routing.toml");
         f.write_all(content.as_bytes()).expect("write");
         (dir, path)
+    }
+
+    fn caps_with_models(models: &[&str]) -> crate::capabilities::ProviderCapabilities {
+        use crate::capabilities::{CostTier, ModelCapabilities, ProviderCapabilities};
+        ProviderCapabilities::new(
+            models
+                .iter()
+                .map(|m| ModelCapabilities {
+                    id: (*m).into(),
+                    display_name: (*m).into(),
+                    supports_vision: false,
+                    supports_audio: false,
+                    context_window: 0,
+                    cost_tier: CostTier::Standard,
+                })
+                .collect(),
+            models[0].into(),
+        )
+        .expect("valid caps")
     }
 
     #[test]
@@ -485,7 +512,11 @@ use = "anthropic/claude-opus-4-7"
         );
         let r = RoutingRules::load_from_path(&path).unwrap();
         let a = ProviderId::new("anthropic").unwrap();
-        let conn: Vec<&ProviderId> = vec![&a];
+        let a_caps = caps_with_models(&["claude-opus-4-7"]);
+        let conn: Vec<crate::router::ProviderView> = vec![crate::router::ProviderView {
+            id: &a,
+            capabilities: &a_caps,
+        }];
         let hit = r.evaluate(&signals("please refactor this", false), &conn);
         let (name, pick) = hit.expect("matches");
         assert_eq!(name, "refactor");
@@ -505,7 +536,11 @@ use = "anthropic/claude-opus-4-7"
         );
         let r = RoutingRules::load_from_path(&path).unwrap();
         let a = ProviderId::new("anthropic").unwrap();
-        let conn: Vec<&ProviderId> = vec![&a];
+        let a_caps = caps_with_models(&["claude-opus-4-7"]);
+        let conn: Vec<crate::router::ProviderView> = vec![crate::router::ProviderView {
+            id: &a,
+            capabilities: &a_caps,
+        }];
         // Both predicates pass:
         assert!(r.evaluate(&signals("refactor pls", false), &conn).is_some());
         // Keyword passes, length fails:
@@ -531,7 +566,18 @@ use = "gemini/gemini-2.0-flash"
         let r = RoutingRules::load_from_path(&path).unwrap();
         let a = ProviderId::new("anthropic").unwrap();
         let g = ProviderId::new("gemini").unwrap();
-        let conn: Vec<&ProviderId> = vec![&a, &g];
+        let a_caps = caps_with_models(&["claude-opus-4-7"]);
+        let g_caps = caps_with_models(&["gemini-2.0-flash"]);
+        let conn: Vec<crate::router::ProviderView> = vec![
+            crate::router::ProviderView {
+                id: &a,
+                capabilities: &a_caps,
+            },
+            crate::router::ProviderView {
+                id: &g,
+                capabilities: &g_caps,
+            },
+        ];
         let (name, _pick) = r.evaluate(&signals("xenon", false), &conn).unwrap();
         assert_eq!(name, "first");
     }
@@ -553,7 +599,11 @@ use = "anthropic/claude-opus-4-7"
         );
         let r = RoutingRules::load_from_path(&path).unwrap();
         let a = ProviderId::new("anthropic").unwrap();
-        let conn: Vec<&ProviderId> = vec![&a]; // gemini disconnected
+        let a_caps = caps_with_models(&["claude-opus-4-7"]);
+        let conn: Vec<crate::router::ProviderView> = vec![crate::router::ProviderView {
+            id: &a,
+            capabilities: &a_caps,
+        }]; // gemini disconnected
         let (name, pick) = r.evaluate(&signals("xenon", false), &conn).unwrap();
         assert_eq!(name, "second");
         assert_eq!(pick.provider, a);
@@ -571,7 +621,11 @@ use = "anthropic/claude-opus-4-7"
         );
         let r = RoutingRules::load_from_path(&path).unwrap();
         let a = ProviderId::new("anthropic").unwrap();
-        let conn: Vec<&ProviderId> = vec![&a];
+        let a_caps = caps_with_models(&["claude-opus-4-7"]);
+        let conn: Vec<crate::router::ProviderView> = vec![crate::router::ProviderView {
+            id: &a,
+            capabilities: &a_caps,
+        }];
         assert!(r.evaluate(&signals("anything", false), &conn).is_some());
         assert!(r.evaluate(&signals("", true), &conn).is_some());
     }
@@ -588,8 +642,25 @@ use = "gemini/gemini-2.0-flash-vision"
         );
         let r = RoutingRules::load_from_path(&path).unwrap();
         let g = ProviderId::new("gemini").unwrap();
-        let conn: Vec<&ProviderId> = vec![&g];
+        let g_caps = caps_with_models(&["gemini-2.0-flash-vision"]);
+        let conn: Vec<crate::router::ProviderView> = vec![crate::router::ProviderView {
+            id: &g,
+            capabilities: &g_caps,
+        }];
         assert!(r.evaluate(&signals("", true), &conn).is_some());
         assert!(r.evaluate(&signals("", false), &conn).is_none());
+    }
+
+    #[test]
+    fn rejects_use_with_multiple_slashes() {
+        let (_d, path) = tmp_routing(
+            r#"
+[[rule]]
+name = "multi-slash"
+use = "anthropic/claude/latest"
+"#,
+        );
+        let err = RoutingRules::load_from_path(&path).expect_err("rejects");
+        assert!(matches!(err, RoutingRulesError::BadUseSyntax { .. }));
     }
 }
