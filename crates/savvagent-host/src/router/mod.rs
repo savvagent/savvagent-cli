@@ -2,6 +2,7 @@
 //! parsing; modality / rules / heuristics arrive in Phases 4-6.
 
 pub mod legacy_model;
+pub mod modality;
 pub mod namespace;
 pub mod prefix;
 // The `router` submodule is the home of the `Router` struct (lands in
@@ -13,4 +14,7 @@ pub mod prefix;
 pub mod router;
 
 pub use legacy_model::{LegacyModelResolution, ProviderView, resolve_legacy_model};
+pub use modality::{
+    RequiredModalities, RequiredModalityKind, pick_vision_capable, required_modalities,
+};
 pub use router::{Router, RoutingDecision, RoutingOverride, RoutingReason};

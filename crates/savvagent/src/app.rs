@@ -547,6 +547,10 @@ impl App {
                     reason
                 )));
             }
+            TurnEvent::ModalityWarning { message } => {
+                self.flush_live_text();
+                self.entries.push(Entry::Note(message));
+            }
             TurnEvent::IterationStarted { .. } => {}
             TurnEvent::TextDelta { text } => {
                 self.live_text.push_str(&text);

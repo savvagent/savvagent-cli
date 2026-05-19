@@ -23,6 +23,7 @@ use crate::permissions::{
 use crate::pool::{DisconnectMode, PoolEntry, PoolError, ProviderLease};
 use crate::project;
 use crate::provider::RmcpProviderClient;
+use crate::router::modality;
 use crate::sandbox::SandboxConfig;
 use crate::tools::{
     BashNetContext, BashNetResolver, BashNetResolverHandle, NetOverride, ToolRegistry,
@@ -177,6 +178,15 @@ pub enum TurnEvent {
         model_id: String,
         /// Why the router picked it (rendered as "Override" / "Default" today).
         reason: crate::router::RoutingReason,
+    },
+    /// The router could not redirect to a vision-capable model for an
+    /// image-bearing turn (no connected provider has vision, OR an
+    /// `@`-override pinned a vision-incapable model). Emitted at most
+    /// once per turn, right after [`TurnEvent::RouteSelected`].
+    ModalityWarning {
+        /// User-facing message describing why the routing decision may
+        /// not satisfy the input.
+        message: String,
     },
     /// One iteration of the loop began. `iteration` is 1-based.
     IterationStarted {
@@ -517,7 +527,9 @@ impl Host {
     /// streaming events are emitted; use [`Self::run_turn_streaming`] for the
     /// TUI's incremental-render path.
     pub async fn run_turn(&self, user_input: impl Into<String>) -> Result<TurnOutcome, HostError> {
-        self.run_turn_inner(user_input.into(), None).await
+        let text = user_input.into();
+        self.run_turn_inner(vec![ContentBlock::Text { text }], None)
+            .await
     }
 
     /// Run a turn while emitting [`TurnEvent`]s onto `events`. Token-level
@@ -528,7 +540,29 @@ impl Host {
         user_input: impl Into<String>,
         events: mpsc::Sender<TurnEvent>,
     ) -> Result<TurnOutcome, HostError> {
-        self.run_turn_inner(user_input.into(), Some(events)).await
+        let text = user_input.into();
+        self.run_turn_inner(vec![ContentBlock::Text { text }], Some(events))
+            .await
+    }
+
+    /// Submit a user turn composed of arbitrary [`ContentBlock`]s — text,
+    /// images, or any future modality. Streams [`TurnEvent`]s onto `events`
+    /// the same way [`Self::run_turn_streaming`] does.
+    ///
+    /// The `@`-prefix parser runs only on the **leading** block if it is
+    /// `Text`; non-text leading blocks (e.g. an image-first turn) skip
+    /// `@`-parsing entirely.
+    ///
+    /// Phase 4 ships this entrypoint as host-side machinery. The TUI does
+    /// not yet expose an image-attachment UI; this method is intended for
+    /// (a) the modality routing integration test, and (b) a future image
+    /// upload feature in the TUI.
+    pub async fn run_turn_streaming_with_blocks(
+        &self,
+        content: Vec<savvagent_protocol::ContentBlock>,
+        events: mpsc::Sender<TurnEvent>,
+    ) -> Result<TurnOutcome, HostError> {
+        self.run_turn_inner(content, Some(events)).await
     }
 
     /// Ask the active provider for its model list.
@@ -558,7 +592,7 @@ impl Host {
 
     async fn run_turn_inner(
         &self,
-        user_input: String,
+        user_content: Vec<savvagent_protocol::ContentBlock>,
         events: Option<mpsc::Sender<TurnEvent>>,
     ) -> Result<TurnOutcome, HostError> {
         // Publish the events channel (if any) for the lazy bash-net
@@ -576,7 +610,11 @@ impl Host {
         // Parse the `@`-prefix against the currently-connected pool.
         // Aliases are flattened across every connected provider so
         // `@opus` works even if the active provider is Gemini.
-        let parsed = {
+        //
+        // Phase 4: if the leading block is text, run the @-prefix parser
+        // on it and replace it with the stripped body. Non-text leading
+        // blocks (e.g. image-first turns) skip @-parsing entirely.
+        let (override_, user_content) = {
             let pool = self.pool.read().await;
             let views: Vec<crate::router::ProviderView<'_>> = pool
                 .iter()
@@ -589,14 +627,29 @@ impl Host {
                 .values()
                 .flat_map(|entry| entry.aliases().to_vec())
                 .collect();
-            crate::router::prefix::parse_at_prefix(&user_input, &views, &aliases)
+
+            let mut blocks = user_content;
+            let mut override_ = None;
+            if let Some(ContentBlock::Text { text }) = blocks.first() {
+                let parsed = crate::router::prefix::parse_at_prefix(text, &views, &aliases);
+                override_ = parsed.override_;
+                if let Some(ContentBlock::Text { text }) = blocks.first_mut() {
+                    *text = parsed.body;
+                }
+            }
+            (override_, blocks)
             // Pool read guard dropped at end of this block.
         };
 
         messages.push(Message {
             role: Role::User,
-            content: vec![ContentBlock::Text { text: parsed.body }],
+            content: user_content,
         });
+
+        // Phase 4: detect modality requirements on the just-built `messages`.
+        // Reading the latest user message is sufficient — historical images
+        // are already baked into the conversation; routing is per-turn.
+        let required = modality::required_modalities(&messages);
 
         // Run the router. The decision pins the provider + model for the
         // entire turn, including every tool-use iteration.
@@ -616,7 +669,7 @@ impl Host {
                     capabilities: entry.capabilities(),
                 })
                 .collect();
-            crate::router::Router::pick(parsed.override_, &views, &active_id, &active_model)
+            crate::router::Router::pick(override_, &views, &active_id, &active_model, required)
             // pool guard dropped at end of this block
         };
 
@@ -628,6 +681,35 @@ impl Host {
                     reason: decision.reason.clone(),
                 })
                 .await;
+        }
+
+        // If an image was required but the router didn't redirect (because no
+        // connected model supports vision, OR because an override pinned a
+        // model that lacks vision), surface a styled note so the user can
+        // see why the next call may fail.
+        if required.has_image
+            && !matches!(
+                decision.reason,
+                crate::router::RoutingReason::Modality { .. }
+            )
+        {
+            let lacks_vision = {
+                let pool = self.pool.read().await;
+                pool.get(&decision.provider_id)
+                    .and_then(|e| e.capabilities().model(&decision.model_id))
+                    .map(|m| !m.supports_vision)
+                    .unwrap_or(false)
+            };
+            if lacks_vision && let Some(tx) = &events {
+                let message = format!(
+                    "{}/{} doesn't support image input; the request may fail. \
+                     Connect a vision-capable model or use @<provider:model> \
+                     to override.",
+                    decision.provider_id.as_str(),
+                    decision.model_id
+                );
+                let _ = tx.send(TurnEvent::ModalityWarning { message }).await;
+            }
         }
 
         let tool_defs = {
@@ -2923,5 +3005,48 @@ mod transcript_tests {
         let record = host.load_transcript(&path).await.unwrap();
         assert_eq!(record.messages, messages);
         assert_eq!(record.schema_version, TRANSCRIPT_SCHEMA_VERSION);
+    }
+
+    /// `run_turn_streaming_with_blocks` must push the caller's blocks
+    /// verbatim onto the user message — no transformation, no extra
+    /// text-only wrapping. This pins the public surface that a future
+    /// image-attachment UI will use to submit image-bearing turns.
+    #[tokio::test]
+    async fn run_turn_streaming_with_blocks_pushes_user_message_verbatim() {
+        use savvagent_protocol::{ImageSource, MediaType};
+        let dir = tempdir().unwrap();
+        let host = Host::with_components(
+            tmp_config(dir.path()),
+            Box::new(NoopProvider) as Box<dyn ProviderClient + Send + Sync>,
+        )
+        .await
+        .unwrap();
+
+        let (tx, mut _rx) = mpsc::channel(8);
+        let blocks = vec![
+            ContentBlock::Text {
+                text: "what is this?".into(),
+            },
+            ContentBlock::Image {
+                source: ImageSource::Base64 {
+                    media_type: MediaType::Png,
+                    data: "AAAA".into(),
+                },
+            },
+        ];
+        host.run_turn_streaming_with_blocks(blocks.clone(), tx)
+            .await
+            .expect("turn runs");
+
+        // The just-submitted user message must contain the blocks we
+        // passed in, in order. The leading text has no `@`-prefix, so
+        // the parser leaves it untouched.
+        let messages = host.messages().await;
+        let user_msg = messages
+            .iter()
+            .rev()
+            .find(|m| matches!(m.role, Role::User))
+            .expect("at least one user message");
+        assert_eq!(user_msg.content, blocks);
     }
 }
