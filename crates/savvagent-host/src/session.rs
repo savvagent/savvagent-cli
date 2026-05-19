@@ -179,6 +179,15 @@ pub enum TurnEvent {
         /// Why the router picked it (rendered as "Override" / "Default" today).
         reason: crate::router::RoutingReason,
     },
+    /// The router could not redirect to a vision-capable model for an
+    /// image-bearing turn (no connected provider has vision, OR an
+    /// `@`-override pinned a vision-incapable model). Emitted at most
+    /// once per turn, right after [`TurnEvent::RouteSelected`].
+    ModalityWarning {
+        /// User-facing message describing why the routing decision may
+        /// not satisfy the input.
+        message: String,
+    },
     /// One iteration of the loop began. `iteration` is 1-based.
     IterationStarted {
         /// 1-based iteration index.
@@ -617,6 +626,11 @@ impl Host {
             content: user_content,
         });
 
+        // Phase 4: detect modality requirements on the just-built `messages`.
+        // Reading the latest user message is sufficient — historical images
+        // are already baked into the conversation; routing is per-turn.
+        let required = modality::required_modalities(&messages);
+
         // Run the router. The decision pins the provider + model for the
         // entire turn, including every tool-use iteration.
         //
@@ -635,13 +649,7 @@ impl Host {
                     capabilities: entry.capabilities(),
                 })
                 .collect();
-            crate::router::Router::pick(
-                override_,
-                &views,
-                &active_id,
-                &active_model,
-                modality::RequiredModalities::default(),
-            )
+            crate::router::Router::pick(override_, &views, &active_id, &active_model, required)
             // pool guard dropped at end of this block
         };
 
@@ -653,6 +661,34 @@ impl Host {
                     reason: decision.reason.clone(),
                 })
                 .await;
+        }
+
+        // If an image was required but the router didn't redirect (because no
+        // connected model supports vision, OR because an override pinned a
+        // model that lacks vision), surface a styled note so the user can
+        // see why the next call may fail.
+        if required.has_image
+            && !matches!(decision.reason, crate::router::RoutingReason::Modality { .. })
+        {
+            let lacks_vision = {
+                let pool = self.pool.read().await;
+                pool.get(&decision.provider_id)
+                    .and_then(|e| e.capabilities().model(&decision.model_id))
+                    .map(|m| !m.supports_vision)
+                    .unwrap_or(false)
+            };
+            if lacks_vision
+                && let Some(tx) = &events
+            {
+                let message = format!(
+                    "{}/{} doesn't support image input; the request may fail. \
+                     Connect a vision-capable model or use @<provider:model> \
+                     to override.",
+                    decision.provider_id.as_str(),
+                    decision.model_id
+                );
+                let _ = tx.send(TurnEvent::ModalityWarning { message }).await;
+            }
         }
 
         let tool_defs = {

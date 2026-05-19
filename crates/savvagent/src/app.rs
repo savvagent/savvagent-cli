@@ -547,6 +547,8 @@ impl App {
                     reason
                 )));
             }
+            // TODO(phase-4 task 6): render this with proper styling.
+            TurnEvent::ModalityWarning { .. } => {}
             TurnEvent::IterationStarted { .. } => {}
             TurnEvent::TextDelta { text } => {
                 self.live_text.push_str(&text);
