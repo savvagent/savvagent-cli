@@ -149,26 +149,41 @@ impl Router {
         }
 
         // Layer 4 — heuristic classifier (opt-in via routing.toml).
-        if rules.heuristics
-            && let Some(kind) = crate::router::heuristics::classify(user_text)
-            && let Some(pick) = crate::router::heuristics::pick_for_kind(
-                kind,
-                active_provider,
-                active_model,
-                providers,
-            )
-        {
-            tracing::info!(
-                kind = %kind,
-                provider = %pick.provider.as_str(),
-                model = %pick.model,
-                "routing: heuristic classifier matched"
-            );
-            return RoutingDecision {
-                provider_id: pick.provider,
-                model_id: pick.model,
-                reason: RoutingReason::Heuristic { kind },
-            };
+        // Both miss paths (no kind matched, or kind matched but no model
+        // in the desired tier) fall through to Default below. Each miss
+        // emits a `tracing::debug!` so operators can triage "I enabled
+        // heuristics and nothing changed" without code spelunking;
+        // sub-case detail lives in `heuristics::pick_for_kind`.
+        if rules.heuristics {
+            match crate::router::heuristics::classify(user_text) {
+                Some(kind) => {
+                    if let Some(pick) = crate::router::heuristics::pick_for_kind(
+                        kind,
+                        active_provider,
+                        active_model,
+                        providers,
+                    ) {
+                        tracing::info!(
+                            kind = %kind,
+                            provider = %pick.provider.as_str(),
+                            model = %pick.model,
+                            "routing: heuristic classifier matched"
+                        );
+                        return RoutingDecision {
+                            provider_id: pick.provider,
+                            model_id: pick.model,
+                            reason: RoutingReason::Heuristic { kind },
+                        };
+                    }
+                    // pick_for_kind already logged its own miss sub-case.
+                }
+                None => {
+                    tracing::debug!(
+                        user_text_len = user_text.chars().count(),
+                        "routing: heuristic classifier yielded no kind"
+                    );
+                }
+            }
         }
 
         RoutingDecision {

@@ -89,19 +89,43 @@ pub fn pick_for_kind(
         HeuristicKind::Coding => &[CostTier::Premium, CostTier::Standard],
     };
 
+    let active_view = providers.iter().find(|p| *p.id == *active_provider);
+
     // Short-circuit: if the active provider's active model is already
     // in the desired tier set, there's nothing to do.
-    if let Some(active_view) = providers.iter().find(|p| *p.id == *active_provider)
-        && let Some(m) = active_view.capabilities.model(active_model)
+    if let Some(view) = active_view
+        && let Some(m) = view.capabilities.model(active_model)
         && preferred_tiers.contains(&m.cost_tier)
     {
+        tracing::debug!(
+            %kind,
+            active_provider = %active_provider.as_str(),
+            active_model,
+            "heuristic picker: active model already in target tier — no-op"
+        );
         return None;
+    }
+
+    // Diagnostic: active provider is in the pool but the active model
+    // isn't in its catalog (transient capability/snapshot drift). The
+    // picker proceeds — this branch only surfaces the drift so a
+    // maintainer debugging "why did my session jump providers?" has a
+    // log line to grep for.
+    if let Some(view) = active_view
+        && view.capabilities.model(active_model).is_none()
+    {
+        tracing::debug!(
+            %kind,
+            active_provider = %active_provider.as_str(),
+            active_model,
+            "heuristic picker: active model not in catalog — treating as not-in-tier"
+        );
     }
 
     for tier in preferred_tiers {
         // Active provider's models first, in declaration order.
-        if let Some(active_view) = providers.iter().find(|p| *p.id == *active_provider)
-            && let Some(m) = active_view
+        if let Some(view) = active_view
+            && let Some(m) = view
                 .capabilities
                 .models()
                 .iter()
@@ -127,6 +151,13 @@ pub fn pick_for_kind(
             }
         }
     }
+
+    tracing::debug!(
+        %kind,
+        active_provider = %active_provider.as_str(),
+        active_model,
+        "heuristic picker: no connected model satisfies target tier"
+    );
     None
 }
 
