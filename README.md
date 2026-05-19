@@ -175,6 +175,27 @@ attached. If you pin a vision-incapable model with `@`, the request
 still runs, the warning fires, and the provider's error (if any)
 surfaces normally.
 
+### Routing rules
+
+Edit `~/.savvagent/routing.toml` to route turns to specific provider/model combinations based on the message. Example:
+
+```toml
+version = 1
+default = "anthropic/claude-opus-4-7"
+
+[[rule]]
+name = "vision-for-images"
+match = { has_image = true }
+use = "gemini/gemini-2.0-flash-vision"
+
+[[rule]]
+name = "haiku-for-shortform"
+match = { max_input_chars = 400 }
+use = "anthropic/claude-haiku-4-5"
+```
+
+Rules evaluate top-to-bottom; the first match wins. Run `/route reload` after editing the file. Run `/route show` to see the active rules and the most recent routing decision. `@provider:model` overrides and modality redirects still take precedence over rules.
+
 ### Multi-provider pool (Phase 1)
 
 As of v0.15.0 Savvagent maintains a *connection pool* — you can `/connect`

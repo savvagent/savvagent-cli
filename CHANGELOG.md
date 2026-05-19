@@ -6,6 +6,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 (pre-1.0: `0.MINOR.PATCH`, where MINOR captures features + breaking
 boundary changes and PATCH captures fixes).
 
+## 0.19.0 - 2026-05-19
+
+### Added
+
+- **User-edited routing rules** (`~/.savvagent/routing.toml`). Routes a turn to a specific `provider/model` based on per-turn predicates (`has_image`, `keywords`, `max_input_chars`, `min_input_chars`). Layer 3 of the multi-provider router, between modality redirects and the default model.
+- **`/route show`** prints the active rules, the default, the heuristics-enabled state (Phase 6 stub), and the most recent routing decision.
+- **`/route reload`** re-reads `routing.toml` without restarting the TUI. Parse errors keep the prior rules in place and surface a styled note.
+- **`routing.toml#default`** is consulted between `~/.savvagent/models.toml` and the provider's hard-coded default during model resolution. Env (`SAVVAGENT_MODEL`) and `models.toml` still take precedence; routing.toml's default replaces the provider's built-in fallback when neither higher layer applies.
+
+### Changed
+
+- `Router::pick` now takes `rules: &RoutingRules` and `user_text: &str` parameters (additive).
+- `RoutingReason` gains a `Rule { name }` variant rendered as `Rule(<name>)` in the transcript badge.
+
 ## 0.18.0 - 2026-05-18
 
 ### Added
