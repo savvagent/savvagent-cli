@@ -98,7 +98,7 @@ impl Router {
     /// 2. **Modality** — same-provider redirect when the active model
     ///    lacks a required modality.
     /// 3. **Rules** — first matching rule from `~/.savvagent/routing.toml`.
-    /// 4. **Heuristic** — not yet implemented.
+    /// 4. **Heuristic** — opt-in classifier gated on `rules.heuristics`.
     /// 5. **Default** — active provider + active model.
     pub fn pick(
         override_: Option<RoutingOverride>,
@@ -145,6 +145,29 @@ impl Router {
                 provider_id: pick.provider,
                 model_id: pick.model,
                 reason: RoutingReason::Rule { name },
+            };
+        }
+
+        // Layer 4 — heuristic classifier (opt-in via routing.toml).
+        if rules.heuristics
+            && let Some(kind) = crate::router::heuristics::classify(user_text)
+            && let Some(pick) = crate::router::heuristics::pick_for_kind(
+                kind,
+                active_provider,
+                active_model,
+                providers,
+            )
+        {
+            tracing::info!(
+                kind = %kind,
+                provider = %pick.provider.as_str(),
+                model = %pick.model,
+                "routing: heuristic classifier matched"
+            );
+            return RoutingDecision {
+                provider_id: pick.provider,
+                model_id: pick.model,
+                reason: RoutingReason::Heuristic { kind },
             };
         }
 
@@ -770,5 +793,311 @@ mod tests {
             kind: HeuristicKind::Coding,
         };
         assert_eq!(format!("{r}"), "Heuristic(coding)");
+    }
+
+    fn caps_tier(model: &str, tier: CostTier) -> ProviderCapabilities {
+        ProviderCapabilities::new(
+            vec![ModelCapabilities {
+                id: model.into(),
+                display_name: model.into(),
+                supports_vision: false,
+                supports_audio: false,
+                context_window: 0,
+                cost_tier: tier,
+            }],
+            model.into(),
+        )
+        .expect("valid caps")
+    }
+
+    fn caps_two_tiers(
+        m1: &str,
+        t1: CostTier,
+        m2: &str,
+        t2: CostTier,
+        default_idx: usize,
+    ) -> ProviderCapabilities {
+        let models = vec![
+            ModelCapabilities {
+                id: m1.into(),
+                display_name: m1.into(),
+                supports_vision: false,
+                supports_audio: false,
+                context_window: 0,
+                cost_tier: t1,
+            },
+            ModelCapabilities {
+                id: m2.into(),
+                display_name: m2.into(),
+                supports_vision: false,
+                supports_audio: false,
+                context_window: 0,
+                cost_tier: t2,
+            },
+        ];
+        let default = models[default_idx].id.clone();
+        ProviderCapabilities::new(models, default).expect("valid caps")
+    }
+
+    fn rules_heuristics_only(on: bool) -> RoutingRules {
+        RoutingRules {
+            default: None,
+            heuristics: on,
+            rules: vec![],
+        }
+    }
+
+    #[test]
+    fn pick_heuristic_short_factoid_routes_to_cheap() {
+        use crate::router::heuristics::HeuristicKind;
+        // Anthropic: opus (Premium, active) + haiku (Cheap).
+        let a_id = ProviderId::new("anthropic").unwrap();
+        let a_caps = caps_two_tiers("opus", CostTier::Premium, "haiku", CostTier::Cheap, 0);
+        let views = vec![ProviderView {
+            id: &a_id,
+            capabilities: &a_caps,
+        }];
+        let rules = rules_heuristics_only(true);
+
+        let r = Router::pick(
+            None,
+            &views,
+            &a_id,
+            "opus",
+            RequiredModalities::default(),
+            &rules,
+            "what is 2+2?",
+        );
+        assert_eq!(r.provider_id, a_id);
+        assert_eq!(r.model_id, "haiku");
+        assert_eq!(
+            r.reason,
+            RoutingReason::Heuristic {
+                kind: HeuristicKind::ShortFactoid,
+            }
+        );
+    }
+
+    #[test]
+    fn pick_heuristic_coding_routes_to_premium() {
+        use crate::router::heuristics::HeuristicKind;
+        // Anthropic: haiku (Cheap, active) + opus (Premium).
+        let a_id = ProviderId::new("anthropic").unwrap();
+        let a_caps = caps_two_tiers("haiku", CostTier::Cheap, "opus", CostTier::Premium, 0);
+        let views = vec![ProviderView {
+            id: &a_id,
+            capabilities: &a_caps,
+        }];
+        let rules = rules_heuristics_only(true);
+
+        let r = Router::pick(
+            None,
+            &views,
+            &a_id,
+            "haiku",
+            RequiredModalities::default(),
+            &rules,
+            "please refactor this",
+        );
+        assert_eq!(r.provider_id, a_id);
+        assert_eq!(r.model_id, "opus");
+        assert_eq!(
+            r.reason,
+            RoutingReason::Heuristic {
+                kind: HeuristicKind::Coding,
+            }
+        );
+    }
+
+    #[test]
+    fn pick_heuristic_off_falls_through_to_default() {
+        // Same setup but with heuristics=false. The classifier must not run.
+        let a_id = ProviderId::new("anthropic").unwrap();
+        let a_caps = caps_two_tiers("opus", CostTier::Premium, "haiku", CostTier::Cheap, 0);
+        let views = vec![ProviderView {
+            id: &a_id,
+            capabilities: &a_caps,
+        }];
+        let rules = rules_heuristics_only(false);
+
+        let r = Router::pick(
+            None,
+            &views,
+            &a_id,
+            "opus",
+            RequiredModalities::default(),
+            &rules,
+            "what is 2+2?",
+        );
+        assert_eq!(r.provider_id, a_id);
+        assert_eq!(r.model_id, "opus");
+        assert_eq!(r.reason, RoutingReason::Default);
+    }
+
+    #[test]
+    fn pick_rule_beats_heuristic() {
+        // Heuristic on, would match Coding. But a Rule also matches the
+        // same turn — Layer 3 runs first.
+        let a_id = ProviderId::new("anthropic").unwrap();
+        let g_id = ProviderId::new("gemini").unwrap();
+        let a_caps = caps_two_tiers("haiku", CostTier::Cheap, "opus", CostTier::Premium, 0);
+        let g_caps = caps_tier("flash", CostTier::Cheap);
+        let views = vec![
+            ProviderView {
+                id: &a_id,
+                capabilities: &a_caps,
+            },
+            ProviderView {
+                id: &g_id,
+                capabilities: &g_caps,
+            },
+        ];
+        let mut rules = rules_heuristics_only(true);
+        rules.rules.push(RoutingRule {
+            name: "rule-wins".into(),
+            match_: RuleMatch {
+                keywords: vec!["refactor".into()],
+                ..Default::default()
+            },
+            use_: DefaultPick {
+                provider: g_id.clone(),
+                model: "flash".into(),
+            },
+        });
+
+        let r = Router::pick(
+            None,
+            &views,
+            &a_id,
+            "haiku",
+            RequiredModalities::default(),
+            &rules,
+            "please refactor this",
+        );
+        assert_eq!(r.provider_id, g_id);
+        assert_eq!(r.model_id, "flash");
+        assert_eq!(
+            r.reason,
+            RoutingReason::Rule {
+                name: "rule-wins".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn pick_modality_beats_heuristic() {
+        // Image attached + coding keyword. Modality (Layer 2) wins.
+        use crate::router::modality::RequiredModalityKind;
+        let a_id = ProviderId::new("anthropic").unwrap();
+        let a_caps = ProviderCapabilities::new(
+            vec![
+                ModelCapabilities {
+                    id: "haiku".into(),
+                    display_name: "haiku".into(),
+                    supports_vision: false,
+                    supports_audio: false,
+                    context_window: 0,
+                    cost_tier: CostTier::Cheap,
+                },
+                ModelCapabilities {
+                    id: "opus".into(),
+                    display_name: "opus".into(),
+                    supports_vision: true,
+                    supports_audio: false,
+                    context_window: 0,
+                    cost_tier: CostTier::Premium,
+                },
+            ],
+            "haiku".into(),
+        )
+        .expect("valid caps");
+        let views = vec![ProviderView {
+            id: &a_id,
+            capabilities: &a_caps,
+        }];
+        let rules = rules_heuristics_only(true);
+
+        let r = Router::pick(
+            None,
+            &views,
+            &a_id,
+            "haiku",
+            RequiredModalities {
+                has_image: true,
+                ..Default::default()
+            },
+            &rules,
+            "refactor this code",
+        );
+        assert_eq!(r.provider_id, a_id);
+        assert_eq!(r.model_id, "opus");
+        assert_eq!(
+            r.reason,
+            RoutingReason::Modality {
+                kind: RequiredModalityKind::Image,
+            }
+        );
+    }
+
+    #[test]
+    fn pick_override_beats_heuristic() {
+        // @-override + coding keyword. Override (Layer 1) wins.
+        let a_id = ProviderId::new("anthropic").unwrap();
+        let g_id = ProviderId::new("gemini").unwrap();
+        let a_caps = caps_two_tiers("haiku", CostTier::Cheap, "opus", CostTier::Premium, 0);
+        let g_caps = caps_tier("flash", CostTier::Cheap);
+        let views = vec![
+            ProviderView {
+                id: &a_id,
+                capabilities: &a_caps,
+            },
+            ProviderView {
+                id: &g_id,
+                capabilities: &g_caps,
+            },
+        ];
+        let rules = rules_heuristics_only(true);
+        let override_ = RoutingOverride {
+            provider: g_id.clone(),
+            model: Some("flash".into()),
+        };
+
+        let r = Router::pick(
+            Some(override_),
+            &views,
+            &a_id,
+            "haiku",
+            RequiredModalities::default(),
+            &rules,
+            "please refactor this",
+        );
+        assert_eq!(r.provider_id, g_id);
+        assert_eq!(r.model_id, "flash");
+        assert_eq!(r.reason, RoutingReason::Override);
+    }
+
+    #[test]
+    fn pick_heuristic_returns_default_when_active_already_in_tier() {
+        // Active = haiku (Cheap); short factoid wants Cheap → no-op.
+        let a_id = ProviderId::new("anthropic").unwrap();
+        let a_caps = caps_two_tiers("haiku", CostTier::Cheap, "opus", CostTier::Premium, 0);
+        let views = vec![ProviderView {
+            id: &a_id,
+            capabilities: &a_caps,
+        }];
+        let rules = rules_heuristics_only(true);
+
+        let r = Router::pick(
+            None,
+            &views,
+            &a_id,
+            "haiku",
+            RequiredModalities::default(),
+            &rules,
+            "what is 2+2?",
+        );
+        assert_eq!(r.provider_id, a_id);
+        assert_eq!(r.model_id, "haiku");
+        assert_eq!(r.reason, RoutingReason::Default);
     }
 }
