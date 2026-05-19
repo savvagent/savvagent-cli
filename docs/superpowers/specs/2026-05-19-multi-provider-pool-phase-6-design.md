@@ -101,7 +101,7 @@ Measurable success criteria:
 - TUI: extend `render_routing_show` in `crates/savvagent/src/main.rs` to branch on `rules.heuristics` and emit the new active-classifier line via `routing.show-heuristics-active` (replacing the existing `routing.show-heuristics-pending` line when active).
 - New i18n key `routing.show-heuristics-active` in en.toml (canonical) + TODO placeholders in es/pt/hi/de.
 - Integration coverage: extend `crates/savvagent-host/tests/route_rules_e2e.rs` with at least four scenarios (short-factoid + cheap connected; coding + premium connected; heuristic off → default; coding beats short-factoid for ambiguous input). Add a `render_routing_show` test for the new active-heuristic line.
-- README user-facing section: add a "Heuristic classifier" paragraph under the routing-rules section, with the exact triggers and the cheap/premium mapping.
+- README user-facing section: add a "Heuristic classifier" paragraph under the routing-rules section, with the exact triggers, the cheap/premium mapping, and an explicit note that keyword matching is **substring-based** (e.g. `function` matches `functional`) so users aren't surprised by false positives.
 - CHANGELOG `## 0.20.0 - 2026-05-19` entry.
 - Workspace version bump to `0.20.0` (mirrored in `[workspace.dependencies]` literals per [[feedback_semver]]).
 
@@ -238,13 +238,13 @@ Keyword list (v1, hardcoded): `refactor`, `implement`, `debug`, `fix bug`, `comp
 `pick_for_kind(kind, active_provider, active_model, providers)`:
 
 1. Compute tier preference list: `[Free, Cheap]` for `ShortFactoid`; `[Premium, Standard]` for `Coding`.
-2. Look up `active_provider`'s active model in `providers`; if found and its `cost_tier` is in the preference list → return `None` (no-op routing).
+2. Look up `active_provider`'s entry in `providers` (linear scan by `ProviderId` equality); within that entry's `ProviderCapabilities.models`, find the model with `id == active_model` by exact-string match. If found and its `cost_tier` is in the preference list → return `None` (no-op routing). If the active model is *not* found in the active provider's catalog (transient registration mismatch), treat as not-in-tier and proceed to step 3 — never panic.
 3. For each tier in the preference list:
    - Try active provider's models first (in declaration order); first model with `cost_tier == tier` → return `Some(DefaultPick { provider, model })`.
    - Then iterate the rest of `providers` in input order; first model with `cost_tier == tier` → return.
 4. If no tier matches anywhere → return `None`.
 
-`DefaultPick` is reused as-is from `rules.rs`. Adds no new type for the picker output.
+`DefaultPick` is reused **as-is** from `rules.rs` — no new fields, no new constructor. Phase 5 already finalized the type; Phase 6 just constructs more of them.
 
 ### Data flow
 
@@ -320,6 +320,7 @@ show-heuristics-active = "heuristics: enabled — short-factoid (≤200 chars + 
 - **Heuristic on + `@gemini:flash` override** — Override (Layer 1) wins. Heuristic never runs. Verified.
 - **`heuristics = true` with empty pool** — only the active provider's models (if any) are considered; if pool is empty `Router::pick` is not called (host short-circuits via `NoActiveProvider`). Out of scope here.
 - **Tool-use loop iterations within a turn** — heuristic runs *once* at turn start. Subsequent iterations use the same `RoutingDecision` (pinned by the host). Matches Phase 3/4/5 behavior; no special handling.
+- **`/route reload` racing an in-flight turn** — the host snapshots `RoutingRules` by `.clone()` before any `.await` (see `crates/savvagent-host/src/session.rs:769`); the classifier in `Router::pick` reads from that snapshot, not from the live `RwLock`. A reload landing mid-turn does not flip the turn's classifier decision. Phase 6 inherits Phase 5's snapshot discipline unchanged.
 - **Heuristic chose a provider that gets disconnected mid-turn** — host's existing `ProviderLease` invariants apply; the lease holds the `Arc<dyn ProviderClient>` until the turn completes. Same as Override or Rule scenarios.
 - **Locale fallback** — non-en locale missing `routing.show-heuristics-active`: rust_i18n auto-falls-back to en. Tested per [[feedback_test_locale_isolation]] by adding the placeholder to all locales.
 
