@@ -188,6 +188,12 @@ pub struct HostConfig {
     /// emitting the cooperative cancel signal and aborting outstanding
     /// turn tasks.
     pub force_disconnect_grace_ms: u64,
+
+    /// Filesystem path to the user's `routing.toml`. `None` means
+    /// "don't load any rules; treat as `RoutingRules::empty()`." The
+    /// TUI sets this to `~/.savvagent/routing.toml`; tests and the
+    /// headless example pass `None`.
+    pub routing_rules_path: Option<PathBuf>,
 }
 
 impl HostConfig {
@@ -213,6 +219,7 @@ impl HostConfig {
             startup_connect: StartupConnectPolicy::default(),
             connect_timeout_ms: 3000,
             force_disconnect_grace_ms: 500,
+            routing_rules_path: None,
         }
     }
 
@@ -302,6 +309,7 @@ impl std::fmt::Debug for HostConfig {
             .field("startup_connect", &self.startup_connect)
             .field("connect_timeout_ms", &self.connect_timeout_ms)
             .field("force_disconnect_grace_ms", &self.force_disconnect_grace_ms)
+            .field("routing_rules_path", &self.routing_rules_path)
             .finish()
     }
 }

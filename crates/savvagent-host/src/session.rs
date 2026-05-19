@@ -328,6 +328,11 @@ pub struct Host {
     /// `run_turn_inner` for one provider-round-trip. Used by
     /// [`Host::remove_provider`] in the hard-abort stage.
     turn_handles: tokio::sync::Mutex<HashMap<ProviderId, Vec<tokio::task::AbortHandle>>>,
+    /// User-edited routing rules (`~/.savvagent/routing.toml`). Loaded
+    /// once at `Host::start` and swapped atomically by
+    /// `reload_routing_rules`. Snapshotted (cloned) before any `.await`
+    /// in `run_turn_inner`, same discipline as `active_provider` etc.
+    routing_rules: Arc<tokio::sync::RwLock<crate::router::RoutingRules>>,
 }
 
 struct SessionState {
@@ -428,6 +433,16 @@ impl Host {
             .collect();
 
         let initial_model = config.model.clone();
+        let routing_rules = match config.routing_rules_path.as_ref() {
+            Some(path) => match crate::router::RoutingRules::load_from_path(path) {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to load routing.toml at startup; falling back to empty rules");
+                    crate::router::RoutingRules::empty()
+                }
+            },
+            None => crate::router::RoutingRules::empty(),
+        };
         let host = Self {
             config,
             pool: tokio::sync::RwLock::new(pool_map),
@@ -446,6 +461,7 @@ impl Host {
             next_request_id: Arc::new(AtomicU64::new(1)),
             cancel_signal: tokio::sync::Mutex::new(cancel_signal_map),
             turn_handles: tokio::sync::Mutex::new(HashMap::new()),
+            routing_rules: Arc::new(tokio::sync::RwLock::new(routing_rules)),
         };
         host.wire_self_into_resolver().await;
         Ok(host)
@@ -499,6 +515,16 @@ impl Host {
         cancel_signal_map.insert(default_id.clone(), broadcast::channel(8).0);
 
         let initial_model = config.model.clone();
+        let routing_rules = match config.routing_rules_path.as_ref() {
+            Some(path) => match crate::router::RoutingRules::load_from_path(path) {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to load routing.toml at startup; falling back to empty rules");
+                    crate::router::RoutingRules::empty()
+                }
+            },
+            None => crate::router::RoutingRules::empty(),
+        };
         let host = Self {
             config,
             pool: tokio::sync::RwLock::new(pool_map),
@@ -517,6 +543,7 @@ impl Host {
             next_request_id: Arc::new(AtomicU64::new(1)),
             cancel_signal: tokio::sync::Mutex::new(cancel_signal_map),
             turn_handles: tokio::sync::Mutex::new(HashMap::new()),
+            routing_rules: Arc::new(tokio::sync::RwLock::new(routing_rules)),
         };
         host.wire_self_into_resolver().await;
         Ok(host)
@@ -563,6 +590,31 @@ impl Host {
         events: mpsc::Sender<TurnEvent>,
     ) -> Result<TurnOutcome, HostError> {
         self.run_turn_inner(content, Some(events)).await
+    }
+
+    /// Re-read `routing_rules_path` and atomically swap the in-memory
+    /// rules. Returns the new rule count on success. On parse error the
+    /// existing rules are kept (deliberate refinement vs Phase 5 spec
+    /// startup behavior) and the error is returned to the caller for
+    /// surfacing.
+    pub async fn reload_routing_rules(&self) -> Result<usize, crate::router::RoutingRulesError> {
+        let Some(path) = self.config.routing_rules_path.clone() else {
+            // Nothing to reload from; clear in-memory and report zero.
+            let mut g = self.routing_rules.write().await;
+            *g = crate::router::RoutingRules::empty();
+            return Ok(0);
+        };
+        let new_rules = crate::router::RoutingRules::load_from_path(&path)?;
+        let count = new_rules.rules.len();
+        let mut g = self.routing_rules.write().await;
+        *g = new_rules;
+        Ok(count)
+    }
+
+    /// Snapshot the current routing rules (clone). Lets `/route show`
+    /// render its output without holding the lock across an `.await`.
+    pub async fn routing_rules_snapshot(&self) -> crate::router::RoutingRules {
+        self.routing_rules.read().await.clone()
     }
 
     /// Ask the active provider for its model list.
@@ -647,19 +699,33 @@ impl Host {
         });
 
         // Phase 4: detect modality requirements on the just-built `messages`.
-        // Reading the latest user message is sufficient — historical images
-        // are already baked into the conversation; routing is per-turn.
         let required = modality::required_modalities(&messages);
 
-        // Run the router. The decision pins the provider + model for the
-        // entire turn, including every tool-use iteration.
-        //
-        // Snapshot active_id/active_model BEFORE taking the pool guard so
-        // we never hold the pool RwLock across an `.await`, and so this
-        // path matches the lock acquisition order used elsewhere
-        // (active_provider -> pool).
+        // Phase 5: build per-turn signals for the rules layer. user_text
+        // is the concatenated text of the latest user message — image-
+        // only turns end up with the empty string, which is fine
+        // (keyword predicates won't match; bounds predicates still work).
+        let user_text: String = messages
+            .iter()
+            .rev()
+            .find(|m| matches!(m.role, Role::User))
+            .map(|m| {
+                m.content
+                    .iter()
+                    .filter_map(|b| match b {
+                        ContentBlock::Text { text } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .unwrap_or_default();
+
+        // Snapshot active_id/active_model + routing_rules BEFORE taking
+        // the pool guard — keeps the .await-safe lock discipline.
         let active_id: ProviderId = self.active_provider.read().await.clone();
         let active_model: String = self.current_model.read().await.clone();
+        let rules_snapshot: crate::router::RoutingRules = self.routing_rules.read().await.clone();
         let decision = {
             let pool = self.pool.read().await;
             let views: Vec<crate::router::ProviderView<'_>> = pool
@@ -675,8 +741,8 @@ impl Host {
                 &active_id,
                 &active_model,
                 required,
-                &crate::router::rules::RoutingRules::empty(),
-                "",
+                &rules_snapshot,
+                &user_text,
             )
             // pool guard dropped at end of this block
         };
