@@ -328,6 +328,18 @@ pub struct Host {
     /// `run_turn_inner` for one provider-round-trip. Used by
     /// [`Host::remove_provider`] in the hard-abort stage.
     turn_handles: tokio::sync::Mutex<HashMap<ProviderId, Vec<tokio::task::AbortHandle>>>,
+    /// User-edited routing rules (`~/.savvagent/routing.toml`). Loaded
+    /// once at `Host::start` and swapped atomically by
+    /// `reload_routing_rules`. Snapshotted (cloned) before any `.await`
+    /// in `run_turn_inner`, same discipline as `active_provider` etc.
+    /// No outer `Arc` — `&self` access through the `tokio::RwLock` is
+    /// sufficient; the host itself is already shared via `Arc<Host>`.
+    routing_rules: tokio::sync::RwLock<crate::router::RoutingRules>,
+    /// One-shot startup notes (e.g. routing.toml parse failures) that the
+    /// TUI should drain and surface as styled notes once `App` exists.
+    /// Plain `std::sync::Mutex` because access is one-shot at startup —
+    /// no async required and no contention with the turn loop.
+    startup_notes: std::sync::Mutex<Vec<String>>,
 }
 
 struct SessionState {
@@ -428,6 +440,24 @@ impl Host {
             .collect();
 
         let initial_model = config.model.clone();
+        let mut startup_notes: Vec<String> = Vec::new();
+        let routing_rules = match config.routing_rules_path.as_ref() {
+            Some(path) => match crate::router::RoutingRules::load_from_path(path) {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        path = %path.display(),
+                        "failed to load routing.toml at startup; falling back to empty rules"
+                    );
+                    startup_notes.push(format!(
+                        "routing.toml failed to load: {e}; run /route reload after fixing the file"
+                    ));
+                    crate::router::RoutingRules::empty()
+                }
+            },
+            None => crate::router::RoutingRules::empty(),
+        };
         let host = Self {
             config,
             pool: tokio::sync::RwLock::new(pool_map),
@@ -446,6 +476,8 @@ impl Host {
             next_request_id: Arc::new(AtomicU64::new(1)),
             cancel_signal: tokio::sync::Mutex::new(cancel_signal_map),
             turn_handles: tokio::sync::Mutex::new(HashMap::new()),
+            routing_rules: tokio::sync::RwLock::new(routing_rules),
+            startup_notes: std::sync::Mutex::new(startup_notes),
         };
         host.wire_self_into_resolver().await;
         Ok(host)
@@ -499,6 +531,24 @@ impl Host {
         cancel_signal_map.insert(default_id.clone(), broadcast::channel(8).0);
 
         let initial_model = config.model.clone();
+        let mut startup_notes: Vec<String> = Vec::new();
+        let routing_rules = match config.routing_rules_path.as_ref() {
+            Some(path) => match crate::router::RoutingRules::load_from_path(path) {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        path = %path.display(),
+                        "failed to load routing.toml at startup; falling back to empty rules"
+                    );
+                    startup_notes.push(format!(
+                        "routing.toml failed to load: {e}; run /route reload after fixing the file"
+                    ));
+                    crate::router::RoutingRules::empty()
+                }
+            },
+            None => crate::router::RoutingRules::empty(),
+        };
         let host = Self {
             config,
             pool: tokio::sync::RwLock::new(pool_map),
@@ -517,6 +567,8 @@ impl Host {
             next_request_id: Arc::new(AtomicU64::new(1)),
             cancel_signal: tokio::sync::Mutex::new(cancel_signal_map),
             turn_handles: tokio::sync::Mutex::new(HashMap::new()),
+            routing_rules: tokio::sync::RwLock::new(routing_rules),
+            startup_notes: std::sync::Mutex::new(startup_notes),
         };
         host.wire_self_into_resolver().await;
         Ok(host)
@@ -553,9 +605,9 @@ impl Host {
     /// `Text`; non-text leading blocks (e.g. an image-first turn) skip
     /// `@`-parsing entirely.
     ///
-    /// Phase 4 ships this entrypoint as host-side machinery. The TUI does
-    /// not yet expose an image-attachment UI; this method is intended for
-    /// (a) the modality routing integration test, and (b) a future image
+    /// This entrypoint is host-side machinery. The TUI does not yet
+    /// expose an image-attachment UI; this method is intended for (a)
+    /// the modality routing integration test, and (b) a future image
     /// upload feature in the TUI.
     pub async fn run_turn_streaming_with_blocks(
         &self,
@@ -563,6 +615,47 @@ impl Host {
         events: mpsc::Sender<TurnEvent>,
     ) -> Result<TurnOutcome, HostError> {
         self.run_turn_inner(content, Some(events)).await
+    }
+
+    /// Re-read `routing_rules_path` and atomically swap the in-memory
+    /// rules. Returns the new rule count on success. Parse errors are
+    /// returned to the caller without clearing the existing in-memory
+    /// rules — preserves the previously-good set rather than silently
+    /// dropping it on a typo.
+    pub async fn reload_routing_rules(&self) -> Result<usize, crate::router::RoutingRulesError> {
+        let Some(path) = self.config.routing_rules_path.clone() else {
+            // No path configured — there is nothing to re-read. Returning
+            // `NoPathConfigured` lets the TUI render a real failure note
+            // instead of "reloaded 0 rules" which would hide the
+            // mis-configuration. The previous behaviour (clear in-memory
+            // + Ok(0)) silently masked the bug for callers that toggled
+            // `routing_rules_path` to None and then asked for a reload.
+            return Err(crate::router::RoutingRulesError::NoPathConfigured);
+        };
+        let new_rules = crate::router::RoutingRules::load_from_path(&path)?;
+        let count = new_rules.rules.len();
+        let mut g = self.routing_rules.write().await;
+        *g = new_rules;
+        Ok(count)
+    }
+
+    /// Snapshot the current routing rules (clone). Lets `/route show`
+    /// render its output without holding the lock across an `.await`.
+    pub async fn routing_rules_snapshot(&self) -> crate::router::RoutingRules {
+        self.routing_rules.read().await.clone()
+    }
+
+    /// Drain any one-shot startup notes (e.g. `routing.toml` parse
+    /// failures recorded during `Host::start`). Returns the accumulated
+    /// messages and clears the buffer. The TUI calls this once after
+    /// `Host::start` returns and surfaces each message as a styled note.
+    pub fn take_startup_notes(&self) -> Vec<String> {
+        std::mem::take(
+            &mut *self
+                .startup_notes
+                .lock()
+                .expect("startup_notes mutex poisoned"),
+        )
     }
 
     /// Ask the active provider for its model list.
@@ -611,8 +704,8 @@ impl Host {
         // Aliases are flattened across every connected provider so
         // `@opus` works even if the active provider is Gemini.
         //
-        // Phase 4: if the leading block is text, run the @-prefix parser
-        // on it and replace it with the stripped body. Non-text leading
+        // If the leading block is text, run the @-prefix parser on it
+        // and replace it with the stripped body. Non-text leading
         // blocks (e.g. image-first turns) skip @-parsing entirely.
         let (override_, user_content) = {
             let pool = self.pool.read().await;
@@ -646,20 +739,34 @@ impl Host {
             content: user_content,
         });
 
-        // Phase 4: detect modality requirements on the just-built `messages`.
-        // Reading the latest user message is sufficient — historical images
-        // are already baked into the conversation; routing is per-turn.
+        // Detect modality requirements on the just-built `messages`.
         let required = modality::required_modalities(&messages);
 
-        // Run the router. The decision pins the provider + model for the
-        // entire turn, including every tool-use iteration.
-        //
-        // Snapshot active_id/active_model BEFORE taking the pool guard so
-        // we never hold the pool RwLock across an `.await`, and so this
-        // path matches the lock acquisition order used elsewhere
-        // (active_provider -> pool).
+        // Build per-turn signals for the rules layer. user_text is the
+        // concatenated text of the latest user message — image-only
+        // turns end up with the empty string, which is fine (keyword
+        // predicates won't match; bounds predicates still work).
+        let user_text: String = messages
+            .iter()
+            .rev()
+            .find(|m| matches!(m.role, Role::User))
+            .map(|m| {
+                m.content
+                    .iter()
+                    .filter_map(|b| match b {
+                        ContentBlock::Text { text } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .unwrap_or_default();
+
+        // Snapshot active_id/active_model + routing_rules BEFORE taking
+        // the pool guard — keeps the .await-safe lock discipline.
         let active_id: ProviderId = self.active_provider.read().await.clone();
         let active_model: String = self.current_model.read().await.clone();
+        let rules_snapshot: crate::router::RoutingRules = self.routing_rules.read().await.clone();
         let decision = {
             let pool = self.pool.read().await;
             let views: Vec<crate::router::ProviderView<'_>> = pool
@@ -669,7 +776,15 @@ impl Host {
                     capabilities: entry.capabilities(),
                 })
                 .collect();
-            crate::router::Router::pick(override_, &views, &active_id, &active_model, required)
+            crate::router::Router::pick(
+                override_,
+                &views,
+                &active_id,
+                &active_model,
+                required,
+                &rules_snapshot,
+                &user_text,
+            )
             // pool guard dropped at end of this block
         };
 

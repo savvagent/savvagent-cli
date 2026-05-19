@@ -141,6 +141,13 @@ pub struct PendingModelChange {
     pub persist: bool,
 }
 
+/// Queued routing-rules action emitted by `Effect::ReloadRoutingRules`
+/// or `Effect::ShowRoutingRules`. The `run_app` loop drains these
+/// flags after each `apply_effects` call because `apply_effects`
+/// doesn't have host access.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PendingRoutingAction;
+
 /// Snapshot of a pending [`TurnEvent::PermissionRequested`] used to render
 /// the modal and resolve the host's outstanding `oneshot`.
 #[derive(Debug, Clone)]
@@ -434,6 +441,13 @@ pub struct App {
     /// which owns the `host_slot` / `project_root` / `tool_bins` the
     /// effect-application layer doesn't have access to.
     pub pending_model_change: Option<PendingModelChange>,
+
+    /// Queued by `Effect::ReloadRoutingRules`; drained by
+    /// `main.rs::apply_pending_routing_reload`.
+    pub pending_routing_reload: Option<PendingRoutingAction>,
+    /// Queued by `Effect::ShowRoutingRules`; drained by
+    /// `main.rs::apply_pending_routing_show`.
+    pub pending_routing_show: Option<PendingRoutingAction>,
 }
 
 impl App {
@@ -504,6 +518,8 @@ impl App {
             registered_providers: std::collections::HashMap::new(),
             cached_models: Vec::new(),
             pending_model_change: None,
+            pending_routing_reload: None,
+            pending_routing_show: None,
         };
         app.refresh_commands();
         app
@@ -1173,6 +1189,70 @@ impl App {
     pub fn push_styled_note(&mut self, line: savvagent_plugin::StyledLine) {
         let text: String = line.spans.iter().map(|s| s.text.as_str()).collect();
         self.push_note(text);
+    }
+
+    /// Scan the entries backwards for the most recent `Entry::RouteBadge`
+    /// and parse it into `(provider, model, reason)`. The badge format is
+    /// `"provider/model — Reason"`, written by `apply_turn_event`'s
+    /// `RouteSelected` arm. Returns `None` when no badge is present in
+    /// this session yet, or when the format can't be parsed; the latter
+    /// case logs a `tracing::warn!` so a divergence between the writer
+    /// (in `apply_turn_event`) and this reader doesn't fail silently.
+    pub fn most_recent_routing_decision(&self) -> Option<(String, String, String)> {
+        let badge = self.entries.iter().rev().find_map(|e| match e {
+            Entry::RouteBadge(s) => Some(s.as_str()),
+            _ => None,
+        })?;
+        let Some((left, reason)) = badge.split_once(" — ") else {
+            tracing::warn!(
+                badge = %badge,
+                "route badge missing ' — ' separator; format may have changed"
+            );
+            return None;
+        };
+        let Some((provider, model)) = left.split_once('/') else {
+            tracing::warn!(
+                badge = %badge,
+                "route badge left half missing '/'; format may have changed"
+            );
+            return None;
+        };
+        Some((provider.to_string(), model.to_string(), reason.to_string()))
+    }
+
+    /// Owning vec of provider ids that the TUI knows are connected.
+    /// Source: the `registered_providers` field populated by the
+    /// `RegisterProvider` arm of `apply_effects` (see
+    /// `crates/savvagent/src/plugin/effects.rs`). This is **not** a
+    /// direct view of the host pool — a provider plugin must emit
+    /// `Effect::RegisterProvider` for the id to appear here. In normal
+    /// TUI operation that effect is fired by each provider plugin's
+    /// `on_event(HostStarting)` callback once a keyring credential is
+    /// found, so this list aligns with the host pool the user sees.
+    /// Code paths that build a `Host` directly (tests, headless
+    /// examples) bypass `apply_effects` and will see this list empty
+    /// even when the pool has connected providers — that's the
+    /// expected behavior, since the TUI is the source of truth for the
+    /// view layer.
+    ///
+    /// Used by `render_routing_show` (in `main.rs`) to label routing rules
+    /// whose target provider isn't connected.
+    pub fn connected_provider_ids(&self) -> Vec<savvagent_protocol::ProviderId> {
+        self.registered_providers
+            .keys()
+            .filter_map(|s| match savvagent_protocol::ProviderId::new(s) {
+                Ok(id) => Some(id),
+                Err(e) => {
+                    tracing::warn!(
+                        provider_id = %s,
+                        error = %e,
+                        "registered_providers key failed ProviderId round-trip; \
+                         /route show may mis-label rules targeting this provider"
+                    );
+                    None
+                }
+            })
+            .collect()
     }
 
     /// Clear the conversation log.
@@ -1847,5 +1927,48 @@ mod tests {
         );
 
         rust_i18n::set_locale("en");
+    }
+
+    #[test]
+    fn most_recent_routing_decision_parses_badge() {
+        let mut app = fresh_app();
+        app.entries.push(Entry::RouteBadge(
+            "anthropic/claude-opus-4-7 — Override".into(),
+        ));
+        app.entries.push(Entry::Assistant("hi".into()));
+        let got = app.most_recent_routing_decision().expect("parses");
+        assert_eq!(got.0, "anthropic");
+        assert_eq!(got.1, "claude-opus-4-7");
+        assert_eq!(got.2, "Override");
+    }
+
+    #[test]
+    fn most_recent_routing_decision_none_when_no_badge() {
+        let app = fresh_app();
+        assert!(app.most_recent_routing_decision().is_none());
+    }
+
+    #[test]
+    fn most_recent_routing_decision_parses_rule_badge() {
+        let mut app = fresh_app();
+        app.entries.push(Entry::RouteBadge(
+            "anthropic/claude-opus-4-7 — Rule(deep-reasoning)".into(),
+        ));
+        let got = app.most_recent_routing_decision().expect("parses");
+        assert_eq!(got.0, "anthropic");
+        assert_eq!(got.1, "claude-opus-4-7");
+        assert_eq!(got.2, "Rule(deep-reasoning)");
+    }
+
+    #[test]
+    fn most_recent_routing_decision_warns_on_unparseable_badge() {
+        // Badge that lacks the " — " separator. The contract under
+        // test is "returns None on parse failure"; the parser also
+        // fires a `tracing::warn!` but that side-effect is not
+        // observable here without a tracing harness.
+        let mut app = fresh_app();
+        app.entries
+            .push(Entry::RouteBadge("malformed-no-separator".into()));
+        assert!(app.most_recent_routing_decision().is_none());
     }
 }

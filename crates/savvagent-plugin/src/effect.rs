@@ -120,6 +120,15 @@ pub enum Effect {
         /// Desired enabled state (`true` to enable, `false` to disable).
         enabled: bool,
     },
+    /// Re-read `~/.savvagent/routing.toml` and swap the host's stored
+    /// rules. Sets `App::pending_routing_reload` so `main.rs::run_app`
+    /// can drain it with host access (see `Effect::SetActiveModel` for
+    /// the canonical pattern this mirrors).
+    ReloadRoutingRules,
+    /// Print the active routing rules and the most recent decision as
+    /// styled notes. Sets `App::pending_routing_show` for the same
+    /// reason as `ReloadRoutingRules`.
+    ShowRoutingRules,
     /// Compound: apply children in order. Not atomic — partial application is
     /// observable if a later child fails or has user-visible side effects.
     /// Useful for `vec![SetActiveTheme{..}, CloseScreen]`-style sequences from
@@ -229,5 +238,15 @@ mod tests {
             }
             _ => panic!("expected SetActiveLocale"),
         }
+    }
+
+    #[test]
+    fn reload_routing_rules_constructs() {
+        let _ = Effect::ReloadRoutingRules;
+    }
+
+    #[test]
+    fn show_routing_rules_constructs() {
+        let _ = Effect::ShowRoutingRules;
     }
 }

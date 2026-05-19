@@ -93,6 +93,7 @@ pub(crate) fn register_builtins() -> BuiltinSet {
         Box::new(builtin::prompt_keybindings::PromptKeybindingsPlugin::new()),
         Box::new(builtin::quit::QuitPlugin::new()),
         Box::new(builtin::resume::ResumePlugin::new()),
+        Box::new(builtin::route::RoutePlugin::new()),
         Box::new(builtin::save::SavePlugin::new()),
         Box::new(builtin::self_update::SelfUpdatePlugin::new()),
         Box::new(builtin::splash::SplashPlugin::new()),
@@ -135,6 +136,7 @@ mod tests {
             "internal:prompt-keybindings",
             "internal:quit",
             "internal:resume",
+            "internal:route",
             "internal:save",
             "internal:self-update",
             "internal:splash",
@@ -146,7 +148,7 @@ mod tests {
                 "missing non-provider plugin id: {expected}"
             );
         }
-        assert_eq!(set.plugins.len(), 20);
+        assert_eq!(set.plugins.len(), 21);
 
         // PR 6 adds the 4 provider shims — exactly once each.
         let provider_ids: Vec<_> = {
@@ -172,12 +174,13 @@ mod tests {
 
         // Registry shape: non-provider plugins PLUS 4 provider plugins.
         // Task 9 adds migration-picker, bringing non-provider count to 20;
-        // total registry size is 20 + 4 = 24.
+        // Task 6 adds route, bringing non-provider count to 21;
+        // total registry size is 21 + 4 = 25.
         let reg = PluginRegistry::new(set);
         assert_eq!(
             reg.len(),
-            24,
-            "registry should have 20 non-provider + 4 provider plugins"
+            25,
+            "registry should have 21 non-provider + 4 provider plugins"
         );
         assert_eq!(
             reg.provider_count(),

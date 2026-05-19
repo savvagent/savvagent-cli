@@ -39,6 +39,7 @@ mod models_pref;
 mod palette;
 mod plugin;
 mod providers;
+mod routing_pref;
 mod splash;
 #[cfg(test)]
 mod test_helpers;
@@ -296,7 +297,10 @@ async fn bootstrap_pool_host(
         let model =
             std::env::var("SAVVAGENT_MODEL").unwrap_or_else(|_| "claude-haiku-4-5".to_string());
         match start_host_remote(url, model.clone(), project_root.to_path_buf(), tool_bins).await {
-            Ok(host) => return Some((host, model, None, Vec::new())),
+            Ok(host) => {
+                let notes = host.take_startup_notes();
+                return Some((host, model, None, notes));
+            }
             Err(e) => {
                 eprintln!("warning: SAVVAGENT_PROVIDER_URL set but connect failed: {e:#}");
             }
@@ -441,9 +445,13 @@ async fn bootstrap_pool_host(
             } else {
                 let base = reg.capabilities.default_model_id().to_string();
                 let pref = models_pref::ModelsPref::load();
-                pref.get(reg.id.as_str())
-                    .map(|s| s.to_string())
-                    .unwrap_or(base)
+                if let Some(persisted) = pref.get(reg.id.as_str()) {
+                    persisted.to_string()
+                } else if let Some(d) = crate::routing_pref::load_default_pick() {
+                    if d.provider == reg.id { d.model } else { base }
+                } else {
+                    base
+                }
             };
             // Map the ProviderRegistration id back to a `&'static str` by
             // looking it up in the legacy PROVIDERS catalog (which already
@@ -473,14 +481,21 @@ async fn bootstrap_pool_host(
     config.providers = providers;
     config.startup_connect = startup_policy;
     config.connect_timeout_ms = config_file.startup.connect_timeout_ms;
+    config.routing_rules_path = crate::routing_pref::routing_toml_path();
 
     match Host::start(config).await {
-        Ok(host) => Some((
-            Arc::new(host),
-            initial_model,
-            initial_provider_id,
-            deferred_notes,
-        )),
+        Ok(host) => {
+            // Surface any one-shot startup notes the host recorded (e.g.
+            // a `routing.toml` parse failure). These are appended to
+            // `deferred_notes` so `run_app` pushes them once `App` exists.
+            deferred_notes.extend(host.take_startup_notes());
+            Some((
+                Arc::new(host),
+                initial_model,
+                initial_provider_id,
+                deferred_notes,
+            ))
+        }
         Err(e) => {
             eprintln!("warning: pool host start failed: {e:#}");
             None
@@ -494,11 +509,12 @@ async fn start_host_remote(
     project_root: PathBuf,
     tool_bins: &ToolBins,
 ) -> Result<Arc<Host>> {
-    let config = tool_bins.apply(
+    let mut config = tool_bins.apply(
         HostConfig::new(ProviderEndpoint::StreamableHttp { url }, model)
             .with_project_root(project_root)
             .with_app_version(env!("CARGO_PKG_VERSION")),
     );
+    config.routing_rules_path = crate::routing_pref::routing_toml_path();
     let host = Host::start(config).await.context("failed to start host")?;
     Ok(Arc::new(host))
 }
@@ -685,6 +701,8 @@ async fn dispatch_slash_command(
                     ));
                 }
                 apply_pending_model_change(app, host_slot, project_root, tool_bins).await;
+                apply_pending_routing_reload(app, host_slot).await;
+                apply_pending_routing_show(app, host_slot).await;
                 return;
             }
             Err(crate::plugin::slash::SlashError::Unknown(_)) => {
@@ -1252,18 +1270,142 @@ async fn apply_pending_model_change(
     }
 }
 
-/// Resolve the effective model id for `provider_id`, applying the
-/// precedence: `SAVVAGENT_MODEL` env var (highest) > persisted in
-/// `~/.savvagent/models.toml` > `spec.default_model`.
-fn resolve_initial_model_for(spec: &ProviderSpec) -> String {
-    if let Ok(env_model) = std::env::var("SAVVAGENT_MODEL") {
-        if !env_model.is_empty() {
-            return env_model;
+/// Drain `app.pending_routing_reload` (set by `Effect::ReloadRoutingRules`)
+/// and reload `~/.savvagent/routing.toml` via the host. No-op when nothing
+/// is queued. Mirrors `apply_pending_model_change`'s drain pattern.
+async fn apply_pending_routing_reload(app: &mut App, host_slot: &HostSlot) {
+    if app.pending_routing_reload.take().is_none() {
+        return;
+    }
+    let Some(host) = current_host(host_slot).await else {
+        app.push_note(
+            rust_i18n::t!("routing.reload-failed", err = "host not connected yet").to_string(),
+        );
+        return;
+    };
+    match host.reload_routing_rules().await {
+        Ok(count) => {
+            app.push_note(rust_i18n::t!("routing.reloaded", count = count.to_string()).to_string());
         }
+        Err(e) => {
+            app.push_note(rust_i18n::t!("routing.reload-failed", err = e.to_string()).to_string());
+        }
+    }
+}
+
+/// Drain `app.pending_routing_show` (set by `Effect::ShowRoutingRules`)
+/// and render the routing-rules summary. No-op when nothing is queued.
+async fn apply_pending_routing_show(app: &mut App, host_slot: &HostSlot) {
+    if app.pending_routing_show.take().is_none() {
+        return;
+    }
+    let Some(host) = current_host(host_slot).await else {
+        app.push_note(rust_i18n::t!("routing.show-no-host").to_string());
+        return;
+    };
+    let rules = host.routing_rules_snapshot().await;
+    render_routing_show(app, &rules);
+}
+
+/// Render `/route show` output as plain styled notes onto `App`. Pure
+/// function over the snapshot — no further host access required.
+fn render_routing_show(app: &mut App, rules: &savvagent_host::RoutingRules) {
+    if rules.rules.is_empty() {
+        app.push_note(rust_i18n::t!("routing.show-no-rules").to_string());
+    } else {
+        app.push_note(rust_i18n::t!("routing.show-header").to_string());
+        let connected: Vec<savvagent_protocol::ProviderId> = app.connected_provider_ids();
+        for (i, rule) in rules.rules.iter().enumerate() {
+            let idx = i + 1;
+            let match_desc = format_rule_match(&rule.match_);
+            let key = if connected.contains(&rule.use_.provider) {
+                "routing.show-rule-line"
+            } else {
+                "routing.show-rule-skipped"
+            };
+            let line = rust_i18n::t!(
+                key,
+                index = idx.to_string(),
+                name = rule.name.as_str(),
+                r#match = match_desc,
+                provider = rule.use_.provider.as_str(),
+                model = rule.use_.model.as_str(),
+            )
+            .to_string();
+            app.push_note(line);
+        }
+    }
+    match &rules.default {
+        Some(d) => app.push_note(
+            rust_i18n::t!(
+                "routing.show-default",
+                provider = d.provider.as_str(),
+                model = d.model.as_str()
+            )
+            .to_string(),
+        ),
+        None => app.push_note(rust_i18n::t!("routing.show-no-default").to_string()),
+    }
+    if rules.heuristics {
+        app.push_note(rust_i18n::t!("routing.show-heuristics-pending").to_string());
+    }
+    match app.most_recent_routing_decision() {
+        Some((provider, model, reason)) => app.push_note(
+            rust_i18n::t!(
+                "routing.show-last",
+                provider = provider,
+                model = model,
+                reason = reason
+            )
+            .to_string(),
+        ),
+        None => app.push_note(rust_i18n::t!("routing.show-no-last").to_string()),
+    }
+}
+
+fn format_rule_match(m: &savvagent_host::RuleMatch) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(b) = m.has_image {
+        parts.push(format!("has_image={b}"));
+    }
+    if let Some(b) = m.has_pdf {
+        parts.push(format!("has_pdf={b}"));
+    }
+    if let Some(b) = m.has_audio {
+        parts.push(format!("has_audio={b}"));
+    }
+    if !m.keywords.is_empty() {
+        parts.push(format!("keywords=[{}]", m.keywords.join(",")));
+    }
+    if let Some(n) = m.max_input_chars {
+        parts.push(format!("max_input_chars={n}"));
+    }
+    if let Some(n) = m.min_input_chars {
+        parts.push(format!("min_input_chars={n}"));
+    }
+    if parts.is_empty() {
+        "<any>".to_string()
+    } else {
+        parts.join(", ")
+    }
+}
+
+/// Resolve the effective model id for `provider_id`. Precedence (highest first):
+///   SAVVAGENT_MODEL env > ~/.savvagent/models.toml > routing.toml#default > spec.default_model.
+fn resolve_initial_model_for(spec: &ProviderSpec) -> String {
+    if let Ok(env_model) = std::env::var("SAVVAGENT_MODEL")
+        && !env_model.is_empty()
+    {
+        return env_model;
     }
     let pref = models_pref::ModelsPref::load();
     if let Some(persisted) = pref.get(spec.id) {
         return persisted.to_string();
+    }
+    if let Some(d) = crate::routing_pref::load_default_pick()
+        && d.provider.as_str() == spec.id
+    {
+        return d.model;
     }
     spec.default_model.to_string()
 }
@@ -1733,8 +1875,14 @@ async fn perform_connect(
         );
         cfg.providers = vec![reg];
         cfg.startup_connect = savvagent_host::StartupConnectPolicy::All;
+        cfg.routing_rules_path = crate::routing_pref::routing_toml_path();
         match Host::start(cfg).await {
             Ok(h) => {
+                // Surface any one-shot startup notes (e.g. routing.toml
+                // parse failure) before the host is stashed in host_slot.
+                for note in h.take_startup_notes() {
+                    app.push_note(note);
+                }
                 *host_slot.write().await = Some(Arc::new(h));
             }
             Err(e) => {
@@ -2285,6 +2433,8 @@ async fn run_app(
                 tracing::warn!(error = %e, "apply_effects from screen failed");
             }
             apply_pending_model_change(app, &host_slot, &project_root, &tool_bins).await;
+            apply_pending_routing_reload(app, &host_slot).await;
+            apply_pending_routing_show(app, &host_slot).await;
             continue;
         }
 
@@ -2436,6 +2586,8 @@ async fn run_app(
                                         &tool_bins,
                                     )
                                     .await;
+                                    apply_pending_routing_reload(app, &host_slot).await;
+                                    apply_pending_routing_show(app, &host_slot).await;
                                     handled = true;
                                 }
                             }
@@ -2887,5 +3039,271 @@ mod model_validation_tests {
             }
             other => panic!("expected Proceed with warning, got {other:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod render_routing_show_tests {
+    //! Tests for `render_routing_show` — the pure-over-snapshot
+    //! renderer that pushes `/route show` output onto an `App`. Each
+    //! case exercises a different branch (empty rules, active rule,
+    //! skipped-because-disconnected rule, last-decision badge) and
+    //! asserts on the number + content of the `Entry::Note` lines
+    //! that landed on `app.entries`. Note assertions search for
+    //! load-bearing substrings (rule names, "skipped", etc.) so the
+    //! tests survive minor i18n wording tweaks.
+    use super::*;
+    use crate::app::{App, Entry};
+    use async_trait::async_trait;
+    use savvagent_host::{DefaultPick, RoutingRule, RoutingRules, RuleMatch};
+    use savvagent_mcp::ProviderClient;
+    use savvagent_protocol::{
+        CompleteRequest, CompleteResponse, ListModelsResponse, ProviderError, ProviderId,
+        StreamEvent,
+    };
+    use std::path::PathBuf;
+    use tokio::sync::mpsc;
+
+    /// Stub `ProviderClient` we never call — only used to satisfy the
+    /// `registered_providers` map shape so `connected_provider_ids`
+    /// returns the keys we just inserted.
+    struct StubClient;
+    #[async_trait]
+    impl ProviderClient for StubClient {
+        async fn complete(
+            &self,
+            _: CompleteRequest,
+            _: Option<mpsc::Sender<StreamEvent>>,
+        ) -> Result<CompleteResponse, ProviderError> {
+            unreachable!("stub client never invoked in render_routing_show tests")
+        }
+        async fn list_models(&self) -> Result<ListModelsResponse, ProviderError> {
+            unreachable!("stub client never invoked in render_routing_show tests")
+        }
+    }
+
+    fn build_app() -> App {
+        App::new("test-model".into(), PathBuf::from("/tmp"), "en".to_string())
+    }
+
+    fn register(app: &mut App, id: &str) {
+        app.registered_providers
+            .insert(id.to_string(), Box::new(StubClient));
+    }
+
+    fn collect_notes(app: &App) -> Vec<String> {
+        app.entries
+            .iter()
+            .filter_map(|e| match e {
+                Entry::Note(t) => Some(t.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn rule_with_keyword(name: &str, provider: &str, model: &str, keyword: &str) -> RoutingRule {
+        // `RuleMatch` is `#[non_exhaustive]` outside its defining crate;
+        // construct with `Default::default()` and mutate the one field
+        // we care about.
+        let mut match_ = RuleMatch::default();
+        match_.keywords = vec![keyword.into()];
+        RoutingRule {
+            name: name.into(),
+            match_,
+            use_: DefaultPick::new(ProviderId::new(provider).unwrap(), model).unwrap(),
+        }
+    }
+
+    fn anthropic_rule(name: &str) -> RoutingRule {
+        rule_with_keyword(name, "anthropic", "claude-opus-4-7", "x")
+    }
+
+    fn gemini_rule(name: &str) -> RoutingRule {
+        rule_with_keyword(name, "gemini", "gemini-2.0-flash", "y")
+    }
+
+    #[test]
+    fn empty_rules_prints_no_rules_then_default_then_last() {
+        let mut app = build_app();
+        render_routing_show(&mut app, &RoutingRules::empty());
+        let notes = collect_notes(&app);
+        // No rules → 1 line. No default → 1 line. No last decision → 1 line.
+        assert_eq!(notes.len(), 3, "notes were: {notes:?}");
+        assert!(
+            notes[0].to_lowercase().contains("no routing rules"),
+            "first note should be the no-rules line, got: {}",
+            notes[0]
+        );
+    }
+
+    #[test]
+    fn one_active_rule_prints_rule_line_without_skipped_marker() {
+        let mut app = build_app();
+        register(&mut app, "anthropic");
+
+        let rules = RoutingRules {
+            default: None,
+            heuristics: false,
+            rules: vec![anthropic_rule("my-rule")],
+        };
+        render_routing_show(&mut app, &rules);
+        let notes = collect_notes(&app);
+        // header + 1 rule + no-default + no-last = 4 notes.
+        assert_eq!(notes.len(), 4, "notes were: {notes:?}");
+        let rule_line = &notes[1];
+        assert!(
+            rule_line.contains("my-rule") && rule_line.contains("anthropic"),
+            "rule line missing name/provider: {rule_line}"
+        );
+        assert!(
+            !rule_line.to_lowercase().contains("skipped"),
+            "active rule must not carry the skipped marker: {rule_line}"
+        );
+    }
+
+    #[test]
+    fn one_skipped_rule_prints_skipped_marker() {
+        let mut app = build_app();
+        // Only anthropic registered; rule targets gemini → must be skipped.
+        register(&mut app, "anthropic");
+
+        let rules = RoutingRules {
+            default: None,
+            heuristics: false,
+            rules: vec![gemini_rule("for-gemini")],
+        };
+        render_routing_show(&mut app, &rules);
+        let notes = collect_notes(&app);
+        assert_eq!(notes.len(), 4, "notes were: {notes:?}");
+        let rule_line = &notes[1];
+        assert!(
+            rule_line.to_lowercase().contains("skipped"),
+            "disconnected-target rule must carry the skipped marker: {rule_line}"
+        );
+    }
+
+    #[test]
+    fn last_decision_present_renders_it() {
+        let mut app = build_app();
+        app.entries.push(Entry::RouteBadge(
+            "anthropic/claude-opus-4-7 — Rule(my-rule)".into(),
+        ));
+
+        render_routing_show(&mut app, &RoutingRules::empty());
+        let notes = collect_notes(&app);
+        // No rules + no default + last-decision (parsed from badge) = 3.
+        assert_eq!(notes.len(), 3, "notes were: {notes:?}");
+        let last = notes.last().expect("last present");
+        assert!(
+            last.contains("anthropic")
+                && last.contains("claude-opus-4-7")
+                && last.contains("Rule(my-rule)"),
+            "last-decision note should include parsed badge fields: {last}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod resolve_initial_model_for_tests {
+    //! Pins the four precedence layers of `resolve_initial_model_for`:
+    //! `SAVVAGENT_MODEL` env > `~/.savvagent/models.toml` >
+    //! `routing.toml#default` > `spec.default_model`. All four tests
+    //! use the workspace-wide `HOME_LOCK` guard + `HomeGuard` to
+    //! redirect `$HOME` to a fresh tempdir and serialise against every
+    //! other `$HOME`-mutating test. `SAVVAGENT_MODEL` is set/unset
+    //! inside the same critical section so the env-var precedence
+    //! tests can't leak into a sibling test.
+    use super::*;
+    use crate::providers::ProviderSpec;
+    use crate::test_helpers::{HOME_LOCK, HomeGuard};
+
+    /// `ProviderSpec` we synthesise per-test. Stays inside the module
+    /// so any future field additions only affect the test scaffolding.
+    fn anthropic_spec() -> ProviderSpec {
+        ProviderSpec {
+            id: "anthropic",
+            display_name: "Anthropic (test)",
+            api_key_env: "ANTHROPIC_API_KEY",
+            default_model: "claude-haiku-4-5",
+            api_key_required: true,
+        }
+    }
+
+    /// Write `body` to `~/.savvagent/<filename>` under the current
+    /// `HomeGuard`'s tempdir.
+    fn write_under_home(filename: &str, body: &str) {
+        let home = std::env::var_os("HOME").expect("HOME set by HomeGuard");
+        let dir = std::path::PathBuf::from(home).join(".savvagent");
+        std::fs::create_dir_all(&dir).expect("create .savvagent dir");
+        std::fs::write(dir.join(filename), body).expect("write file");
+    }
+
+    /// Clear `SAVVAGENT_MODEL` so no ambient env pollutes the test.
+    /// Safe because we hold `HOME_LOCK` for the test lifetime.
+    fn clear_env() {
+        // SAFETY: HOME_LOCK is held; no other test mutates env right now.
+        unsafe { std::env::remove_var("SAVVAGENT_MODEL") };
+    }
+
+    #[test]
+    fn env_var_wins_over_everything() {
+        let _lock = HOME_LOCK.lock().unwrap();
+        let _home = HomeGuard::new();
+        clear_env();
+        // Plant a competing models.toml + routing.toml; env must still win.
+        write_under_home(
+            "models.toml",
+            r#"schema_version = 1
+[providers]
+anthropic = "from-models-toml"
+"#,
+        );
+        write_under_home("routing.toml", r#"default = "anthropic/from-routing-toml""#);
+        // SAFETY: HOME_LOCK held.
+        unsafe { std::env::set_var("SAVVAGENT_MODEL", "from-env") };
+
+        let got = resolve_initial_model_for(&anthropic_spec());
+        // Reset env BEFORE asserting so a failure doesn't pollute siblings.
+        clear_env();
+        assert_eq!(got, "from-env");
+    }
+
+    #[test]
+    fn models_toml_wins_over_routing_toml_and_spec() {
+        let _lock = HOME_LOCK.lock().unwrap();
+        let _home = HomeGuard::new();
+        clear_env();
+        write_under_home(
+            "models.toml",
+            r#"schema_version = 1
+[providers]
+anthropic = "from-models-toml"
+"#,
+        );
+        write_under_home("routing.toml", r#"default = "anthropic/from-routing-toml""#);
+
+        let got = resolve_initial_model_for(&anthropic_spec());
+        assert_eq!(got, "from-models-toml");
+    }
+
+    #[test]
+    fn routing_toml_default_wins_over_spec_when_no_models_toml() {
+        let _lock = HOME_LOCK.lock().unwrap();
+        let _home = HomeGuard::new();
+        clear_env();
+        write_under_home("routing.toml", r#"default = "anthropic/from-routing-toml""#);
+
+        let got = resolve_initial_model_for(&anthropic_spec());
+        assert_eq!(got, "from-routing-toml");
+    }
+
+    #[test]
+    fn falls_back_to_spec_default_when_all_empty() {
+        let _lock = HOME_LOCK.lock().unwrap();
+        let _home = HomeGuard::new();
+        clear_env();
+        // No models.toml, no routing.toml, no env — spec wins.
+        let got = resolve_initial_model_for(&anthropic_spec());
+        assert_eq!(got, "claude-haiku-4-5");
     }
 }

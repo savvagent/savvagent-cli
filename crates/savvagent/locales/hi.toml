@@ -300,6 +300,8 @@ plugins-summary            = "Plugins प्रबंधित करें"
 prompt-keybindings-summary = "प्रॉम्प्ट कीबाइंडिंग दिखाएं"
 quit-summary               = "savvagent से बाहर निकलें"
 resume-summary             = "सहेजी हुई ट्रांसक्रिप्ट पुनः प्रारंभ करें"
+# TODO: translate (Phase 5)
+route-summary              = "Manage routing rules (reload | show)"
 save-summary               = "ट्रांसक्रिप्ट को एक पथ पर सहेजें"
 splash-summary             = "स्प्लैश स्क्रीन दिखाएं"
 theme-summary              = "रंग थीम बदलें"
@@ -320,6 +322,8 @@ plugins-manager-description = "वैकल्पिक plugins सक्षम/
 provider-anthropic-description = "Anthropic प्रदाता (Claude परिवार)"
 quit-description          = "एप्लिकेशन को साफ़-सुथरे ढंग से बंद करें"
 resume-description        = "पुनः प्रारंभ के लिए सहेजी हुई ट्रांसक्रिप्ट चुनें"
+# TODO: translate (Phase 5)
+route-description         = "User routing rules from ~/.savvagent/routing.toml"
 save-description          = "सक्रिय वार्तालाप को डिस्क पर सहेजें"
 self-update-description   = "नई रिलीज़ खोजें और स्वचालित रूप से इंस्टॉल करें; लागू करने के लिए पुनः प्रारंभ करें"
 splash-description        = "स्टार्टअप HUD + पार्स-त्रुटि स्क्रीन"
@@ -342,3 +346,19 @@ save-failed = "Failed to save startup_providers to ~/.savvagent/config.toml: %{e
 tool-bash-not-found  = "नोट: savvagent-tool-bash नहीं मिला — bash निष्क्रिय। `cargo build` चलाएं या SAVVAGENT_TOOL_BASH_BIN सेट करें।"
 tool-fs-not-found    = "नोट: savvagent-tool-fs नहीं मिला — fs टूल निष्क्रिय। `cargo build` चलाएं या SAVVAGENT_TOOL_FS_BIN सेट करें।"
 tool-grep-not-found  = "नोट: savvagent-tool-grep नहीं मिला — खोज निष्क्रिय। `cargo build` चलाएं या SAVVAGENT_TOOL_GREP_BIN सेट करें।"
+
+# TODO: translate routing.* keys (Phase 5)
+[routing]
+reloaded                = "Reloaded routing.toml — %{count} rule(s) active."
+reload-failed           = "Couldn't reload routing.toml: %{err}"
+show-header             = "Active routing rules (in order):"
+show-rule-line          = "[%{index}] %{name} — match: %{match} → %{provider}/%{model}"
+show-rule-skipped       = "[%{index}] %{name} — match: %{match} → %{provider}/%{model}  (skipped: provider not connected)"
+show-no-rules           = "No routing rules. Edit ~/.savvagent/routing.toml and run /route reload."
+show-no-host            = "Routing rules unavailable — host not connected yet."
+show-default            = "Default: %{provider}/%{model}"
+show-no-default         = "Default: (using /model selection)"
+show-heuristics-pending = "heuristics: enabled — classifier ships in a future release"
+show-last               = "Last decision: %{provider}/%{model} — %{reason}"
+show-no-last            = "No turns this session yet."
+route-usage             = "Usage: /route [show | reload]"
