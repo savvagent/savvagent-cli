@@ -39,6 +39,7 @@ mod models_pref;
 mod palette;
 mod plugin;
 mod providers;
+mod routing_pref;
 mod splash;
 #[cfg(test)]
 mod test_helpers;
@@ -441,9 +442,13 @@ async fn bootstrap_pool_host(
             } else {
                 let base = reg.capabilities.default_model_id().to_string();
                 let pref = models_pref::ModelsPref::load();
-                pref.get(reg.id.as_str())
-                    .map(|s| s.to_string())
-                    .unwrap_or(base)
+                if let Some(persisted) = pref.get(reg.id.as_str()) {
+                    persisted.to_string()
+                } else if let Some(d) = crate::routing_pref::load_default_pick() {
+                    if d.provider == reg.id { d.model } else { base }
+                } else {
+                    base
+                }
             };
             // Map the ProviderRegistration id back to a `&'static str` by
             // looking it up in the legacy PROVIDERS catalog (which already
@@ -473,6 +478,7 @@ async fn bootstrap_pool_host(
     config.providers = providers;
     config.startup_connect = startup_policy;
     config.connect_timeout_ms = config_file.startup.connect_timeout_ms;
+    config.routing_rules_path = crate::routing_pref::routing_toml_path();
 
     match Host::start(config).await {
         Ok(host) => Some((
@@ -494,11 +500,12 @@ async fn start_host_remote(
     project_root: PathBuf,
     tool_bins: &ToolBins,
 ) -> Result<Arc<Host>> {
-    let config = tool_bins.apply(
+    let mut config = tool_bins.apply(
         HostConfig::new(ProviderEndpoint::StreamableHttp { url }, model)
             .with_project_root(project_root)
             .with_app_version(env!("CARGO_PKG_VERSION")),
     );
+    config.routing_rules_path = crate::routing_pref::routing_toml_path();
     let host = Host::start(config).await.context("failed to start host")?;
     Ok(Arc::new(host))
 }
@@ -1374,18 +1381,22 @@ fn format_rule_match(m: &savvagent_host::RuleMatch) -> String {
     }
 }
 
-/// Resolve the effective model id for `provider_id`, applying the
-/// precedence: `SAVVAGENT_MODEL` env var (highest) > persisted in
-/// `~/.savvagent/models.toml` > `spec.default_model`.
+/// Resolve the effective model id for `provider_id`. Precedence (highest first):
+///   SAVVAGENT_MODEL env > ~/.savvagent/models.toml > routing.toml#default > spec.default_model.
 fn resolve_initial_model_for(spec: &ProviderSpec) -> String {
-    if let Ok(env_model) = std::env::var("SAVVAGENT_MODEL") {
-        if !env_model.is_empty() {
-            return env_model;
-        }
+    if let Ok(env_model) = std::env::var("SAVVAGENT_MODEL")
+        && !env_model.is_empty()
+    {
+        return env_model;
     }
     let pref = models_pref::ModelsPref::load();
     if let Some(persisted) = pref.get(spec.id) {
         return persisted.to_string();
+    }
+    if let Some(d) = crate::routing_pref::load_default_pick()
+        && d.provider.as_str() == spec.id
+    {
+        return d.model;
     }
     spec.default_model.to_string()
 }
@@ -1855,6 +1866,7 @@ async fn perform_connect(
         );
         cfg.providers = vec![reg];
         cfg.startup_connect = savvagent_host::StartupConnectPolicy::All;
+        cfg.routing_rules_path = crate::routing_pref::routing_toml_path();
         match Host::start(cfg).await {
             Ok(h) => {
                 *host_slot.write().await = Some(Arc::new(h));
