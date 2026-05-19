@@ -245,6 +245,7 @@ delete-to-start     = "पंक्ति की शुरुआत तक ह�
 tab                 = "टैब डालें"
 undo                = "अंतिम संपादन पूर्ववत करें"
 redo                = "पूर्ववत किया गया संपादन पुनः लागू करें"
+recall-prompt       = "Recall previous / next prompt (Up at empty input; then Up/Down to browse)"
 
 [picker.editor-keybindings]
 modal-title       = "एडिटर कीबाइंडिंग"

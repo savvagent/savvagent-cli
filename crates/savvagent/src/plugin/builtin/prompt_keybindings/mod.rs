@@ -183,11 +183,13 @@ fn editing_rows() -> Vec<KeybindingRow> {
     ]
 }
 
-/// Undo/redo (savvagent intercepts + tui-textarea defaults).
+/// Undo/redo (savvagent intercepts + tui-textarea defaults) plus the
+/// shell-style prompt-history recall bound on Up/Down at an empty input.
 fn history_rows() -> Vec<KeybindingRow> {
     vec![
         row("Ctrl+Z / Ctrl+U", "picker.prompt-keybindings.row.undo"),
         row("Ctrl+Y / Ctrl+R", "picker.prompt-keybindings.row.redo"),
+        row("↑ / ↓", "picker.prompt-keybindings.row.recall-prompt"),
     ]
 }
 

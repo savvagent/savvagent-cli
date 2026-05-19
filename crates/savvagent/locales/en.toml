@@ -249,6 +249,7 @@ delete-to-start     = "Delete to start of line"
 tab                 = "Insert tab"
 undo                = "Undo last edit"
 redo                = "Redo last undone edit"
+recall-prompt       = "Recall previous / next prompt (Up at empty input; then Up/Down to browse)"
 
 [picker.editor-keybindings]
 modal-title       = "Editor Keybindings"

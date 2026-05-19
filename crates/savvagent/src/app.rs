@@ -592,11 +592,7 @@ impl App {
             text.split('\n').map(str::to_string).collect()
         };
         self.input_textarea = make_input_textarea(lines);
-        let row = self
-            .input_textarea
-            .lines()
-            .len()
-            .saturating_sub(1) as u16;
+        let row = self.input_textarea.lines().len().saturating_sub(1) as u16;
         let col = self
             .input_textarea
             .lines()

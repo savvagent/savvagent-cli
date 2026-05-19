@@ -245,6 +245,7 @@ delete-to-start     = "Apagar até o início da linha"
 tab                 = "Inserir tabulação"
 undo                = "Desfazer última edição"
 redo                = "Refazer a edição desfeita"
+recall-prompt       = "Recall previous / next prompt (Up at empty input; then Up/Down to browse)"
 
 [picker.editor-keybindings]
 modal-title       = "Atalhos do editor"
