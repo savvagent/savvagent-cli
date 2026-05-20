@@ -6,156 +6,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 (pre-1.0: `0.MINOR.PATCH`, where MINOR captures features + breaking
 boundary changes and PATCH captures fixes).
 
-## 0.21.0 - 2026-05-20
+## v0.15.0 — Multi-provider pool + auto-routing + TUI polish (2026-05-20)
 
-### Added
+This release rolls up Phases 1–6 of the multi-provider initiative
+(connection pool, cross-vendor `tool_use_id` compatibility gate,
+`@provider:model` override, modality-aware routing, user-edited routing
+rules, heuristic classifier) along with subsequent TUI polish that
+landed before tagging (mouse-wheel scrolling, tool-call summaries,
+conversation-log auto-tail). The in-tree per-phase
+`release(0.16.0)`–`release(0.20.0)` commits and the unreleased 0.21.0
+CHANGELOG scaffold were consolidated here; no intermediate version was
+tagged between v0.14.3 and v0.15.0.
 
-- **Mouse-wheel scrolling on the conversation log**. The TUI now enables crossterm's `EnableMouseCapture`, and wheel ticks adjust `App::log_scroll_offset_from_bottom` exactly like `PageUp`/`PageDown` — three wrapped rows per notch. Scrolling down past the live tail snaps back to auto-tail (`None`), the same contract `PageDown` honors, so a mixed wheel + keyboard session never lands in the ambiguous "parked at bottom of scrollback" state. Gated to the home screen (no plugin screen on top, no modal, no file picker, no splash) so popups and pickers keep their existing key-driven behavior.
+### Phase 1 — Multi-provider connection pool
 
-### Notes
-
-- Enabling mouse capture means terminals no longer get raw wheel events for native text selection. To select text inside the TUI, hold **Shift** while dragging — every major terminal emulator falls back to native selection while Shift is held.
-
-## 0.20.0 - 2026-05-19
-
-### Added
-
-- **Heuristic classifier (Layer 4 of the router)**. Opt-in via `heuristics = true` in `~/.savvagent/routing.toml`. Short questions (≤200 chars + `?`) route to a cheap model (`CostTier::Free` or `Cheap`); coding-flavored prompts (substring match against `refactor`, `implement`, `debug`, `fix bug`, `compile`, `stack trace`, `function`, `class`, `error`) route to a premium model (`Premium` or `Standard`). Same-provider preferred; sibling providers are walked only when the active provider has no matching model. Off by default.
-- **`RoutingReason::Heuristic { kind }`** variant on the existing `#[non_exhaustive]` enum. Transcript badge renders `Heuristic(short)` / `Heuristic(coding)`.
-- **`/route show`** now describes the active classifier (categories + triggers) when `heuristics = true`. When `heuristics = false`, no heuristic line is printed.
-
-### Changed
-
-- `Router::pick` runs a new Layer-4 step between rules and default. Layered precedence is unchanged: `@`-override, Modality, and matching user Rules all still beat the heuristic when they apply.
-
-### Notes
-
-- Coding-keyword matching is **substring-based** in v1 — `function` matches `functional`, `error` matches `terror`. Users who want stricter matching write explicit `[[rule]]` entries; rules run earlier (Layer 3) and beat the heuristic.
-- The `routing.show-heuristics-pending` locale key remains in the catalog for backward compat but is no longer emitted by any code path.
-
-## 0.19.0 - 2026-05-19
-
-### Added
-
-- **User-edited routing rules** (`~/.savvagent/routing.toml`). Routes a turn to a specific `provider/model` based on per-turn predicates (`has_image`, `keywords`, `max_input_chars`, `min_input_chars`). Layer 3 of the multi-provider router, between modality redirects and the default model.
-- **`/route show`** prints the active rules, the default, the heuristics-enabled state (Phase 6 stub), and the most recent routing decision.
-- **`/route reload`** re-reads `routing.toml` without restarting the TUI. Parse errors keep the prior rules in place and surface a styled note.
-- **`routing.toml#default`** is consulted between `~/.savvagent/models.toml` and the provider's hard-coded default during model resolution. Env (`SAVVAGENT_MODEL`) and `models.toml` still take precedence; routing.toml's default replaces the provider's built-in fallback when neither higher layer applies.
-
-### Changed
-
-- `Router::pick` now takes `rules: &RoutingRules` and `user_text: &str` parameters (additive).
-- `RoutingReason` gains a `Rule { name }` variant rendered as `Rule(<name>)` in the transcript badge.
-
-## 0.18.0 - 2026-05-18
-
-### Added
-
-- **Automatic modality routing for image inputs.** When your message
-  contains an image and the active provider's chosen model doesn't
-  support vision, the router auto-redirects the turn to a sibling
-  model on the **same provider** that does. Cross-provider redirects
-  are not done automatically — that crosses a billing boundary the
-  user picked. The transcript badge shows `Modality(image)` when a
-  same-provider redirect happens.
-- **`TurnEvent::ModalityWarning`.** Surfaced as a muted note in the TUI
-  when an image is attached but the active provider has no
-  vision-capable model, or when an `@`-override pinned a
-  vision-incapable model. The request still runs; the warning
-  explains why the next call may fail.
-- **`Host::run_turn_streaming_with_blocks(content, events)`.** Public
-  entrypoint that accepts a user turn as a `Vec<ContentBlock>` instead
-  of a string, so a future image-upload UX can deliver image blocks
-  without going through the text-only path.
-
-### Internal
-
-- Phase 4 of the multi-provider-pool roadmap (see
-  `docs/superpowers/specs/2026-05-15-multi-provider-pool-and-auto-routing-design.md`).
-  New `crates/savvagent-host/src/router/modality.rs` module with field
-  names (`has_image`, `has_pdf`, `has_audio`) aligned to Phase 5's
-  `routing.toml` predicates so the user-rules layer can bind to the
-  same struct without rename. `Router::pick` takes a new
-  `RequiredModalities` argument; the `#[non_exhaustive]`
-  `RoutingReason` enum gains a `Modality { kind }` variant.
-
-## 0.17.0 - 2026-05-17
-
-### Added
-
-- **`@provider:model` (and `@provider`, `@alias`) prefix.** Users can now
-  route an individual turn to a specific provider/model by prefixing
-  their message with `@anthropic:claude-opus-4-7`, `@gemini`, `@opus`,
-  etc. Unknown `@`-tokens are NOT consumed — the message goes through
-  verbatim and the next turn routes to the active provider as usual. To
-  start a message with a literal `@`, prefix with `@@`.
-- **Per-turn routing badge.** Each assistant turn now renders a muted
-  `▸ provider/model — Reason` line above its response so it's always
-  obvious which provider handled the turn and why
-  (Override / Default; modality / rules / heuristics arrive in later
-  phases).
-- **Built-in model aliases.** `@opus`, `@sonnet`, `@haiku` map to
-  Anthropic; `@flash`, `@pro` map to Gemini; `@gpt`, `@gpt-4o` map to
-  OpenAI. Ambiguous aliases (same short name across providers) fall
-  through with a styled note rather than picking one silently.
-
-### Changed
-
-- **Cross-provider history is now safe.** `/use <provider>` no longer
-  clears the conversation when switching the active provider. The host
-  namespaces every `tool_use_id` with the issuing provider at insertion
-  time (`<provider_id>:<original_id>`) and strips the receiver's own
-  prefix back off before each request; foreign-prefixed ids flow through
-  every translator as opaque strings, validated by the Phase 2
-  cross-vendor gate (v0.16.0).
-- **`/model` picker shows every connected provider's models.** Selecting
-  a model from a different provider updates both the active provider and
-  the default model in one step.
-
-### Internal
-
-- Phase 3 of the multi-provider-pool roadmap (see
-  `docs/superpowers/specs/2026-05-15-multi-provider-pool-and-auto-routing-design.md`).
-  New `crates/savvagent-host/src/router/{prefix,router,namespace}.rs`
-  modules; `Host::run_turn_inner` now parses the `@`-prefix, invokes
-  `Router::pick`, emits `TurnEvent::RouteSelected`, and namespaces ids
-  on append / strips on egress.
-- `TurnEvent::RouteSelected { provider_id, model_id, reason }` added.
-  Existing `TurnEvent` consumers that match the enum exhaustively need a
-  new arm (the TUI's `apply_turn_event` handles it; downstream consumers
-  outside this repo may need to update).
-- `PoolEntry` gains an `aliases` field carrying every `ModelAlias` the
-  provider's `ProviderRegistration` declared; `PoolEntry::new` takes a
-  new `aliases: Vec<ModelAlias>` argument.
-
-## 0.16.0 - 2026-05-16
-
-### CI
-
-- **Cross-vendor `tool_use_id` compatibility gate.** New
-  `crates/savvagent-host/tests/cross_vendor_history.rs` integration test
-  validates that every `(sender_provider, receiver_provider)` pair across
-  the three shipping vendors (Anthropic, Gemini, OpenAI) accepts SPP
-  history whose `tool_use_id` is prefixed with the originating provider
-  (e.g. `"anthropic:toolu_xyz"`). Nine pair tests run in PR CI against
-  axum-backed mock vendor servers via the dedicated `cross-vendor-gate`
-  job with `--no-fail-fast`, so any regression surfaces every failing
-  pair. `#[ignore]`-marked live-vendor twins are runnable manually via
-  `cargo test -p savvagent-host --test cross_vendor_history -- --ignored`
-  with `ANTHROPIC_API_KEY` / `GEMINI_API_KEY` / `OPENAI_API_KEY` set.
-
-### Internal
-
-- Phase 2 of the multi-provider-pool roadmap (see
-  `docs/superpowers/specs/2026-05-15-multi-provider-pool-and-auto-routing-design.md`).
-  No user-visible runtime behavior changes; this release establishes the
-  release-gate Phase 3 (cross-provider routing with `@provider:model`
-  overrides) depends on. A live-vendor nightly workflow is intentionally
-  deferred to a follow-up.
-
-## v0.15.0 — Multi-provider connection pool (2026-05-15)
-
-### Added
+#### Added
 
 - **Multi-provider connection pool.** `/connect <provider>` is now silent when
   the keyring already has a stored key; the API-key modal only opens when a key
@@ -168,10 +33,8 @@ boundary changes and PATCH captures fixes).
   and `TurnEvent::AbortedAfterGrace { reason }` (with
   `CancellationReason::ProviderDisconnected` and `UserAbort`) emit during
   force-disconnect.
-- **`/use <provider>`** switches the active provider and clears the conversation
-  thread. Phase 1 invariant: a conversation runs on one active provider
-  end-to-end; cross-provider routing within a conversation lands in Phase 3+
-  once the cross-vendor compatibility gate (Phase 2) is green.
+- **`/use <provider>`** switches the active provider. (Phase 1 cleared the
+  conversation on switch; Phase 3 made cross-provider history safe — see below.)
 - **`~/.savvagent/config.toml`** for startup connection policy and per-provider
   connect timeout. Schema:
 
@@ -196,28 +59,26 @@ boundary changes and PATCH captures fixes).
   prefixed with `▸ `; pool members that are connected but inactive are listed
   without the marker.
 
-### Changed
+#### Changed
 
 - **`/connect <provider>`** no longer replaces the active host or clears the
   conversation. The new provider joins the pool additively; use `/use <provider>`
   to switch the active turn context.
-- **`/model`** lists only the active provider's models. Switching to a different
-  provider's model requires `/use <provider>` first.
 - **`SAVVAGENT_MODEL`** accepts both legacy bare-model form
   (`claude-opus-4-7`) and new `provider/model` form
   (`anthropic/claude-opus-4-7`); ambiguous bare forms log a warning and
   fall back to the active provider's default.
 
-### Migration notes
+#### Migration notes
 
 - Pre-existing users with multiple stored keys see a one-time picker on first
   launch; the selection writes `startup_providers` to
   `~/.savvagent/config.toml`. Single-key users see no UI change beyond the
   silent re-connect behavior.
 - Users who relied on `/connect <other>` to switch providers should now use
-  `/use <other>` (which also clears conversation history).
+  `/use <other>`.
 
-### Internal
+#### Internal
 
 - `ProviderId` moved from `savvagent-plugin` to `savvagent-protocol`;
   re-exported from `savvagent-plugin` for backwards compatibility.
@@ -231,6 +92,159 @@ boundary changes and PATCH captures fixes).
   with `CancellationReason::ProviderDisconnected` and `UserAbort`.
 - `HostEvent::ActiveProviderChanged` (and matching `HookKind`) fires on `/use`
   and startup so plugin slot rendering stays in sync.
+
+### Phase 2 — Cross-vendor `tool_use_id` compatibility gate
+
+#### CI
+
+- **Cross-vendor `tool_use_id` compatibility gate.** New
+  `crates/savvagent-host/tests/cross_vendor_history.rs` integration test
+  validates that every `(sender_provider, receiver_provider)` pair across
+  the three shipping vendors (Anthropic, Gemini, OpenAI) accepts SPP
+  history whose `tool_use_id` is prefixed with the originating provider
+  (e.g. `"anthropic:toolu_xyz"`). Nine pair tests run in PR CI against
+  axum-backed mock vendor servers via the dedicated `cross-vendor-gate`
+  job with `--no-fail-fast`, so any regression surfaces every failing
+  pair. `#[ignore]`-marked live-vendor twins are runnable manually via
+  `cargo test -p savvagent-host --test cross_vendor_history -- --ignored`
+  with `ANTHROPIC_API_KEY` / `GEMINI_API_KEY` / `OPENAI_API_KEY` set.
+
+#### Internal
+
+- Phase 2 of the multi-provider-pool roadmap (see
+  `docs/superpowers/specs/2026-05-15-multi-provider-pool-and-auto-routing-design.md`).
+  No user-visible runtime behavior changes; this release establishes the
+  release-gate Phase 3 (cross-provider routing with `@provider:model`
+  overrides) depends on. A live-vendor nightly workflow is intentionally
+  deferred to a follow-up.
+
+### Phase 3 — `@provider:model` override + cross-provider conversations
+
+#### Added
+
+- **`@provider:model` (and `@provider`, `@alias`) prefix.** Users can now
+  route an individual turn to a specific provider/model by prefixing
+  their message with `@anthropic:claude-opus-4-7`, `@gemini`, `@opus`,
+  etc. Unknown `@`-tokens are NOT consumed — the message goes through
+  verbatim and the next turn routes to the active provider as usual. To
+  start a message with a literal `@`, prefix with `@@`.
+- **Per-turn routing badge.** Each assistant turn now renders a muted
+  `▸ provider/model — Reason` line above its response so it's always
+  obvious which provider handled the turn and why
+  (Override / Default; modality / rules / heuristics arrive in later
+  phases).
+- **Built-in model aliases.** `@opus`, `@sonnet`, `@haiku` map to
+  Anthropic; `@flash`, `@pro` map to Gemini; `@gpt`, `@gpt-4o` map to
+  OpenAI. Ambiguous aliases (same short name across providers) fall
+  through with a styled note rather than picking one silently.
+
+#### Changed
+
+- **Cross-provider history is now safe.** `/use <provider>` no longer
+  clears the conversation when switching the active provider. The host
+  namespaces every `tool_use_id` with the issuing provider at insertion
+  time (`<provider_id>:<original_id>`) and strips the receiver's own
+  prefix back off before each request; foreign-prefixed ids flow through
+  every translator as opaque strings, validated by the Phase 2
+  cross-vendor gate.
+- **`/model` picker shows every connected provider's models.** Selecting
+  a model from a different provider updates both the active provider and
+  the default model in one step.
+
+#### Internal
+
+- Phase 3 of the multi-provider-pool roadmap. New
+  `crates/savvagent-host/src/router/{prefix,router,namespace}.rs`
+  modules; `Host::run_turn_inner` now parses the `@`-prefix, invokes
+  `Router::pick`, emits `TurnEvent::RouteSelected`, and namespaces ids
+  on append / strips on egress.
+- `TurnEvent::RouteSelected { provider_id, model_id, reason }` added.
+  Existing `TurnEvent` consumers that match the enum exhaustively need a
+  new arm (the TUI's `apply_turn_event` handles it; downstream consumers
+  outside this repo may need to update).
+- `PoolEntry` gains an `aliases` field carrying every `ModelAlias` the
+  provider's `ProviderRegistration` declared; `PoolEntry::new` takes a
+  new `aliases: Vec<ModelAlias>` argument.
+
+### Phase 4 — Modality-aware routing
+
+#### Added
+
+- **Automatic modality routing for image inputs.** When your message
+  contains an image and the active provider's chosen model doesn't
+  support vision, the router auto-redirects the turn to a sibling
+  model on the **same provider** that does. Cross-provider redirects
+  are not done automatically — that crosses a billing boundary the
+  user picked. The transcript badge shows `Modality(image)` when a
+  same-provider redirect happens.
+- **`TurnEvent::ModalityWarning`.** Surfaced as a muted note in the TUI
+  when an image is attached but the active provider has no
+  vision-capable model, or when an `@`-override pinned a
+  vision-incapable model. The request still runs; the warning
+  explains why the next call may fail.
+- **`Host::run_turn_streaming_with_blocks(content, events)`.** Public
+  entrypoint that accepts a user turn as a `Vec<ContentBlock>` instead
+  of a string, so a future image-upload UX can deliver image blocks
+  without going through the text-only path.
+
+#### Internal
+
+- Phase 4 of the multi-provider-pool roadmap. New
+  `crates/savvagent-host/src/router/modality.rs` module with field
+  names (`has_image`, `has_pdf`, `has_audio`) aligned to Phase 5's
+  `routing.toml` predicates so the user-rules layer can bind to the
+  same struct without rename. `Router::pick` takes a new
+  `RequiredModalities` argument; the `#[non_exhaustive]`
+  `RoutingReason` enum gains a `Modality { kind }` variant.
+
+### Phase 5 — User-edited routing rules
+
+#### Added
+
+- **User-edited routing rules** (`~/.savvagent/routing.toml`). Routes a turn to a specific `provider/model` based on per-turn predicates (`has_image`, `keywords`, `max_input_chars`, `min_input_chars`). Layer 3 of the multi-provider router, between modality redirects and the default model.
+- **`/route show`** prints the active rules, the default, the heuristics-enabled state, and the most recent routing decision.
+- **`/route reload`** re-reads `routing.toml` without restarting the TUI. Parse errors keep the prior rules in place and surface a styled note.
+- **`routing.toml#default`** is consulted between `~/.savvagent/models.toml` and the provider's hard-coded default during model resolution. Env (`SAVVAGENT_MODEL`) and `models.toml` still take precedence; routing.toml's default replaces the provider's built-in fallback when neither higher layer applies.
+
+#### Changed
+
+- `Router::pick` now takes `rules: &RoutingRules` and `user_text: &str` parameters (additive).
+- `RoutingReason` gains a `Rule { name }` variant rendered as `Rule(<name>)` in the transcript badge.
+
+### Phase 6 — Heuristic classifier (Layer 4)
+
+#### Added
+
+- **Heuristic classifier (Layer 4 of the router)**. Opt-in via `heuristics = true` in `~/.savvagent/routing.toml`. Short questions (≤200 chars + `?`) route to a cheap model (`CostTier::Free` or `Cheap`); coding-flavored prompts (substring match against `refactor`, `implement`, `debug`, `fix bug`, `compile`, `stack trace`, `function`, `class`, `error`) route to a premium model (`Premium` or `Standard`). Same-provider preferred; sibling providers are walked only when the active provider has no matching model. Off by default.
+- **`RoutingReason::Heuristic { kind }`** variant on the existing `#[non_exhaustive]` enum. Transcript badge renders `Heuristic(short)` / `Heuristic(coding)`.
+- **`/route show`** now describes the active classifier (categories + triggers) when `heuristics = true`. When `heuristics = false`, no heuristic line is printed.
+
+#### Changed
+
+- `Router::pick` runs a new Layer-4 step between rules and default. Layered precedence is unchanged: `@`-override, Modality, and matching user Rules all still beat the heuristic when they apply.
+
+### TUI polish (post-Phase 6)
+
+#### Added
+
+- **Mouse-wheel scrolling on the conversation log.** The TUI now enables crossterm's `EnableMouseCapture`, and wheel ticks adjust `App::log_scroll_offset_from_bottom` exactly like `PageUp`/`PageDown` — three wrapped rows per notch. Scrolling down past the live tail snaps back to auto-tail (`None`), the same contract `PageDown` honors, so a mixed wheel + keyboard session never lands in the ambiguous "parked at bottom of scrollback" state. Gated to the home screen (no plugin screen on top, no modal, no file picker, no splash) so popups and pickers keep their existing key-driven behavior.
+- **Tool-call summaries + JSON highlighter in the conversation log** (#89). Tool invocations render as a compact one-line summary with a syntax-highlighted JSON argument preview, improving scan-ability when many tool calls fire in a single turn.
+- **Conversation-log auto-tail + scrollback with `PageUp`/`PageDown`** (#87). The log auto-tails to the newest message by default and only stops auto-tailing when the user explicitly scrolls back; `PageDown` past the live tail re-arms auto-tail.
+- **Per-project prompt history.** The prompt input now recalls prior messages with `Up`/`Down`, scoped per project root so unrelated workspaces don't bleed into each other's history.
+- **Dynamic model catalog from `list_models` on `/connect`** (#86). The provider registration step now consults the provider's runtime `list_models` MCP method (where available) so the `/model` picker reflects what the provider actually serves, instead of the hard-coded catalog baked into the binary.
+
+#### Fixed
+
+- `/connect` now makes the just-connected provider active (no more "connected but not selected" footgun).
+- `/model` picker is populated on startup when a bootstrap host already exists.
+- The silent-connect path (no API-key modal) now adds the provider to the host pool.
+- `routing.toml#default` is validated on load, and the `/model` picker refreshes on every `/connect`.
+
+### Notes
+
+- Enabling mouse capture means terminals no longer get raw wheel events for native text selection. To select text inside the TUI, hold **Shift** while dragging — every major terminal emulator falls back to native selection while Shift is held.
+- Coding-keyword matching in the heuristic classifier is **substring-based** in v1 — `function` matches `functional`, `error` matches `terror`. Users who want stricter matching write explicit `[[rule]]` entries; rules run earlier (Layer 3) and beat the heuristic.
+- The `routing.show-heuristics-pending` locale key remains in the catalog for backward compat but is no longer emitted by any code path.
 
 ## v0.14.3 — Self-update plugin re-checks GitHub Releases every 2 hours (2026-05-15)
 
