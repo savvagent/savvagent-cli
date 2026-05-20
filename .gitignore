@@ -3,3 +3,6 @@
 .env
 .env.local
 /home/
+
+# Local worktrees created by Claude Code's EnterWorktree tool.
+.claude/worktrees/
