@@ -53,6 +53,9 @@ pub struct Contributions {
     pub slots: Vec<SlotSpec>,
     /// Keybinding registrations contributed by this plugin.
     pub keybindings: Vec<KeybindingSpec>,
+    /// Tool names this plugin renders summaries for via
+    /// `Plugin::summarize_tool_call` / `summarize_tool_result`.
+    pub tool_summaries: Vec<ToolSummarySpec>,
 }
 
 /// Registration descriptor for a slash command contributed by a plugin.
@@ -147,6 +150,18 @@ pub struct KeybindingSpec {
     pub action: BoundAction,
 }
 
+/// Registration descriptor for a tool-summary contribution. Declares one
+/// tool name (matched against `ContentBlock::ToolUse.name`) this plugin
+/// renders via `Plugin::summarize_tool_call` / `summarize_tool_result`.
+///
+/// Duplicate tool names across plugins are resolved by the registry at
+/// index-build time: first-registered wins, conflicts log a `warn!`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolSummarySpec {
+    /// The tool name this plugin claims (e.g. `"read_file"`).
+    pub tool_name: String,
+}
+
 /// Describes which screen context a keybinding is active in.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum KeyScope {
@@ -172,6 +187,31 @@ mod tests {
         assert!(c.hooks.is_empty());
         assert!(c.slots.is_empty());
         assert!(c.keybindings.is_empty());
+        assert!(c.tool_summaries.is_empty());
+    }
+
+    #[test]
+    fn manifest_can_carry_tool_summaries() {
+        let m = Manifest {
+            id: PluginId("internal:test-tool-fs".into()),
+            name: "Test tool-fs summaries".into(),
+            version: "0.10.0".into(),
+            description: "Summaries for tool-fs tool names".into(),
+            kind: PluginKind::Core,
+            contributions: Contributions {
+                tool_summaries: vec![
+                    ToolSummarySpec {
+                        tool_name: "read_file".into(),
+                    },
+                    ToolSummarySpec {
+                        tool_name: "write_file".into(),
+                    },
+                ],
+                ..Contributions::default()
+            },
+        };
+        assert_eq!(m.contributions.tool_summaries.len(), 2);
+        assert_eq!(m.contributions.tool_summaries[0].tool_name, "read_file");
     }
 
     #[test]

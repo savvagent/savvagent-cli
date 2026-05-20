@@ -145,9 +145,203 @@ impl StyledLine {
     }
 }
 
+/// Format a byte count using binary (1024-based) units.
+///
+/// - `0..1024` → `"<N> B"` (no decimal).
+/// - `1024..` → `"<N.D> KiB"`, `"<N.D> MiB"`, `"<N.D> GiB"` (one decimal place).
+///
+/// Used by tool-summary plugins to render `bytes`, `bytes_written`, file
+/// sizes, etc. Pure; no allocation beyond the returned `String`.
+pub fn pretty_bytes(bytes: u64) -> String {
+    const KIB: u64 = 1024;
+    const MIB: u64 = 1024 * KIB;
+    const GIB: u64 = 1024 * MIB;
+    if bytes < KIB {
+        format!("{bytes} B")
+    } else if bytes < MIB {
+        format!("{:.1} KiB", bytes as f64 / KIB as f64)
+    } else if bytes < GIB {
+        format!("{:.1} MiB", bytes as f64 / MIB as f64)
+    } else {
+        format!("{:.1} GiB", bytes as f64 / GIB as f64)
+    }
+}
+
+/// Maximum characters retained from a single JSON string value before the
+/// renderer truncates with an ellipsis. Whole-blob truncation is the caller's
+/// responsibility (e.g. ratatui `Paragraph::wrap`).
+const JSON_VALUE_MAX_CHARS: usize = 40;
+
+/// Render a `serde_json::Value` as a one-line, theme-aware sequence of
+/// `StyledSpan`s.
+///
+/// Colour palette (semantic slots — resolved by the host at render time):
+/// - Object keys → [`ThemeColor::Accent`]
+/// - String values → [`ThemeColor::Success`]
+/// - Numbers, booleans, `null` → [`ThemeColor::Secondary`]
+/// - Structural punctuation (`{`, `}`, `[`, `]`, `,`, `:`, key/value quotes) → [`ThemeColor::Muted`]
+///
+/// String values longer than 40 *characters* are truncated with a trailing
+/// `…` (the character cap, not byte cap, keeps multi-byte UTF-8 safe).
+///
+/// Used by the TUI as the fallback rendering when no plugin claims a given
+/// tool name; also exposed for plugins that want highlighted JSON for
+/// fields they choose not to format specially.
+pub fn json_spans(value: &serde_json::Value) -> Vec<StyledSpan> {
+    let mut out: Vec<StyledSpan> = Vec::new();
+    push_value(&mut out, value);
+    out
+}
+
+fn push_value(out: &mut Vec<StyledSpan>, value: &serde_json::Value) {
+    match value {
+        serde_json::Value::Null => push(out, "null", ThemeColor::Secondary),
+        serde_json::Value::Bool(b) => push(
+            out,
+            if *b { "true" } else { "false" },
+            ThemeColor::Secondary,
+        ),
+        serde_json::Value::Number(n) => push(out, n.to_string(), ThemeColor::Secondary),
+        serde_json::Value::String(s) => push_string_value(out, s),
+        serde_json::Value::Array(items) => {
+            push(out, "[", ThemeColor::Muted);
+            for (i, item) in items.iter().enumerate() {
+                if i > 0 {
+                    push(out, ", ", ThemeColor::Muted);
+                }
+                push_value(out, item);
+            }
+            push(out, "]", ThemeColor::Muted);
+        }
+        serde_json::Value::Object(map) => {
+            push(out, "{", ThemeColor::Muted);
+            for (i, (k, v)) in map.iter().enumerate() {
+                if i > 0 {
+                    push(out, ", ", ThemeColor::Muted);
+                }
+                push(out, "\"", ThemeColor::Muted);
+                push(out, k.clone(), ThemeColor::Accent);
+                push(out, "\"", ThemeColor::Muted);
+                push(out, ": ", ThemeColor::Muted);
+                push_value(out, v);
+            }
+            push(out, "}", ThemeColor::Muted);
+        }
+    }
+}
+
+fn push_string_value(out: &mut Vec<StyledSpan>, s: &str) {
+    let truncated: String = {
+        let n = s.chars().count();
+        if n <= JSON_VALUE_MAX_CHARS {
+            s.to_string()
+        } else {
+            let mut t: String = s.chars().take(JSON_VALUE_MAX_CHARS).collect();
+            t.push('…');
+            t
+        }
+    };
+    push(out, "\"", ThemeColor::Muted);
+    push(out, truncated, ThemeColor::Success);
+    push(out, "\"", ThemeColor::Muted);
+}
+
+fn push(out: &mut Vec<StyledSpan>, text: impl Into<String>, fg: ThemeColor) {
+    out.push(StyledSpan {
+        text: text.into(),
+        fg: Some(fg),
+        bg: None,
+        modifiers: TextMods::default(),
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pretty_bytes_formats_small_values_in_bytes() {
+        assert_eq!(pretty_bytes(0), "0 B");
+        assert_eq!(pretty_bytes(512), "512 B");
+        assert_eq!(pretty_bytes(1023), "1023 B");
+    }
+
+    #[test]
+    fn pretty_bytes_formats_kibi_and_mebi() {
+        assert_eq!(pretty_bytes(1024), "1.0 KiB");
+        assert_eq!(pretty_bytes(1536), "1.5 KiB");
+        assert_eq!(pretty_bytes(1024 * 1024), "1.0 MiB");
+        assert_eq!(pretty_bytes(1024 * 1024 * 4 + 1024 * 700), "4.7 MiB");
+    }
+
+    #[test]
+    fn pretty_bytes_formats_gibi() {
+        assert_eq!(pretty_bytes(1024 * 1024 * 1024), "1.0 GiB");
+    }
+
+    use serde_json::json;
+
+    fn join_text(spans: &[StyledSpan]) -> String {
+        spans.iter().map(|s| s.text.as_str()).collect()
+    }
+
+    #[test]
+    fn json_spans_renders_empty_object() {
+        let spans = json_spans(&json!({}));
+        assert_eq!(join_text(&spans), "{}");
+    }
+
+    #[test]
+    fn json_spans_renders_empty_array() {
+        let spans = json_spans(&json!([]));
+        assert_eq!(join_text(&spans), "[]");
+    }
+
+    #[test]
+    fn json_spans_renders_flat_object_in_key_value_order() {
+        let spans = json_spans(&json!({"path": "src/main.rs", "size": 42}));
+        // Order in serde_json::Map is insertion order, which is what `json!` preserves.
+        assert_eq!(join_text(&spans), r#"{"path": "src/main.rs", "size": 42}"#);
+    }
+
+    #[test]
+    fn json_spans_truncates_long_string_values_at_40_chars() {
+        let long = "x".repeat(60);
+        let spans = json_spans(&json!({"v": long}));
+        // First 40 chars retained, then '…'.
+        let expected_value = format!("\"{}…\"", "x".repeat(40));
+        assert_eq!(join_text(&spans), format!("{{\"v\": {expected_value}}}"));
+    }
+
+    #[test]
+    fn json_spans_renders_nested_array_and_object() {
+        let spans = json_spans(&json!({"xs": [1, true, null]}));
+        assert_eq!(join_text(&spans), r#"{"xs": [1, true, null]}"#);
+    }
+
+    #[test]
+    fn json_spans_colors_keys_with_accent_and_punctuation_with_muted() {
+        let spans = json_spans(&json!({"k": "v"}));
+        // First span is `{` (muted), then `"` (muted), then `k` (accent), …
+        // Collect (text, fg) pairs and assert against a small expected slice.
+        let pairs: Vec<(String, Option<ThemeColor>)> =
+            spans.iter().map(|s| (s.text.clone(), s.fg)).collect();
+        assert_eq!(pairs[0], ("{".to_string(), Some(ThemeColor::Muted)));
+        // `"k"` is emitted as three muted-quote / accent-key spans.
+        // We assert the key body is Accent and the surrounding quotes are Muted.
+        assert!(
+            pairs
+                .iter()
+                .any(|(t, c)| t == "k" && *c == Some(ThemeColor::Accent)),
+            "expected an Accent-coloured span containing the key 'k'; got {pairs:?}"
+        );
+        assert!(
+            pairs
+                .iter()
+                .any(|(t, c)| t == "v" && *c == Some(ThemeColor::Success)),
+            "expected a Success-coloured span containing the string value 'v'; got {pairs:?}"
+        );
+    }
 
     #[test]
     fn styled_line_holds_owned_spans() {

@@ -17,6 +17,11 @@ pub mod manifests;
 /// and concatenates each contributor's rendered lines.
 pub mod slots;
 
+/// Tool-summary routing: resolves a tool name to its owning plugin and
+/// dispatches `Plugin::summarize_tool_call` / `summarize_tool_result`,
+/// falling back to the host's JSON highlighter at the call site.
+pub mod tool_summaries;
+
 /// Slash command routing: resolves bare command names to their owning plugin
 /// and dispatches `handle_slash`, with a re-entrancy depth cap.
 #[allow(dead_code)]
@@ -98,6 +103,9 @@ pub(crate) fn register_builtins() -> BuiltinSet {
         Box::new(builtin::self_update::SelfUpdatePlugin::new()),
         Box::new(builtin::splash::SplashPlugin::new()),
         Box::new(builtin::themes::ThemesPlugin::new()),
+        Box::new(builtin::tool_bash_summary::ToolBashSummaryPlugin::new()),
+        Box::new(builtin::tool_fs_summary::ToolFsSummaryPlugin::new()),
+        Box::new(builtin::tool_grep_summary::ToolGrepSummaryPlugin::new()),
         Box::new(builtin::view_file::ViewFilePlugin::new()),
     ];
 
@@ -141,6 +149,9 @@ mod tests {
             "internal:self-update",
             "internal:splash",
             "internal:themes",
+            "internal:tool-bash-summary",
+            "internal:tool-fs-summary",
+            "internal:tool-grep-summary",
             "internal:view-file",
         ] {
             assert!(
@@ -148,7 +159,7 @@ mod tests {
                 "missing non-provider plugin id: {expected}"
             );
         }
-        assert_eq!(set.plugins.len(), 21);
+        assert_eq!(set.plugins.len(), 24);
 
         // PR 6 adds the 4 provider shims — exactly once each.
         let provider_ids: Vec<_> = {
@@ -175,12 +186,13 @@ mod tests {
         // Registry shape: non-provider plugins PLUS 4 provider plugins.
         // Task 9 adds migration-picker, bringing non-provider count to 20;
         // Task 6 adds route, bringing non-provider count to 21;
-        // total registry size is 21 + 4 = 25.
+        // Task 11 adds tool-bash/fs/grep-summary, bringing non-provider count to 24;
+        // total registry size is 24 + 4 = 28.
         let reg = PluginRegistry::new(set);
         assert_eq!(
             reg.len(),
-            25,
-            "registry should have 21 non-provider + 4 provider plugins"
+            28,
+            "registry should have 24 non-provider + 4 provider plugins"
         );
         assert_eq!(
             reg.provider_count(),

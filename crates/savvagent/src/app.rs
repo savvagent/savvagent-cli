@@ -218,12 +218,16 @@ pub enum Entry {
     Tool {
         /// Tool name.
         name: String,
-        /// One-line summary of the JSON arguments.
-        arguments: String,
+        /// Raw JSON arguments the model passed to the tool. Passed to
+        /// `ToolSummaryRouter::summarize_call` during the async pre-render
+        /// step; falls back to `savvagent_plugin::styled::json_spans` when
+        /// no plugin claims this tool name.
+        args: serde_json::Value,
         /// Outcome (None while running).
         status: Option<ToolCallStatus>,
-        /// Truncated payload (only set after completion).
-        result_preview: Option<String>,
+        /// Raw result payload from the tool (only set after completion).
+        /// Passed to `ToolSummaryRouter::summarize_result` during pre-render.
+        result_text: Option<String>,
     },
     /// Per-turn routing badge — rendered as a muted single line above
     /// the assistant entry that follows it. Source: `TurnEvent::RouteSelected`.
@@ -714,9 +718,9 @@ impl App {
                 self.flush_live_text();
                 self.entries.push(Entry::Tool {
                     name,
-                    arguments: summarize_args(&arguments),
+                    args: arguments,
                     status: None,
-                    result_preview: None,
+                    result_text: None,
                 });
             }
             TurnEvent::ToolCallFinished {
@@ -726,7 +730,7 @@ impl App {
             } => {
                 if let Some(Entry::Tool {
                     status: s,
-                    result_preview: p,
+                    result_text: r,
                     ..
                 }) = self
                     .entries
@@ -735,7 +739,7 @@ impl App {
                     .find(|e| matches!(e, Entry::Tool { status: None, .. }))
                 {
                     *s = Some(status);
-                    *p = Some(truncate(&result, 240));
+                    *r = Some(result);
                 }
             }
             TurnEvent::PermissionRequested {
@@ -830,10 +834,12 @@ impl App {
                     t.len()
                 }
                 Entry::Tool {
-                    arguments,
-                    result_preview,
-                    ..
-                } => arguments.len() + result_preview.as_deref().map(str::len).unwrap_or(0),
+                    args, result_text, ..
+                } => {
+                    // Approximate the JSON args by their compact serialization.
+                    let args_len = serde_json::to_string(args).map(|s| s.len()).unwrap_or(0);
+                    args_len + result_text.as_deref().map(str::len).unwrap_or(0)
+                }
             })
             .sum::<usize>()
             + self.live_text.len();
@@ -1195,9 +1201,9 @@ impl App {
                             ContentBlock::ToolUse { name, input, .. } => {
                                 self.entries.push(Entry::Tool {
                                     name: name.clone(),
-                                    arguments: summarize_args(input),
+                                    args: input.clone(),
                                     status: Some(ToolCallStatus::Ok),
-                                    result_preview: Some("[history]".into()),
+                                    result_text: Some("[history]".into()),
                                 });
                             }
                             ContentBlock::Thinking { .. } => {
@@ -1549,17 +1555,15 @@ impl App {
                 Entry::User(t) => format!("user: {t}"),
                 Entry::Assistant(t) => format!("assistant: {t}"),
                 Entry::Tool {
-                    name,
-                    arguments,
-                    status,
-                    ..
+                    name, args, status, ..
                 } => {
                     let status_label = match status {
                         Some(ToolCallStatus::Ok) => "ok",
                         Some(ToolCallStatus::Errored) => "error",
                         None => "in-flight",
                     };
-                    format!("tool: {name}({arguments}) [{status_label}]")
+                    let args_str = serde_json::to_string(args).unwrap_or_default();
+                    format!("tool: {name}({args_str}) [{status_label}]")
                 }
                 Entry::RouteBadge(t) => format!("route: {t}"),
                 Entry::Note(t) => format!("note: {t}"),
@@ -1575,11 +1579,6 @@ impl App {
     pub fn submit_prompt(&mut self, text: String) {
         tracing::debug!("submit_prompt effect ignored in PR 3");
     }
-}
-
-fn summarize_args(value: &Value) -> String {
-    let s = serde_json::to_string(value).unwrap_or_default();
-    truncate(&s, 80)
 }
 
 fn truncate(s: &str, max: usize) -> String {
@@ -2236,5 +2235,30 @@ mod tests {
         app.entries
             .push(Entry::RouteBadge("malformed-no-separator".into()));
         assert!(app.most_recent_routing_decision().is_none());
+    }
+
+    #[test]
+    fn entry_tool_carries_raw_value_and_result_text() {
+        // Construct an Entry::Tool with the new field shape and assert the
+        // fields are accessible at their new names and types.
+        let entry = Entry::Tool {
+            name: "read_file".to_string(),
+            args: serde_json::json!({"path": "src/main.rs"}),
+            status: Some(ToolCallStatus::Ok),
+            result_text: Some(r#"{"bytes": 1234}"#.to_string()),
+        };
+        let Entry::Tool {
+            name,
+            args,
+            status,
+            result_text,
+        } = entry
+        else {
+            panic!("expected Entry::Tool");
+        };
+        assert_eq!(name, "read_file");
+        assert_eq!(args.get("path").unwrap(), &serde_json::json!("src/main.rs"));
+        assert_eq!(status, Some(ToolCallStatus::Ok));
+        assert_eq!(result_text.as_deref(), Some(r#"{"bytes": 1234}"#));
     }
 }

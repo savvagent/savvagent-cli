@@ -210,6 +210,22 @@ impl Plugin for BoxedPlugin {
         self.0.create_screen(id, args)
     }
 
+    fn summarize_tool_call(
+        &self,
+        name: &str,
+        args: &serde_json::Value,
+    ) -> Option<Vec<savvagent_plugin::StyledSpan>> {
+        self.0.summarize_tool_call(name, args)
+    }
+
+    fn summarize_tool_result(
+        &self,
+        name: &str,
+        result_text: &str,
+    ) -> Option<Vec<savvagent_plugin::StyledSpan>> {
+        self.0.summarize_tool_result(name, result_text)
+    }
+
     fn themes(&self) -> Vec<savvagent_plugin::ThemeEntry> {
         self.0.themes()
     }

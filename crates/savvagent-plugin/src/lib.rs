@@ -40,7 +40,7 @@ pub use effect::{BoundAction, Effect};
 pub mod manifest;
 pub use manifest::{
     Contributions, KeyScope, KeybindingSpec, Manifest, PluginKind, ProviderSpec, ScreenLayout,
-    ScreenSpec, SlashSpec, SlotSpec,
+    ScreenSpec, SlashSpec, SlotSpec, ToolSummarySpec,
 };
 
 /// The [`Plugin`] trait — the WIT-portable entry point each plugin implements.
@@ -101,5 +101,15 @@ mod trait_smoke {
             },
         );
         assert!(lines.is_empty());
+
+        // Tool-summary defaults return None for both args and results.
+        assert!(
+            p.summarize_tool_call("read_file", &serde_json::json!({"path": "/x"}))
+                .is_none()
+        );
+        assert!(
+            p.summarize_tool_result("read_file", "{\"bytes\":12}")
+                .is_none()
+        );
     }
 }

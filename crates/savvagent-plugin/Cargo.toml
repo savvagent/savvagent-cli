@@ -9,6 +9,7 @@ description = "Plugin trait surface and WIT-portable data types for savvagent"
 
 [dependencies]
 async-trait = { workspace = true }
+serde_json = { workspace = true }
 savvagent-protocol = { workspace = true }
 # Intentionally NO ratatui, crossterm, tokio runtime, anyhow.
 # See spec section 9 WIT portability rules. CI dep-guard enforces this.

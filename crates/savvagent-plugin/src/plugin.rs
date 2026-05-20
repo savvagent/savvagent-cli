@@ -69,6 +69,42 @@ pub trait Plugin: Send + Sync {
         vec![]
     }
 
+    /// Render a one-line summary of a tool call's arguments. Called from the
+    /// async pre-render step in the host for every `Entry::Tool` whose tool
+    /// name this plugin claims via `ToolSummarySpec`. Return `None` to fall
+    /// through to the host's JSON-highlighter default; return
+    /// `Some(spans)` to override.
+    ///
+    /// Must be cheap and side-effect-free; called once per visible tool entry
+    /// per frame.
+    fn summarize_tool_call(
+        &self,
+        name: &str,
+        args: &serde_json::Value,
+    ) -> Option<Vec<crate::StyledSpan>> {
+        let _ = (name, args);
+        None
+    }
+
+    /// Render a one-line summary of a tool call's result. Called from the
+    /// async pre-render step in the host once per completed `Entry::Tool`
+    /// whose tool name this plugin claims via `ToolSummarySpec`. Return
+    /// `None` to fall through to the host's JSON-highlighter (or raw-text
+    /// fallback for non-JSON result bodies).
+    ///
+    /// `result_text` is the raw payload the host built from the tool's
+    /// `CallToolResult`. Plugins typically parse it as their tool crate's
+    /// `*Output` type via `serde_json::from_str` and format the typed
+    /// struct; on parse failure they return `None`.
+    fn summarize_tool_result(
+        &self,
+        name: &str,
+        result_text: &str,
+    ) -> Option<Vec<crate::StyledSpan>> {
+        let _ = (name, result_text);
+        None
+    }
+
     /// Static theme catalog this plugin contributes. Pulled once at registration
     /// time and merged into the runtime's theme catalog.
     fn themes(&self) -> Vec<ThemeEntry> {

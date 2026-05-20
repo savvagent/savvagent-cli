@@ -73,6 +73,18 @@ pub mod splash;
 /// Theme catalog + `/theme` slash + theme picker modal.
 pub mod themes;
 
+/// `internal:tool-bash-summary` — renders one-line summaries for the
+/// `tool-bash` `run` tool.
+pub mod tool_bash_summary;
+
+/// `internal:tool-fs-summary` — renders one-line summaries for the four
+/// `tool-fs` tool names (`read_file`, `write_file`, `list_dir`, `glob`).
+pub mod tool_fs_summary;
+
+/// `internal:tool-grep-summary` — renders one-line summaries for the
+/// `tool-grep` `search` tool.
+pub mod tool_grep_summary;
+
 /// Fullscreen read-only file viewer; opened via `/view <path>`.
 pub mod view_file;
 

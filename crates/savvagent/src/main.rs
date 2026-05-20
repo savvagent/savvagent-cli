@@ -1921,9 +1921,9 @@ async fn handle_bash_slash_command(
     // render).
     app.entries.push(Entry::Tool {
         name: "run".to_string(),
-        arguments: format!("/bash {}", parsed.command),
+        args: serde_json::json!({ "command": parsed.command }),
         status: None,
-        result_preview: None,
+        result_text: None,
     });
     app.is_loading = true;
     app.update_metrics();
