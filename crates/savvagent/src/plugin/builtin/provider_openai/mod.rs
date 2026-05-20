@@ -14,7 +14,7 @@ use savvagent_plugin::{
     TextMods, ThemeColor,
 };
 
-use super::provider_common::BuiltinProviderPlugin;
+use super::provider_common::{BuiltinProviderPlugin, build_dynamic_caps};
 
 const PLUGIN_ID: &str = "internal:provider-openai";
 const PROVIDER_ID: &str = "openai";
@@ -100,7 +100,7 @@ impl ProviderOpenAiPlugin {
     /// credentials are absent.
     pub(crate) async fn try_build_registration(
         &self,
-    ) -> Result<Option<ProviderRegistration>, String> {
+    ) -> Result<Option<(ProviderRegistration, Option<String>)>, String> {
         let key = match crate::creds::load(PROVIDER_ID) {
             Ok(Some(k)) => k,
             Ok(None) => return Ok(None),
@@ -112,27 +112,31 @@ impl ProviderOpenAiPlugin {
             .map_err(|e| format!("client build: {e}"))?;
         let client: Arc<dyn ProviderClient + Send + Sync> =
             Arc::new(InProcessProviderClient::new(Arc::new(provider)));
-        Ok(Some(
-            ProviderRegistration::new(
-                savvagent_protocol::ProviderId::new(PROVIDER_ID)
-                    .expect("PROVIDER_ID is a valid provider id"),
-                DISPLAY_NAME,
-                client,
-                Self::capabilities(),
-            )
-            .with_aliases(vec![
-                ModelAlias {
-                    alias: "gpt".into(),
-                    provider: ProviderId::new("openai").expect("static alias provider id is valid"),
-                    model: "gpt-4o".into(),
-                },
-                ModelAlias {
-                    alias: "gpt-4o".into(),
-                    provider: ProviderId::new("openai").expect("static alias provider id is valid"),
-                    model: "gpt-4o".into(),
-                },
-            ]),
-        ))
+        // Prefer the live /v1/models catalog so the picker reflects the
+        // account's actually-available models. Falls back to the curated
+        // static list on any error.
+        let (caps, note) =
+            build_dynamic_caps(client.as_ref(), Self::capabilities(), DISPLAY_NAME).await;
+        let reg = ProviderRegistration::new(
+            savvagent_protocol::ProviderId::new(PROVIDER_ID)
+                .expect("PROVIDER_ID is a valid provider id"),
+            DISPLAY_NAME,
+            client,
+            caps,
+        )
+        .with_aliases(vec![
+            ModelAlias {
+                alias: "gpt".into(),
+                provider: ProviderId::new("openai").expect("static alias provider id is valid"),
+                model: "gpt-4o".into(),
+            },
+            ModelAlias {
+                alias: "gpt-4o".into(),
+                provider: ProviderId::new("openai").expect("static alias provider id is valid"),
+                model: "gpt-4o".into(),
+            },
+        ]);
+        Ok(Some((reg, note)))
     }
 
     fn try_connect_from_keyring(&mut self) -> Option<()> {

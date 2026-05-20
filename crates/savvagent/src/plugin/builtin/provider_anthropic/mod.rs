@@ -23,7 +23,7 @@ use savvagent_plugin::{
     TextMods, ThemeColor,
 };
 
-use super::provider_common::BuiltinProviderPlugin;
+use super::provider_common::{BuiltinProviderPlugin, build_dynamic_caps};
 
 /// Provider plugin id (used by `apply_effects` to look up the right shim
 /// when a [`Effect::RegisterProvider`] arrives).
@@ -139,12 +139,14 @@ impl ProviderAnthropicPlugin {
     /// plugin's static capability metadata.
     ///
     /// Returns `Ok(None)` when credentials are absent — this is not an error;
-    /// the user can run `/connect anthropic` later. Returns `Ok(Some(_))` when
-    /// the client was built successfully. Returns `Err(_)` for hard failures
+    /// the user can run `/connect anthropic` later. Returns `Ok(Some((reg,
+    /// note)))` when the client was built successfully; the `note` is `Some`
+    /// when the model catalog fell back to the static list and the caller
+    /// should surface it to the user. Returns `Err(_)` for hard failures
     /// (keyring backend error or TLS init failure) that warrant a warning log.
     pub(crate) async fn try_build_registration(
         &self,
-    ) -> Result<Option<ProviderRegistration>, String> {
+    ) -> Result<Option<(ProviderRegistration, Option<String>)>, String> {
         let key = match crate::creds::load(PROVIDER_ID) {
             Ok(Some(k)) => k,
             Ok(None) => return Ok(None),
@@ -156,35 +158,36 @@ impl ProviderAnthropicPlugin {
             .map_err(|e| format!("client build: {e}"))?;
         let client: Arc<dyn ProviderClient + Send + Sync> =
             Arc::new(InProcessProviderClient::new(Arc::new(provider)));
-        Ok(Some(
-            ProviderRegistration::new(
-                savvagent_protocol::ProviderId::new(PROVIDER_ID)
-                    .expect("PROVIDER_ID is a valid provider id"),
-                DISPLAY_NAME,
-                client,
-                Self::capabilities(),
-            )
-            .with_aliases(vec![
-                ModelAlias {
-                    alias: "opus".into(),
-                    provider: ProviderId::new("anthropic")
-                        .expect("static alias provider id is valid"),
-                    model: "claude-opus-4-7".into(),
-                },
-                ModelAlias {
-                    alias: "sonnet".into(),
-                    provider: ProviderId::new("anthropic")
-                        .expect("static alias provider id is valid"),
-                    model: "claude-sonnet-4-6".into(),
-                },
-                ModelAlias {
-                    alias: "haiku".into(),
-                    provider: ProviderId::new("anthropic")
-                        .expect("static alias provider id is valid"),
-                    model: "claude-haiku-4-5".into(),
-                },
-            ]),
-        ))
+        // Prefer the live catalog from the provider's /v1/models endpoint;
+        // fall back to the curated static list on any error so a network
+        // hiccup or revoked key doesn't block startup.
+        let (caps, note) =
+            build_dynamic_caps(client.as_ref(), Self::capabilities(), DISPLAY_NAME).await;
+        let reg = ProviderRegistration::new(
+            savvagent_protocol::ProviderId::new(PROVIDER_ID)
+                .expect("PROVIDER_ID is a valid provider id"),
+            DISPLAY_NAME,
+            client,
+            caps,
+        )
+        .with_aliases(vec![
+            ModelAlias {
+                alias: "opus".into(),
+                provider: ProviderId::new("anthropic").expect("static alias provider id is valid"),
+                model: "claude-opus-4-7".into(),
+            },
+            ModelAlias {
+                alias: "sonnet".into(),
+                provider: ProviderId::new("anthropic").expect("static alias provider id is valid"),
+                model: "claude-sonnet-4-6".into(),
+            },
+            ModelAlias {
+                alias: "haiku".into(),
+                provider: ProviderId::new("anthropic").expect("static alias provider id is valid"),
+                model: "claude-haiku-4-5".into(),
+            },
+        ]);
+        Ok(Some((reg, note)))
     }
 
     /// Test-only helper that pre-installs a stub client without going

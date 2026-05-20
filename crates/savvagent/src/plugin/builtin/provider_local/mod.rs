@@ -17,7 +17,7 @@ use savvagent_plugin::{
     TextMods, ThemeColor,
 };
 
-use super::provider_common::BuiltinProviderPlugin;
+use super::provider_common::{BuiltinProviderPlugin, build_dynamic_caps};
 
 const PLUGIN_ID: &str = "internal:provider-local";
 const PROVIDER_ID: &str = "local";
@@ -90,7 +90,7 @@ impl ProviderLocalPlugin {
     /// `ollama serve` and run `/connect local` later.
     pub(crate) async fn try_build_registration(
         &self,
-    ) -> Result<Option<ProviderRegistration>, String> {
+    ) -> Result<Option<(ProviderRegistration, Option<String>)>, String> {
         let provider = match provider_local::OllamaProvider::builder().build() {
             Ok(p) => p,
             Err(e) => {
@@ -102,13 +102,20 @@ impl ProviderLocalPlugin {
         };
         let client: Arc<dyn ProviderClient + Send + Sync> =
             Arc::new(InProcessProviderClient::new(Arc::new(provider)));
-        Ok(Some(ProviderRegistration::new(
+        // Prefer the live /api/tags catalog so the picker shows the
+        // models the user has actually pulled. Falls back to the
+        // single-entry placeholder when Ollama isn't reachable or has
+        // no models pulled yet.
+        let (caps, note) =
+            build_dynamic_caps(client.as_ref(), Self::capabilities(), DISPLAY_NAME).await;
+        let reg = ProviderRegistration::new(
             savvagent_protocol::ProviderId::new(PROVIDER_ID)
                 .expect("PROVIDER_ID is a valid provider id"),
             DISPLAY_NAME,
             client,
-            Self::capabilities(),
-        )))
+            caps,
+        );
+        Ok(Some((reg, note)))
     }
 
     /// Try to construct an in-process Ollama client. Returns `Some(())` on

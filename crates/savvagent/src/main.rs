@@ -323,8 +323,11 @@ async fn bootstrap_pool_host(
     macro_rules! try_provider {
         ($plugin:expr, $log_name:literal, $spec_id:literal) => {{
             match tokio::time::timeout(timeout_dur, $plugin.try_build_registration()).await {
-                Ok(Ok(Some(reg))) => {
+                Ok(Ok(Some((reg, fallback_note)))) => {
                     providers.push(reg);
+                    if let Some(note) = fallback_note {
+                        deferred_notes.push(note);
+                    }
                 }
                 Ok(Ok(None)) => {
                     // No credentials stored; user will /connect later.
@@ -1333,7 +1336,12 @@ async fn apply_pending_pool_add(app: &mut App, host_slot: &HostSlot) {
         }
     };
     let reg = match reg {
-        Ok(Some(r)) => r,
+        Ok(Some((r, fallback_note))) => {
+            if let Some(note) = fallback_note {
+                app.push_note(note);
+            }
+            r
+        }
         Ok(None) => {
             // Key vanished from keyring between RegisterProvider being
             // emitted and this drainer running. Rare; surface a note so
@@ -2028,7 +2036,12 @@ async fn perform_connect(
         }
     };
     let reg = match reg_result {
-        Ok(Some(r)) => r,
+        Ok(Some((r, fallback_note))) => {
+            if let Some(note) = fallback_note {
+                app.push_note(note);
+            }
+            r
+        }
         Ok(None) => {
             // Keyring read returned None despite the just-saved key — likely
             // a backend issue.

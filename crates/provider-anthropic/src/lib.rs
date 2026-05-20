@@ -19,6 +19,7 @@
 
 pub mod api;
 pub mod mcp;
+pub mod models;
 pub mod stream;
 pub mod translate;
 
@@ -33,8 +34,7 @@ use rmcp::transport::streamable_http_server::{
 };
 use savvagent_mcp::{ProviderHandler, StreamEmitter};
 use savvagent_protocol::{
-    CompleteRequest, CompleteResponse, ErrorKind, ListModelsResponse, ModelInfo, ProviderError,
-    StreamEvent,
+    CompleteRequest, CompleteResponse, ErrorKind, ListModelsResponse, ProviderError, StreamEvent,
 };
 
 /// Default Anthropic API base URL. Override via [`AnthropicProviderBuilder::base_url`]
@@ -46,9 +46,9 @@ pub const API_VERSION: &str = "2023-06-01";
 
 /// SPP provider backed by Anthropic's Messages API.
 pub struct AnthropicProvider {
-    http: reqwest::Client,
-    api_key: String,
-    base_url: String,
+    pub(crate) http: reqwest::Client,
+    pub(crate) api_key: String,
+    pub(crate) base_url: String,
 }
 
 /// Builder for [`AnthropicProvider`]. Use [`AnthropicProvider::builder`].
@@ -124,26 +124,7 @@ pub enum BuildError {
 #[async_trait]
 impl ProviderHandler for AnthropicProvider {
     async fn list_models(&self) -> Result<ListModelsResponse, ProviderError> {
-        Ok(ListModelsResponse {
-            models: vec![
-                ModelInfo {
-                    id: "claude-opus-4-5".into(),
-                    display_name: Some("Claude Opus 4.5".into()),
-                    context_window: Some(200_000),
-                },
-                ModelInfo {
-                    id: "claude-sonnet-4-5".into(),
-                    display_name: Some("Claude Sonnet 4.5".into()),
-                    context_window: Some(200_000),
-                },
-                ModelInfo {
-                    id: "claude-haiku-4-5".into(),
-                    display_name: Some("Claude Haiku 4.5".into()),
-                    context_window: Some(200_000),
-                },
-            ],
-            default_model_id: Some("claude-haiku-4-5".into()),
-        })
+        models::list_models(self).await
     }
 
     async fn complete(
@@ -203,6 +184,22 @@ fn map_reqwest_error(e: reqwest::Error) -> ProviderError {
     }
 }
 
+/// Map an HTTP status code from any Anthropic REST endpoint to the
+/// closest [`ErrorKind`]. Shared between `/v1/messages` and `/v1/models`
+/// so a 401 looks like an auth failure no matter which call surfaced it.
+pub(crate) fn status_to_error_kind(status: u16) -> ErrorKind {
+    match status {
+        400 | 422 => ErrorKind::InvalidRequest,
+        401 => ErrorKind::Authentication,
+        403 => ErrorKind::PermissionDenied,
+        404 => ErrorKind::ModelNotFound,
+        413 => ErrorKind::ContextLengthExceeded,
+        429 => ErrorKind::RateLimited,
+        500 | 502 | 503 | 504 | 529 => ErrorKind::Overloaded,
+        _ => ErrorKind::Internal,
+    }
+}
+
 async fn parse_error_response(resp: reqwest::Response) -> ProviderError {
     let status = resp.status();
     let retry_after_ms = resp
@@ -212,16 +209,7 @@ async fn parse_error_response(resp: reqwest::Response) -> ProviderError {
         .and_then(|s| s.parse::<u64>().ok())
         .map(|s| s * 1000);
 
-    let kind = match status.as_u16() {
-        400 | 422 => ErrorKind::InvalidRequest,
-        401 => ErrorKind::Authentication,
-        403 => ErrorKind::PermissionDenied,
-        404 => ErrorKind::ModelNotFound,
-        413 => ErrorKind::ContextLengthExceeded,
-        429 => ErrorKind::RateLimited,
-        500 | 502 | 503 | 504 | 529 => ErrorKind::Overloaded,
-        _ => ErrorKind::Internal,
-    };
+    let kind = status_to_error_kind(status.as_u16());
 
     let body = resp.text().await.unwrap_or_default();
     let (message, provider_code) = if let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) {
@@ -346,31 +334,3 @@ pub fn provider_for_tests(base_url: impl Into<String>) -> AnthropicProvider {
 
 #[doc(hidden)]
 pub fn _events_phantom(_: StreamEvent) {}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn list_models_returns_curated_set() {
-        use savvagent_mcp::ProviderHandler as _;
-        let provider = AnthropicProvider::builder()
-            .api_key("test")
-            .build()
-            .unwrap();
-        let resp = provider.list_models().await.unwrap();
-        let ids: Vec<_> = resp.models.iter().map(|m| m.id.as_str()).collect();
-        // Default must match the `default_model` advertised by the provider
-        // catalog in `crates/savvagent/src/providers.rs`.
-        assert!(ids.contains(&"claude-haiku-4-5"), "{ids:?}");
-        assert!(
-            ids.iter().any(|id| id.starts_with("claude-opus-")),
-            "{ids:?}"
-        );
-        assert!(
-            ids.iter().any(|id| id.starts_with("claude-sonnet-")),
-            "{ids:?}"
-        );
-        assert_eq!(resp.default_model_id, Some("claude-haiku-4-5".into()));
-    }
-}

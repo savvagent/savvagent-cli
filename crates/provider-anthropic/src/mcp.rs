@@ -228,16 +228,40 @@ impl StreamEmitter for PeerEmitter {
 mod mcp_tests {
     use super::*;
     use crate::AnthropicProvider;
+    use axum::{Json, Router, routing::get};
     use savvagent_protocol::ListModelsResponse;
+    use serde_json::json;
+
+    async fn spawn_mock(app: Router) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        format!("http://{addr}")
+    }
 
     /// `list_models_tool` is a thin wrapper around the provider's
-    /// `list_models` impl. Exercising the wrapper directly catches
-    /// regressions in the serialization path that wouldn't show up in the
-    /// `ProviderHandler` test.
+    /// `list_models` impl, which now hits the real `/v1/models` endpoint.
+    /// Exercising the wrapper directly catches regressions in the
+    /// serialization path that wouldn't show up in the `ProviderHandler` test.
     #[tokio::test]
-    async fn list_models_tool_returns_structured_curated_set() {
+    async fn list_models_tool_returns_structured_catalog() {
+        let app = Router::new().route(
+            "/v1/models",
+            get(|| async {
+                Json(json!({
+                    "data": [
+                        { "id": "claude-haiku-4-5", "display_name": "Claude Haiku 4.5" },
+                        { "id": "claude-opus-4-5", "display_name": "Claude Opus 4.5" }
+                    ]
+                }))
+            }),
+        );
+        let base = spawn_mock(app).await;
         let provider = AnthropicProvider::builder()
-            .api_key("test")
+            .api_key("test-key")
+            .base_url(base)
             .build()
             .unwrap();
         let server = AnthropicMcpServer::new(provider);
