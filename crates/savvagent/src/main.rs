@@ -65,6 +65,11 @@ use savvagent_host::{
 };
 use tokio::sync::{RwLock, mpsc};
 
+/// Wrapped-line step for one PageUp/PageDown press on the conversation log.
+/// Matches the increment used by the keybindings-help screen so scroll
+/// pacing feels consistent across modals.
+const LOG_SCROLL_STEP: u16 = 10;
+
 /// Worker → main-loop messages.
 enum WorkerMsg {
     Event(TurnEvent),
@@ -2766,6 +2771,11 @@ async fn run_app(
                             if value.is_empty() || app.is_loading {
                                 continue;
                             }
+                            // Submitting always returns the user to the live
+                            // tail — they want to see what they just sent and
+                            // the streaming response, not the rows they had
+                            // scrolled back to.
+                            app.log_scroll_offset_from_bottom = None;
                             // Record every submission (slash commands too — they
                             // were typed at the prompt and the user expects Up to
                             // recall them like a shell). `append` no-ops on empty
@@ -2843,6 +2853,41 @@ async fn run_app(
                         }
                         KeyCode::Esc => {
                             app.input_textarea = make_input_textarea(Vec::<String>::new());
+                            // Treat Esc as "back to a clean state" — the
+                            // input is wiped, so the conversation log
+                            // returns to the live tail too. Matches the
+                            // contract documented on `log_scroll_offset_from_bottom`.
+                            app.log_scroll_offset_from_bottom = None;
+                        }
+                        KeyCode::PageUp => {
+                            let next = app
+                                .log_scroll_offset_from_bottom
+                                .unwrap_or(0)
+                                .saturating_add(LOG_SCROLL_STEP);
+                            app.log_scroll_offset_from_bottom = Some(next);
+                        }
+                        KeyCode::PageDown => {
+                            app.log_scroll_offset_from_bottom = app
+                                .log_scroll_offset_from_bottom
+                                .and_then(|n| n.checked_sub(LOG_SCROLL_STEP))
+                                .filter(|n| *n > 0);
+                        }
+                        // Home/End on the home screen scroll the conversation
+                        // log only when the textarea is empty or Ctrl is held.
+                        // Otherwise the keystroke falls through to tui-textarea
+                        // so cursor-to-line-start / line-end still work during
+                        // editing.
+                        KeyCode::Home
+                            if key.modifiers.contains(KeyModifiers::CONTROL)
+                                || app.input_textarea.lines().iter().all(|l| l.is_empty()) =>
+                        {
+                            app.log_scroll_offset_from_bottom = Some(u16::MAX);
+                        }
+                        KeyCode::End
+                            if key.modifiers.contains(KeyModifiers::CONTROL)
+                                || app.input_textarea.lines().iter().all(|l| l.is_empty()) =>
+                        {
+                            app.log_scroll_offset_from_bottom = None;
                         }
                         KeyCode::Char('@') => {
                             app.input_textarea.input(evt);

@@ -495,6 +495,39 @@ pub struct App {
     /// Loaded after `App::new` via [`App::load_prompt_history`] once
     /// `project_root` is known. Appended in the Enter-submit path.
     pub prompt_history: PromptHistory,
+
+    /// Conversation-log scroll position, expressed as "rows hidden BELOW the
+    /// viewport." `None` means auto-tail — newly arriving messages stay
+    /// visible at the bottom. `Some(n)` means the user has scrolled back and
+    /// wants to keep the same window of lines visible even as new content
+    /// streams in. Reset to `None` by `End`/`Esc` and by submitting a new
+    /// prompt. Driven by `PageUp`/`PageDown`/`Home`/`End` on the home screen.
+    pub log_scroll_offset_from_bottom: Option<u16>,
+}
+
+/// Compute the `scroll_y` value (number of wrapped rows hidden ABOVE the
+/// viewport) for the conversation log. `total` is the wrapped line count
+/// from [`ratatui::widgets::Paragraph::line_count`]; `viewport` is the
+/// inner area height in rows; `offset_from_bottom` mirrors
+/// [`App::log_scroll_offset_from_bottom`].
+///
+/// Cascade:
+/// 1. If `total <= viewport` everything fits — return `0` (top-anchored).
+/// 2. `None` → `max_scroll` so the newest row lands on the bottom of the
+///    viewport (auto-tail).
+/// 3. `Some(n)` → `max_scroll - n`, clamped to `0` so the `u16::MAX` "scroll
+///    to top" sentinel collapses correctly.
+///
+/// The return is `u16` because `Paragraph::scroll` takes `(u16, u16)`. A
+/// wrapped-line count above `u16::MAX` clamps at the top of history — the
+/// alternative is silently truncating the offset to a wrong row.
+pub(crate) fn log_scroll_y(total: usize, viewport: usize, offset_from_bottom: Option<u16>) -> u16 {
+    let max_scroll = total.saturating_sub(viewport);
+    let scroll_y = match offset_from_bottom {
+        None => max_scroll,
+        Some(off) => max_scroll.saturating_sub(off as usize),
+    };
+    u16::try_from(scroll_y).unwrap_or(u16::MAX)
 }
 
 impl App {
@@ -569,6 +602,7 @@ impl App {
             pending_routing_reload: None,
             pending_routing_show: None,
             prompt_history: PromptHistory::default(),
+            log_scroll_offset_from_bottom: None,
         };
         app.refresh_commands();
         app
@@ -1686,6 +1720,57 @@ mod tests {
 
     fn fresh_app() -> App {
         App::new("test-model".into(), PathBuf::from("/tmp"), "en".to_string())
+    }
+
+    /// Auto-tail: when the user hasn't scrolled and content overflows the
+    /// viewport, the bottom row of the viewport is the newest line.
+    #[test]
+    fn log_scroll_y_auto_tail_pins_newest_to_bottom() {
+        // 50 wrapped lines, 10 visible → 40 lines hidden above (bottom of
+        // line 50 sits on the last viewport row).
+        assert_eq!(log_scroll_y(50, 10, None), 40);
+    }
+
+    /// `Some(n)` keeps the viewport `n` rows above the bottom, regardless
+    /// of how much content has accumulated. Newly arriving content grows
+    /// `max_scroll` and `scroll_y` in lockstep so the visible window
+    /// doesn't jump.
+    #[test]
+    fn log_scroll_y_scrolled_back_holds_offset() {
+        // Same 50/10 layout but scrolled 5 rows back: scroll_y = 40 - 5.
+        assert_eq!(log_scroll_y(50, 10, Some(5)), 35);
+        // Add 20 more lines (total 70). scroll_y must move by 20 too so
+        // the same 5-rows-from-bottom window stays put.
+        assert_eq!(log_scroll_y(70, 10, Some(5)), 55);
+    }
+
+    /// `Some(u16::MAX)` is the "scroll to top" sentinel emitted by the
+    /// Home key. For conversations that fit in `u16::MAX` wrapped rows
+    /// (effectively every realistic session) it clamps to `0` — the very
+    /// top of history. For pathologically long histories the row index
+    /// can't be represented in `u16` at all, so it clamps to the deepest
+    /// row ratatui's scroll API can address (`u16::MAX`).
+    #[test]
+    fn log_scroll_y_top_sentinel_jumps_to_top() {
+        assert_eq!(log_scroll_y(50, 10, Some(u16::MAX)), 0);
+        assert_eq!(log_scroll_y(u16::MAX as usize + 10, 10, Some(u16::MAX)), 0);
+        // Beyond u16::MAX rows, scroll API hits its own ceiling.
+        assert_eq!(
+            log_scroll_y(1_000_000, 10, Some(u16::MAX)),
+            u16::MAX,
+            "huge histories saturate at the deepest u16-addressable row",
+        );
+    }
+
+    /// When the viewport is bigger than the content, there's nothing to
+    /// scroll — `scroll_y` must be 0 in every mode (no underflow, no
+    /// reverse scroll).
+    #[test]
+    fn log_scroll_y_short_content_is_top_anchored() {
+        assert_eq!(log_scroll_y(0, 10, None), 0);
+        assert_eq!(log_scroll_y(0, 10, Some(5)), 0);
+        assert_eq!(log_scroll_y(10, 10, None), 0);
+        assert_eq!(log_scroll_y(10, 10, Some(99)), 0);
     }
 
     /// `make_input_textarea` must apply the wrap+grow + history-depth

@@ -102,7 +102,14 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # TUI deps (only used by savvagent crate, but pinned here for consistency)
 crossterm = "0.29"
-ratatui = { version = "0.30", features = ["crossterm_0_29"] }
+ratatui = { version = "0.30", features = [
+    "crossterm_0_29",
+    # `Paragraph::line_count` is gated behind this feature until
+    # https://github.com/ratatui/ratatui/issues/293 stabilizes. We use it to
+    # compute the wrapped-line total for the conversation log so the view
+    # can auto-tail to the newest message and scroll back coherently.
+    "unstable-rendered-line-info",
+] }
 ratatui-themes = "0.2.0"
 # Markdown → ratatui Text renderer used by `internal:changelog`. We turn
 # off `highlight-code` (the default feature) to avoid pulling in syntect

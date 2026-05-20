@@ -1,6 +1,6 @@
 //! Render pass: paint the current [`App`] state into the frame.
 
-use crate::app::{App, Entry, InputMode, TranscriptEntry};
+use crate::app::{App, Entry, InputMode, TranscriptEntry, log_scroll_y};
 use crate::palette::Palette;
 use crate::providers::PROVIDERS;
 use crate::splash;
@@ -615,20 +615,33 @@ fn render_log(app: &App, frame: &mut Frame, area: Rect, palette: Palette) {
         ));
     }
 
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(palette.border).bg(palette.bg))
+        .padding(Padding::new(2, 2, 1, 1))
+        .title(Line::styled(
+            " Conversation ",
+            palette.base_style().fg(palette.fg),
+        ));
+    // `inner_area` excludes the border + padding, so `line_count(width)` and
+    // `area.height` agree on the same coordinate space.
+    let inner_area = block.inner(area);
+
     let para = Paragraph::new(lines)
         .wrap(Wrap { trim: false })
-        .style(palette.base_style())
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(palette.border).bg(palette.bg))
-                .padding(Padding::new(2, 2, 1, 1))
-                .title(Line::styled(
-                    " Conversation ",
-                    palette.base_style().fg(palette.fg),
-                )),
-        );
-    frame.render_widget(para, area);
+        .style(palette.base_style());
+
+    // Auto-tail by default: scroll so the LAST wrapped line lands on the
+    // bottom row of `inner_area`. Ratatui's Paragraph renders top-down, so
+    // without a scroll offset newly-streamed text falls off the bottom and
+    // becomes invisible. See `log_scroll_y` for the cascade.
+    let scroll_y = log_scroll_y(
+        para.line_count(inner_area.width),
+        inner_area.height as usize,
+        app.log_scroll_offset_from_bottom,
+    );
+
+    frame.render_widget(para.scroll((scroll_y, 0)).block(block), area);
 }
 
 fn line_block(prefix: &str, text: &str, color: Color, palette: Palette) -> Line<'static> {
