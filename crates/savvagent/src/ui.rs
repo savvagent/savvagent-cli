@@ -13,6 +13,17 @@ use ratatui::{
 };
 use savvagent_host::ToolCallStatus;
 
+/// Pre-rendered styled spans for a single `Entry::Tool` row, produced during
+/// `compute_home_frame_data`. Stored on `HomeFrameData` and consumed by the
+/// sync `render_log` so the render path never locks plugin mutexes.
+#[derive(Debug, Clone)]
+pub struct ToolEntryRender {
+    /// Spans for the arguments line.
+    pub arg_spans: Vec<savvagent_plugin::StyledSpan>,
+    /// Spans for the result line; `None` while the tool call is in flight.
+    pub result_spans: Option<Vec<savvagent_plugin::StyledSpan>>,
+}
+
 /// Pre-computed plugin slot output for one render frame. Built async from
 /// `compute_home_frame_data` before `terminal.draw` runs so the draw closure
 /// stays synchronous and never touches plugin mutexes.
@@ -22,6 +33,10 @@ pub struct HomeFrameData {
     pub footer_left: Vec<savvagent_plugin::StyledLine>,
     pub footer_center: Vec<savvagent_plugin::StyledLine>,
     pub footer_right: Vec<savvagent_plugin::StyledLine>,
+    /// One entry per `Entry::Tool` in `app.entries`, in order. The Nth
+    /// `Entry::Tool` encountered while iterating `app.entries` maps to the
+    /// Nth element of this vec.
+    pub tool_entries: Vec<ToolEntryRender>,
 }
 
 impl HomeFrameData {
@@ -33,6 +48,7 @@ impl HomeFrameData {
             footer_left: vec![],
             footer_center: vec![],
             footer_right: vec![],
+            tool_entries: vec![],
         }
     }
 }
@@ -69,12 +85,61 @@ pub async fn compute_home_frame_data(app: &crate::app::App, area: Rect) -> HomeF
     let footer_center = router.render("home.footer.center", full_row).await;
     let footer_right = router.render("home.footer.right", full_row).await;
 
+    // Pre-render tool-call summaries. Iterates app.entries once; one
+    // ToolEntryRender per Entry::Tool. Locks the owning plugin briefly per
+    // call (twice when there's a result_text). Falls back to json_spans
+    // when no plugin claims the tool name.
+    //
+    // The registry and index read-locks (`reg_guard`/`idx_guard`) remain
+    // held across the entire loop; write-lock waiters (e.g. `/connect`)
+    // will block until the loop completes.
+    let tool_router = crate::plugin::tool_summaries::ToolSummaryRouter::new(&idx_guard, &reg_guard);
+    let mut tool_entries: Vec<ToolEntryRender> = Vec::new();
+    for entry in &app.entries {
+        let crate::app::Entry::Tool {
+            name,
+            args,
+            result_text,
+            ..
+        } = entry
+        else {
+            continue;
+        };
+        let arg_spans = match tool_router.summarize_call(name, args).await {
+            Some(spans) => spans,
+            None => savvagent_plugin::styled::json_spans(args),
+        };
+        let result_spans = match result_text {
+            None => None,
+            Some(text) => {
+                let spans = match tool_router.summarize_result(name, text).await {
+                    Some(spans) => spans,
+                    None => match serde_json::from_str::<serde_json::Value>(text) {
+                        Ok(v) => savvagent_plugin::styled::json_spans(&v),
+                        Err(_) => vec![savvagent_plugin::StyledSpan {
+                            text: text.clone(),
+                            fg: Some(savvagent_plugin::ThemeColor::Muted),
+                            bg: None,
+                            modifiers: savvagent_plugin::TextMods::default(),
+                        }],
+                    },
+                };
+                Some(spans)
+            }
+        };
+        tool_entries.push(ToolEntryRender {
+            arg_spans,
+            result_spans,
+        });
+    }
+
     HomeFrameData {
         banner,
         tips,
         footer_left,
         footer_center,
         footer_right,
+        tool_entries,
     }
 }
 
@@ -158,7 +223,7 @@ pub fn render(app: &mut App, frame: &mut Frame, frame_data: &HomeFrameData) {
         );
     frame.render_widget(header, chunks[0]);
 
-    render_log(app, frame, chunks[1], palette);
+    render_log(app, frame, chunks[1], palette, frame_data);
 
     // Banner row — one-line update banner, rendered from plugin slot.
     // The slot returns nothing when there is no update available, so the
@@ -530,8 +595,15 @@ fn render_transcript_item(
     ListItem::new(line)
 }
 
-fn render_log(app: &App, frame: &mut Frame, area: Rect, palette: Palette) {
+fn render_log(
+    app: &App,
+    frame: &mut Frame,
+    area: Rect,
+    palette: Palette,
+    frame_data: &HomeFrameData,
+) {
     let mut lines: Vec<Line<'static>> = Vec::with_capacity(app.entries.len() * 2 + 1);
+    let mut tool_entry_idx: usize = 0;
     for entry in &app.entries {
         match entry {
             Entry::User(text) => {
@@ -551,36 +623,59 @@ fn render_log(app: &App, frame: &mut Frame, area: Rect, palette: Palette) {
                 ));
             }
             Entry::Tool {
-                name,
-                arguments,
+                name: _,
+                args: _,
                 status,
-                result_preview,
+                result_text: _,
             } => {
+                debug_assert!(
+                    tool_entry_idx < frame_data.tool_entries.len(),
+                    "tool_entries index out of bounds — stale frame data (idx={tool_entry_idx}, len={})",
+                    frame_data.tool_entries.len()
+                );
+                let render = frame_data
+                    .tool_entries
+                    .get(tool_entry_idx)
+                    .cloned()
+                    .unwrap_or(ToolEntryRender {
+                        arg_spans: vec![],
+                        result_spans: None,
+                    });
+                tool_entry_idx += 1;
+
                 let badge = match status {
                     None => "…",
                     Some(ToolCallStatus::Ok) => "✓",
                     Some(ToolCallStatus::Errored) => "✗",
                 };
-                let color = match status {
+                let badge_color = match status {
                     None => palette.warning,
                     Some(ToolCallStatus::Ok) => palette.success,
                     Some(ToolCallStatus::Errored) => palette.error,
                 };
-                lines.push(Line::from(vec![
-                    Span::styled(format!("  {badge} "), palette.base_style().fg(color)),
-                    Span::styled(
-                        format!("{name}({arguments})"),
-                        palette
-                            .base_style()
-                            .fg(palette.warning)
-                            .add_modifier(Modifier::DIM),
-                    ),
-                ]));
-                if let Some(preview) = result_preview {
-                    lines.push(Line::from(Span::styled(
-                        format!("    → {preview}"),
+
+                // Arguments line: badge prefix + pre-rendered styled spans.
+                let mut arg_line_spans: Vec<Span<'static>> = vec![Span::styled(
+                    format!("  {badge} "),
+                    palette.base_style().fg(badge_color),
+                )];
+                for s in render.arg_spans {
+                    arg_line_spans
+                        .push(crate::plugin::convert::styled_span_to_ratatui(s, &palette));
+                }
+                lines.push(Line::from(arg_line_spans));
+
+                // Result line (if any): pre-rendered styled spans, indented.
+                if let Some(result_spans) = render.result_spans {
+                    let mut result_line_spans: Vec<Span<'static>> = vec![Span::styled(
+                        "    → ".to_string(),
                         palette.base_style().fg(palette.muted),
-                    )));
+                    )];
+                    for s in result_spans {
+                        result_line_spans
+                            .push(crate::plugin::convert::styled_span_to_ratatui(s, &palette));
+                    }
+                    lines.push(Line::from(result_line_spans));
                 }
             }
             Entry::RouteBadge(text) => {
