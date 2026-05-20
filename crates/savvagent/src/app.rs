@@ -530,6 +530,31 @@ pub(crate) fn log_scroll_y(total: usize, viewport: usize, offset_from_bottom: Op
     u16::try_from(scroll_y).unwrap_or(u16::MAX)
 }
 
+/// Apply one mouse-wheel tick to a [`App::log_scroll_offset_from_bottom`].
+/// `step` is the number of wrapped rows to move per tick.
+///
+/// Up enters scrollback from `None` (auto-tail) by adding `step` rows; further
+/// ups keep accumulating. Down decrements and snaps back to `None` (auto-tail)
+/// when the offset would reach 0, which matches what `PageDown` does today and
+/// keeps the "I'm reading live" state cleanly distinguishable from "I happen
+/// to be parked at the bottom of scrollback."
+pub(crate) fn log_scroll_offset_after_wheel(
+    current: Option<u16>,
+    direction: WheelDirection,
+    step: u16,
+) -> Option<u16> {
+    match direction {
+        WheelDirection::Up => Some(current.unwrap_or(0).saturating_add(step)),
+        WheelDirection::Down => current.and_then(|n| n.checked_sub(step)).filter(|n| *n > 0),
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum WheelDirection {
+    Up,
+    Down,
+}
+
 impl App {
     /// Build TUI state. The host runs out-of-band; the app only carries the
     /// model name (for the header), the directory transcripts get written
@@ -1771,6 +1796,60 @@ mod tests {
         assert_eq!(log_scroll_y(0, 10, Some(5)), 0);
         assert_eq!(log_scroll_y(10, 10, None), 0);
         assert_eq!(log_scroll_y(10, 10, Some(99)), 0);
+    }
+
+    /// Wheel up from auto-tail (`None`) enters scrollback at exactly one
+    /// step worth of rows — the user starts seeing history without having
+    /// to over-scroll past the current bottom.
+    #[test]
+    fn wheel_up_from_autotail_enters_scrollback() {
+        assert_eq!(
+            log_scroll_offset_after_wheel(None, WheelDirection::Up, 3),
+            Some(3)
+        );
+    }
+
+    /// Repeated wheel ups accumulate; saturation keeps a stuck-down wheel
+    /// from panicking on overflow. (Realistic terminals can't emit 65k+
+    /// notches per loop tick, but the wheel handler runs on every event so
+    /// the math has to be infallible.)
+    #[test]
+    fn wheel_up_accumulates_and_saturates() {
+        assert_eq!(
+            log_scroll_offset_after_wheel(Some(10), WheelDirection::Up, 3),
+            Some(13)
+        );
+        assert_eq!(
+            log_scroll_offset_after_wheel(Some(u16::MAX - 1), WheelDirection::Up, 5),
+            Some(u16::MAX)
+        );
+    }
+
+    /// Wheel down decrements and snaps back to `None` (auto-tail) when the
+    /// offset would reach zero — same contract `PageDown` honors, so a
+    /// session that mixes wheel + keyboard never lands in the ambiguous
+    /// "parked at bottom of scrollback" state.
+    #[test]
+    fn wheel_down_decrements_and_snaps_to_autotail() {
+        assert_eq!(
+            log_scroll_offset_after_wheel(Some(10), WheelDirection::Down, 3),
+            Some(7)
+        );
+        // Step would take us to 0 → snap to auto-tail.
+        assert_eq!(
+            log_scroll_offset_after_wheel(Some(3), WheelDirection::Down, 3),
+            None
+        );
+        // Step exceeds the offset → also snap to auto-tail (no underflow).
+        assert_eq!(
+            log_scroll_offset_after_wheel(Some(2), WheelDirection::Down, 3),
+            None
+        );
+        // Already at auto-tail → stay at auto-tail.
+        assert_eq!(
+            log_scroll_offset_after_wheel(None, WheelDirection::Down, 3),
+            None
+        );
     }
 
     /// `make_input_textarea` must apply the wrap+grow + history-depth

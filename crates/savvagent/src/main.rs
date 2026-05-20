@@ -70,6 +70,11 @@ use tokio::sync::{RwLock, mpsc};
 /// pacing feels consistent across modals.
 const LOG_SCROLL_STEP: u16 = 10;
 
+/// Wrapped-line step for one mouse-wheel notch. Smaller than the PageUp/Down
+/// step so wheel scrolling feels granular — most terminals emit a notch per
+/// physical detent, which adds up fast.
+const MOUSE_WHEEL_SCROLL_STEP: u16 = 3;
+
 /// Worker → main-loop messages.
 enum WorkerMsg {
     Event(TurnEvent),
@@ -2608,6 +2613,32 @@ async fn run_app(
             continue;
         }
         let evt = event::read()?;
+        // Mouse wheel ticks scroll the conversation log when the home screen
+        // is active (no plugin screen on top, no modal/file-picker). Other
+        // mouse events (clicks, drags) are ignored — see
+        // `log_scroll_offset_after_wheel` for the offset math.
+        if let Event::Mouse(me) = &evt {
+            use crossterm::event::MouseEventKind;
+            let on_home = app.screen_stack.is_empty()
+                && matches!(app.input_mode, InputMode::Editing)
+                && !app.is_file_picker_active
+                && !app.show_splash;
+            if on_home {
+                let dir = match me.kind {
+                    MouseEventKind::ScrollUp => Some(app::WheelDirection::Up),
+                    MouseEventKind::ScrollDown => Some(app::WheelDirection::Down),
+                    _ => None,
+                };
+                if let Some(direction) = dir {
+                    app.log_scroll_offset_from_bottom = app::log_scroll_offset_after_wheel(
+                        app.log_scroll_offset_from_bottom,
+                        direction,
+                        MOUSE_WHEEL_SCROLL_STEP,
+                    );
+                }
+            }
+            continue;
+        }
         let Event::Key(key) = &evt else { continue };
         if key.kind != KeyEventKind::Press && key.kind != KeyEventKind::Repeat {
             continue;

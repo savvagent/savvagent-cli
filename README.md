@@ -137,6 +137,19 @@ provider has a key on file.
 
 `@` opens a file picker that inserts `@path` into the prompt.
 
+### Scrolling the conversation log
+
+| Input | What it does |
+|---|---|
+| Mouse wheel | Three rows per notch. Up enters scrollback from the live tail; down snaps back to auto-tail on reaching the bottom. |
+| <kbd>PageUp</kbd> / <kbd>PageDown</kbd> | Same offset, ten rows per press. |
+| <kbd>Home</kbd> / <kbd>End</kbd> | Jump to the very top of history / back to auto-tail. (Requires <kbd>Ctrl</kbd> when the prompt has text — otherwise the keys go to the textarea.) |
+| Submit a prompt, or <kbd>Esc</kbd> | Returns to auto-tail. |
+
+Mouse capture is on, so terminal-native text selection no longer works
+with a bare drag. Hold <kbd>Shift</kbd> while dragging to bypass capture
+and select text the usual way.
+
 ### Routing turns to a specific provider/model
 
 Prefix any message with `@<provider>:<model>` (or `@<provider>`, or

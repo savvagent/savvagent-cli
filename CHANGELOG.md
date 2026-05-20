@@ -6,6 +6,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 (pre-1.0: `0.MINOR.PATCH`, where MINOR captures features + breaking
 boundary changes and PATCH captures fixes).
 
+## 0.21.0 - 2026-05-20
+
+### Added
+
+- **Mouse-wheel scrolling on the conversation log**. The TUI now enables crossterm's `EnableMouseCapture`, and wheel ticks adjust `App::log_scroll_offset_from_bottom` exactly like `PageUp`/`PageDown` — three wrapped rows per notch. Scrolling down past the live tail snaps back to auto-tail (`None`), the same contract `PageDown` honors, so a mixed wheel + keyboard session never lands in the ambiguous "parked at bottom of scrollback" state. Gated to the home screen (no plugin screen on top, no modal, no file picker, no splash) so popups and pickers keep their existing key-driven behavior.
+
+### Notes
+
+- Enabling mouse capture means terminals no longer get raw wheel events for native text selection. To select text inside the TUI, hold **Shift** while dragging — every major terminal emulator falls back to native selection while Shift is held.
+
 ## 0.20.0 - 2026-05-19
 
 ### Added
