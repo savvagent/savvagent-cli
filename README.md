@@ -457,6 +457,18 @@ published the URI.
 
 tool-lsp wraps user-configured LSP servers behind a small MCP tool surface (`lsp_definition`, `lsp_references`, `lsp_hover`, `lsp_document_symbols`, `lsp_workspace_symbols`, `lsp_rename`, `lsp_code_actions`) and publishes diagnostics as MCP resources via the `lsp://diagnostics/<absolute-path>` URI scheme. Diagnostics surface in the conversation as `[resource updated: lsp://diagnostics/<path>]` notes; the model fetches contents via the built-in `read_resource` tool.
 
+### Quick start: `/lsp` installer
+
+Run `/lsp` from inside savvagent to open a multi-select picker of curated language servers. Pick one or more with Space, confirm with Enter, and savvagent will:
+
+1. download the pinned upstream binary (or run `npm i -g` for Node-based servers) into `~/.savvagent/lsp-bin/<server-id>/`,
+2. verify the SHA256 checksum (binary entries only — npm trusts the registry),
+3. merge the matching `[[language]]` entry into `~/.savvagent/lsp.toml`.
+
+Restart savvagent after installing so `tool-lsp` re-reads the config.
+
+The v1 catalog ships with `rust-analyzer`, `lua-language-server`, `typescript-language-server`, `pyright`, `bash-language-server`, and `vscode-langservers-extracted`. Node-based servers (the last four) require `npm` on `$PATH` — when it's missing, the picker still lists them but the install step prints an "install Node.js first" hint and skips that entry; the other selections in the batch still install.
+
 ### Configuration
 
 Define which servers to launch in `~/.savvagent/lsp.toml` (global) and optionally override per-repo in `<repo>/.savvagent/lsp.toml`. There is no built-in default; tool-lsp is a no-op until you add at least one language. Repo-level entries fully replace global entries with the same `id` (no per-field merge).

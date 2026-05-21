@@ -97,6 +97,7 @@ pub(crate) fn register_builtins() -> BuiltinSet {
         Box::new(builtin::home_footer::HomeFooterPlugin::new()),
         Box::new(builtin::home_tips::HomeTipsPlugin::new()),
         Box::new(builtin::language::LanguagePlugin::new()),
+        Box::new(builtin::lsp_installer::LspInstallerPlugin::new()),
         Box::new(builtin::migration_picker::MigrationPickerPlugin::new()),
         Box::new(builtin::model::ModelPlugin::new()),
         Box::new(builtin::plugins_manager::PluginsManagerPlugin::new()),
@@ -143,6 +144,7 @@ mod tests {
             "internal:home-footer",
             "internal:home-tips",
             "internal:language",
+            "internal:lsp-installer",
             "internal:migration-picker",
             "internal:model",
             "internal:plugins-manager",
@@ -164,7 +166,7 @@ mod tests {
                 "missing non-provider plugin id: {expected}"
             );
         }
-        assert_eq!(set.plugins.len(), 24);
+        assert_eq!(set.plugins.len(), 25);
 
         // PR 6 adds the 4 provider shims — exactly once each.
         let provider_ids: Vec<_> = {
@@ -192,12 +194,13 @@ mod tests {
         // Task 9 adds migration-picker, bringing non-provider count to 20;
         // Task 6 adds route, bringing non-provider count to 21;
         // Task 11 adds tool-bash/fs/grep-summary, bringing non-provider count to 24;
-        // total registry size is 24 + 4 = 28.
+        // v0.16.0 adds lsp-installer, bringing non-provider count to 25;
+        // total registry size is 25 + 4 = 29.
         let reg = PluginRegistry::new(set);
         assert_eq!(
             reg.len(),
-            28,
-            "registry should have 24 non-provider + 4 provider plugins"
+            29,
+            "registry should have 25 non-provider + 4 provider plugins"
         );
         assert_eq!(
             reg.provider_count(),

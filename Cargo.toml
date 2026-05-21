@@ -109,6 +109,16 @@ url = { version = "2", features = ["serde"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
+# `/lsp` installer (internal:lsp-installer). flate2 + tar for tar.gz
+# extraction, zip for Windows archives, sha2 + hex for checksum
+# verification, which for npm-on-PATH detection.
+flate2 = "1"
+tar = "0.4"
+zip = { version = "5", default-features = false, features = ["deflate"] }
+sha2 = "0.10"
+hex = "0.4"
+which = "6"
+
 # TUI deps (only used by savvagent crate, but pinned here for consistency)
 crossterm = "0.29"
 ratatui = { version = "0.30", features = [

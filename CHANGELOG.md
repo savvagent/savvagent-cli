@@ -6,10 +6,23 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 (pre-1.0: `0.MINOR.PATCH`, where MINOR captures features + breaking
 boundary changes and PATCH captures fixes).
 
-## 0.16.0 - 2026-05-20
+## 0.16.0 - 2026-05-21
 
 ### Added
 
+- **`/lsp` slash command** (`internal:lsp-installer` plugin). Opens a
+  multi-select picker over a curated catalog of language servers
+  (`rust-analyzer`, `lua-language-server`, `typescript-language-server`,
+  `pyright`, `bash-language-server`, `vscode-langservers-extracted`). On
+  confirm, savvagent downloads pinned binaries (SHA256-verified) or runs
+  `npm i -g` for Node-based servers, then merges entries into
+  `~/.savvagent/lsp.toml`. Binaries land in `~/.savvagent/lsp-bin/<id>/`.
+- **Reusable `MultiSelectList<T>` widget** under
+  `crates/savvagent/src/plugin/widgets/`. Generic cursor + filter +
+  selection-by-stable-id state machine; `Confirm` returns selected items
+  in catalog order regardless of selection sequence. The `/lsp` picker
+  is its first consumer; future multi-select pickers in other plugins
+  can wrap it.
 - **MCP resource subscriptions in `savvagent-host`**. Every connected tool server is now constructed with a `ResourceCapturingHandler` (rmcp `ClientHandler`) that forwards `notifications/resources/updated` and `notifications/resources/list_changed` into a host-owned mpsc channel. A new `resource_pump` task drains the channel into `ResourceCache` and emits the new `TurnEvent::ResourceUpdated { uri, owner, summary }` so the TUI can render a banner.
 - **Built-in `read_resource` synthetic tool**. Always advertised in `ToolRegistry::defs`, takes `{ uri: string }`, and routes through the cache to call `resources/read` on the URI's owning tool server.
 - **Iteration-boundary conversation injection**. At the start of every tool-use-loop iteration, dirty URIs are drained from `ResourceCache` and appended as `Message{role:User, content:Text}` blocks of the form `[resource updated: <uri>]`. The model decides whether to call `read_resource` on any of them.
