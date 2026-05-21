@@ -248,6 +248,20 @@ pub enum TurnEvent {
         /// Reason that's also embedded in the synthetic `tool_result`.
         reason: String,
     },
+    /// A tool server published `notifications/resources/updated`. The TUI
+    /// can render a one-line banner. The host has already injected (or
+    /// will inject at the next iteration boundary) a synthetic
+    /// `[resource updated: <uri>]` user-text block so the model sees the
+    /// update without any TUI involvement.
+    ResourceUpdated {
+        /// Resource URI as published by the tool (e.g. `lsp://diagnostics/src/foo.rs`).
+        uri: String,
+        /// Label of the tool server that published it (matches `ToolServer.label`).
+        owner: String,
+        /// Producer-supplied one-line summary; keep under ~80 chars for TUI banners.
+        /// Defaults to the URI when the producer didn't include one.
+        summary: String,
+    },
     /// The whole turn finished.
     TurnComplete {
         /// Final outcome — same value `run_turn_streaming` returns.
@@ -340,6 +354,10 @@ pub struct Host {
     /// Plain `std::sync::Mutex` because access is one-shot at startup —
     /// no async required and no contention with the turn loop.
     startup_notes: std::sync::Mutex<Vec<String>>,
+    /// Resource cache populated by the resource_pump task. Read at each
+    /// tool-use-loop iteration boundary to inject `[resource updated: …]`
+    /// user-text blocks into the conversation.
+    resources: Arc<tokio::sync::Mutex<crate::resources::ResourceCache>>,
 }
 
 struct SessionState {
@@ -451,8 +469,19 @@ impl Host {
         // any) or falls back to `false`. `wire_self_into_resolver` swaps
         // in the real one below.
         let resolver = bootstrap_bash_net_resolver();
-        let tools =
-            ToolRegistry::connect(&config.tools, &config.project_root, &sandbox, resolver).await?;
+        // Resource channel: bounded at 64. If a tool publishes faster than
+        // the pump drains, oldest-first warnings fire; we never block the
+        // subprocess.
+        let (resource_tx, resource_rx) =
+            tokio::sync::mpsc::channel::<crate::tools::ResourceEvent>(64);
+        let tools = ToolRegistry::connect(
+            &config.tools,
+            &config.project_root,
+            &sandbox,
+            resolver,
+            resource_tx,
+        )
+        .await?;
         let system_prompt = build_layered_system_prompt(&config, &tools);
         let policy = config
             .policy
@@ -508,8 +537,21 @@ impl Host {
             turn_handles: tokio::sync::Mutex::new(HashMap::new()),
             routing_rules: tokio::sync::RwLock::new(routing_rules),
             startup_notes: std::sync::Mutex::new(startup_notes),
+            resources: Arc::new(tokio::sync::Mutex::new(
+                crate::resources::ResourceCache::default(),
+            )),
         };
         host.wire_self_into_resolver().await;
+        // Spawn the resource pump. It owns the receiver, the cache handle,
+        // and a clone of the current_turn_events slot. When a turn is
+        // live the pump emits TurnEvent::ResourceUpdated; when no turn is
+        // live (between turns) it still updates the cache so the next
+        // turn sees the updates at its iteration boundary.
+        let cache = Arc::clone(&host.resources);
+        let events_slot = Arc::clone(&host.current_turn_events);
+        tokio::spawn(async move {
+            resource_pump(resource_rx, cache, events_slot).await;
+        });
         Ok(host)
     }
 
@@ -526,8 +568,19 @@ impl Host {
     ) -> Result<Self, HostError> {
         let sandbox = config.sandbox.clone().unwrap_or_else(SandboxConfig::load);
         let resolver = bootstrap_bash_net_resolver();
-        let tools =
-            ToolRegistry::connect(&config.tools, &config.project_root, &sandbox, resolver).await?;
+        // Resource channel: bounded at 64. If a tool publishes faster than
+        // the pump drains, oldest-first warnings fire; we never block the
+        // subprocess.
+        let (resource_tx, resource_rx) =
+            tokio::sync::mpsc::channel::<crate::tools::ResourceEvent>(64);
+        let tools = ToolRegistry::connect(
+            &config.tools,
+            &config.project_root,
+            &sandbox,
+            resolver,
+            resource_tx,
+        )
+        .await?;
         let system_prompt = build_layered_system_prompt(&config, &tools);
         let policy = config
             .policy
@@ -599,8 +652,20 @@ impl Host {
             turn_handles: tokio::sync::Mutex::new(HashMap::new()),
             routing_rules: tokio::sync::RwLock::new(routing_rules),
             startup_notes: std::sync::Mutex::new(startup_notes),
+            resources: Arc::new(tokio::sync::Mutex::new(
+                crate::resources::ResourceCache::default(),
+            )),
         };
         host.wire_self_into_resolver().await;
+        // Spawn the resource pump. Mirrors the spawn in `Host::start`.
+        // Tests / advanced embedders that construct hosts via
+        // `with_components` rely on this too — otherwise the receiver
+        // would park and never drain.
+        let cache = Arc::clone(&host.resources);
+        let events_slot = Arc::clone(&host.current_turn_events);
+        tokio::spawn(async move {
+            resource_pump(resource_rx, cache, events_slot).await;
+        });
         Ok(host)
     }
 
@@ -872,6 +937,27 @@ impl Host {
             }
             iterations += 1;
 
+            // Drain resource updates that arrived since the previous
+            // iteration (or since turn start) and inject one synthetic
+            // user-text block per URI. The model sees them as a fresh
+            // user turn between iterations and can call `read_resource`
+            // to fetch contents.
+            let dirty: Vec<String> = {
+                let mut guard = self.resources.lock().await;
+                guard.drain_dirty()
+            };
+            if !dirty.is_empty() {
+                let text = dirty
+                    .iter()
+                    .map(|uri| format!("[resource updated: {uri}]"))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                messages.push(Message {
+                    role: Role::User,
+                    content: vec![ContentBlock::Text { text }],
+                });
+            }
+
             if let Some(tx) = &events {
                 let _ = tx
                     .send(TurnEvent::IterationStarted {
@@ -1125,7 +1211,38 @@ impl Host {
                                 })
                                 .await;
                         }
-                        let outcome = {
+                        let outcome = if name == crate::tools::READ_RESOURCE_TOOL_NAME {
+                            // Synthetic read_resource: parse uri, look up owner via
+                            // resource cache, dispatch via the registry helper.
+                            let uri = input
+                                .as_object()
+                                .and_then(|m| m.get("uri"))
+                                .and_then(serde_json::Value::as_str)
+                                .map(str::to_string);
+                            match uri {
+                                None => crate::tools::ToolCallOutcome::error(
+                                    "read_resource requires `uri: string`".to_string(),
+                                ),
+                                Some(uri) => {
+                                    let owner = {
+                                        let guard = self.resources.lock().await;
+                                        guard.owner(&uri).map(str::to_string)
+                                    };
+                                    match owner {
+                                        None => crate::tools::ToolCallOutcome::error(format!(
+                                            "unknown resource: {uri}; \
+                                             no tool advertises ownership"
+                                        )),
+                                        Some(owner) => {
+                                            let guard = self.tools.lock().await;
+                                            let registry =
+                                                guard.as_ref().expect("tools registry present");
+                                            registry.dispatch_read_resource(&uri, &owner).await
+                                        }
+                                    }
+                                }
+                            }
+                        } else {
                             let guard = self.tools.lock().await;
                             let registry = guard.as_ref().expect("tools registry present");
                             registry
@@ -1994,6 +2111,55 @@ async fn forward_text_deltas(mut rx: mpsc::Receiver<StreamEvent>, out: mpsc::Sen
             }
         }
     }
+}
+
+/// Drain resource events from `rx` into `cache`. When a turn is live
+/// (i.e. `events_slot` holds a `Some`), also emit a
+/// [`TurnEvent::ResourceUpdated`] so the TUI can render a banner. The
+/// cache mutation always happens regardless of whether a turn is live —
+/// the next iteration boundary will surface the URI via conversation
+/// injection in either case.
+async fn resource_pump(
+    mut rx: mpsc::Receiver<crate::tools::ResourceEvent>,
+    cache: Arc<tokio::sync::Mutex<crate::resources::ResourceCache>>,
+    events_slot: Arc<std::sync::Mutex<Option<mpsc::Sender<TurnEvent>>>>,
+) {
+    while let Some(event) = rx.recv().await {
+        match event {
+            crate::tools::ResourceEvent::Updated { owner, uri } => {
+                {
+                    let mut guard = cache.lock().await;
+                    guard.mark_updated(uri.clone(), owner.clone());
+                    // guard dropped here
+                }
+                // Snapshot the events sender under the std::sync::Mutex,
+                // then drop the guard before awaiting on the send. Same
+                // discipline as current_turn_events use everywhere else
+                // in this file.
+                let maybe_tx = {
+                    let guard = events_slot.lock().expect("events slot poisoned");
+                    guard.clone()
+                };
+                if let Some(tx) = maybe_tx {
+                    let summary = uri.clone();
+                    let _ = tx
+                        .send(TurnEvent::ResourceUpdated {
+                            uri,
+                            owner,
+                            summary,
+                        })
+                        .await;
+                }
+            }
+            crate::tools::ResourceEvent::ListChanged { owner } => {
+                tracing::debug!(
+                    owner = %owner,
+                    "resources/list_changed received; ignored (host pulls on `updated`)"
+                );
+            }
+        }
+    }
+    tracing::debug!("resource_pump channel closed; pump exiting");
 }
 
 #[cfg(test)]
@@ -2869,10 +3035,17 @@ mod policy_tests {
 
         let sandbox = crate::sandbox::SandboxConfig::default();
         let resolver = bootstrap_bash_net_resolver();
-        let tools =
-            crate::tools::ToolRegistry::connect(&[], &config.project_root, &sandbox, resolver)
-                .await
-                .unwrap();
+        let (resource_tx, _resource_rx) =
+            tokio::sync::mpsc::channel::<crate::tools::ResourceEvent>(64);
+        let tools = crate::tools::ToolRegistry::connect(
+            &[],
+            &config.project_root,
+            &sandbox,
+            resolver,
+            resource_tx,
+        )
+        .await
+        .unwrap();
 
         let prompt = super::build_layered_system_prompt(&config, &tools)
             .expect("default + override + body must produce Some");
@@ -2890,8 +3063,34 @@ mod policy_tests {
         assert!(prompt.contains("PROJECT_BODY"));
         // Default-section content reflects the embedder version label.
         assert!(prompt.contains("Savvagent version: 7.7.7"));
-        // Bash isn't wired in this fixture; the no-tools branch fires.
-        assert!(prompt.contains("No tools are currently connected"));
+        // Bash isn't wired in this fixture, but the registry always
+        // advertises the synthetic `read_resource` tool, so the affordances
+        // section renders the populated branch rather than the no-tools one.
+        assert!(prompt.contains("The host has wired the following tools"));
+        assert!(prompt.contains("`read_resource`"));
+    }
+
+    #[test]
+    fn turn_event_resource_updated_carries_uri_owner_summary() {
+        // Pinning the variant fields so an accidental rename in a later
+        // refactor doesn't silently change the wire surface the TUI matches on.
+        let ev = TurnEvent::ResourceUpdated {
+            uri: "lsp://diagnostics/src/foo.rs".into(),
+            owner: "tool-lsp".into(),
+            summary: "3 errors, 1 warning".into(),
+        };
+        match ev {
+            TurnEvent::ResourceUpdated {
+                uri,
+                owner,
+                summary,
+            } => {
+                assert_eq!(uri, "lsp://diagnostics/src/foo.rs");
+                assert_eq!(owner, "tool-lsp");
+                assert_eq!(summary, "3 errors, 1 warning");
+            }
+            _ => panic!("constructed variant didn't match"),
+        }
     }
 }
 
@@ -3193,5 +3392,90 @@ mod transcript_tests {
             .find(|m| matches!(m.role, Role::User))
             .expect("at least one user message");
         assert_eq!(user_msg.content, blocks);
+    }
+
+    /// Provider stub that records every `CompleteRequest` it observes
+    /// and returns an immediate `end_turn`. Used to inspect the
+    /// `messages` slice that the iteration-boundary injection assembles
+    /// before it dispatches to the provider.
+    #[derive(Default)]
+    struct RecordingProvider {
+        captured: Arc<std::sync::Mutex<Vec<CompleteRequest>>>,
+    }
+
+    impl RecordingProvider {
+        fn new() -> (Self, Arc<std::sync::Mutex<Vec<CompleteRequest>>>) {
+            let captured = Arc::new(std::sync::Mutex::new(Vec::new()));
+            (
+                Self {
+                    captured: captured.clone(),
+                },
+                captured,
+            )
+        }
+    }
+
+    #[async_trait]
+    impl ProviderClient for RecordingProvider {
+        async fn complete(
+            &self,
+            req: CompleteRequest,
+            _events: Option<mpsc::Sender<StreamEvent>>,
+        ) -> Result<CompleteResponse, ProviderError> {
+            self.captured.lock().unwrap().push(req.clone());
+            Ok(CompleteResponse {
+                id: "rec".into(),
+                model: req.model,
+                content: vec![ContentBlock::Text { text: "ok".into() }],
+                stop_reason: StopReason::EndTurn,
+                stop_sequence: None,
+                usage: Usage::default(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn iteration_boundary_injects_resource_updated_block_into_history() {
+        // Pre-populate the resource cache as if the pump task had
+        // observed an update arriving between turns, then run a turn
+        // and inspect the first `CompleteRequest` the provider saw.
+        let dir = tempdir().unwrap();
+        let (provider, captured) = RecordingProvider::new();
+        let host = Host::with_components(
+            tmp_config(dir.path()),
+            Box::new(provider) as Box<dyn ProviderClient + Send + Sync>,
+        )
+        .await
+        .unwrap();
+
+        {
+            let mut cache = host.resources.lock().await;
+            cache.mark_updated("lsp://diagnostics/foo.rs", "fixture-tool");
+        }
+
+        let (tx, mut rx) = mpsc::channel::<TurnEvent>(64);
+        let _outcome = host.run_turn_streaming("hi", tx).await.unwrap();
+        while rx.recv().await.is_some() {} // drain events
+
+        let captured = captured.lock().unwrap();
+        let last_req = captured
+            .last()
+            .cloned()
+            .expect("at least one CompleteRequest recorded");
+        let has_injection = last_req.messages.iter().any(|m| {
+            matches!(m.role, Role::User)
+                && m.content.iter().any(|b| match b {
+                    ContentBlock::Text { text } => {
+                        text.contains("[resource updated: lsp://diagnostics/foo.rs]")
+                    }
+                    _ => false,
+                })
+        });
+        assert!(
+            has_injection,
+            "first iteration's CompleteRequest must include the injected \
+             [resource updated: …] user-text block; messages were: {:#?}",
+            last_req.messages
+        );
     }
 }

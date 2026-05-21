@@ -443,6 +443,64 @@ Tools are stdio MCP servers. Mirror `crates/tool-fs`:
    additional tools you can extend `HostConfig::with_tool` calls in
    `crates/savvagent/src/main.rs`.
 
+
+### `read_resource` (built-in)
+
+Always advertised. Takes `{ uri: string }` and returns the body of an
+MCP resource. URIs surface in the conversation via
+`[resource updated: <uri>]` user-text blocks the host injects at each
+tool-use-loop iteration boundary; the model decides which (if any) to
+pull. The host routes the read to whichever connected tool server
+published the URI.
+
+## Language Server Protocol (LSP)
+
+tool-lsp wraps user-configured LSP servers behind a small MCP tool surface (`lsp_definition`, `lsp_references`, `lsp_hover`, `lsp_document_symbols`, `lsp_workspace_symbols`, `lsp_rename`, `lsp_code_actions`) and publishes diagnostics as MCP resources via the `lsp://diagnostics/<absolute-path>` URI scheme. Diagnostics surface in the conversation as `[resource updated: lsp://diagnostics/<path>]` notes; the model fetches contents via the built-in `read_resource` tool.
+
+### Configuration
+
+Define which servers to launch in `~/.savvagent/lsp.toml` (global) and optionally override per-repo in `<repo>/.savvagent/lsp.toml`. There is no built-in default; tool-lsp is a no-op until you add at least one language. Repo-level entries fully replace global entries with the same `id` (no per-field merge).
+
+```toml
+[[language]]
+id = "rust"
+extensions = ["rs"]
+root_markers = ["Cargo.toml", "rust-project.json"]
+command = "rust-analyzer"
+args = []
+# Optional environment variables passed to the LSP child.
+env = { RUST_LOG = "warn" }
+
+[[language]]
+id = "typescript"
+extensions = ["ts", "tsx", "mts", "cts"]
+root_markers = ["tsconfig.json", "package.json"]
+command = "typescript-language-server"
+args = ["--stdio"]
+
+[[language]]
+id = "python"
+extensions = ["py"]
+root_markers = ["pyproject.toml", "setup.py", "pyrightconfig.json"]
+command = "pyright-langserver"
+args = ["--stdio"]
+
+[[language]]
+id = "go"
+extensions = ["go"]
+root_markers = ["go.mod"]
+command = "gopls"
+args = []
+```
+
+### Notes
+
+- The first call into a fresh project triggers `initialize` and (for rust-analyzer) full workspace indexing, which can take tens of seconds. tool-lsp emits MCP progress notifications during this wait so the TUI can show a status line.
+- `lsp_rename` and `lsp_code_actions` return *edit descriptors* (`[{path, edits: [{range, new_text}]}]`) — they never apply changes themselves. The model issues `tool-fs::write_file` calls to apply them, keeping mutation inside the existing permission system.
+- File rename/create/delete operations inside a `WorkspaceEdit` are rejected with an explanatory error; v1 supports plain in-file text edits only.
+- Idle LSP sessions are evicted after ten minutes of no activity. Reopening a workspace triggers a fresh spawn + indexing pass.
+
+
 ## Environment variables
 
 | Var | Where read | Default | Notes |

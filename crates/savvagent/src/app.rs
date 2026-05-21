@@ -800,6 +800,11 @@ impl App {
                 )));
                 self.is_loading = false;
             }
+            TurnEvent::ResourceUpdated { uri, summary, .. } => {
+                self.flush_live_text();
+                self.entries
+                    .push(Entry::Note(format!("resource updated: {uri} — {summary}")));
+            }
         }
     }
 

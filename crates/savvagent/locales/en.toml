@@ -351,6 +351,7 @@ save-failed = "Failed to save startup_providers to ~/.savvagent/config.toml: %{e
 tool-bash-not-found  = "Note: savvagent-tool-bash not found — bash disabled. Run `cargo build` or set SAVVAGENT_TOOL_BASH_BIN."
 tool-fs-not-found    = "Note: savvagent-tool-fs not found — fs tools disabled. Run `cargo build` or set SAVVAGENT_TOOL_FS_BIN."
 tool-grep-not-found  = "Note: savvagent-tool-grep not found — search disabled. Run `cargo build` or set SAVVAGENT_TOOL_GREP_BIN."
+tool-lsp-not-found   = "Note: savvagent-tool-lsp not found — LSP tools disabled. Run `cargo build` or set SAVVAGENT_TOOL_LSP_BIN."
 
 [routing]
 reloaded                = "Reloaded routing.toml — %{count} rule(s) active."

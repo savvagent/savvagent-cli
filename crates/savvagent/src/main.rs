@@ -19,6 +19,7 @@
 //! - `SAVVAGENT_TOOL_FS_BIN`    (default `savvagent-tool-fs` on $PATH)
 //! - `SAVVAGENT_TOOL_BASH_BIN`  (default `savvagent-tool-bash` on $PATH)
 //! - `SAVVAGENT_TOOL_GREP_BIN`  (default `savvagent-tool-grep` on $PATH)
+//! - `SAVVAGENT_TOOL_LSP_BIN`   (default `savvagent-tool-lsp` on $PATH)
 
 rust_i18n::i18n!("locales", fallback = "en");
 
@@ -107,6 +108,7 @@ struct ToolBins {
     fs: Option<PathBuf>,
     bash: Option<PathBuf>,
     grep: Option<PathBuf>,
+    lsp: Option<PathBuf>,
 }
 
 impl ToolBins {
@@ -116,6 +118,7 @@ impl ToolBins {
             self.fs.as_deref(),
             self.bash.as_deref(),
             self.grep.as_deref(),
+            self.lsp.as_deref(),
         ]
         .into_iter()
         .flatten()
@@ -139,6 +142,7 @@ async fn main() -> Result<()> {
         fs: locate_bundled_bin("savvagent-tool-fs", "SAVVAGENT_TOOL_FS_BIN"),
         bash: locate_bundled_bin("savvagent-tool-bash", "SAVVAGENT_TOOL_BASH_BIN"),
         grep: locate_bundled_bin("savvagent-tool-grep", "SAVVAGENT_TOOL_GREP_BIN"),
+        lsp: locate_bundled_bin("savvagent-tool-lsp", "SAVVAGENT_TOOL_LSP_BIN"),
     };
 
     let config_file =
@@ -246,6 +250,9 @@ async fn main() -> Result<()> {
     }
     if tool_bins.grep.is_none() {
         app.push_note(rust_i18n::t!("errors.tool-grep-not-found").to_string());
+    }
+    if tool_bins.lsp.is_none() {
+        app.push_note(rust_i18n::t!("errors.tool-lsp-not-found").to_string());
     }
     let res = run_app(
         &mut terminal,
@@ -2332,7 +2339,8 @@ fn translate_turn_event_to_host_event(
         | TurnEvent::BashNetworkRequested { .. }
         | TurnEvent::ToolCallDenied { .. }
         | TurnEvent::Cancelled { .. }
-        | TurnEvent::AbortedAfterGrace { .. } => None,
+        | TurnEvent::AbortedAfterGrace { .. }
+        | TurnEvent::ResourceUpdated { .. } => None,
     }
 }
 

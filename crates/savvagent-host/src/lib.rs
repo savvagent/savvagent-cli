@@ -21,6 +21,7 @@
 pub mod capabilities;
 mod config;
 pub mod pool;
+pub mod resources;
 pub mod router;
 pub use pool::{DisconnectMode, PoolEntry, PoolError, ProviderLease};
 pub use router::{

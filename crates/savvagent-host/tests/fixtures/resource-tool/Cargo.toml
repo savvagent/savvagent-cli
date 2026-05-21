@@ -1,0 +1,20 @@
+[package]
+name = "resource-tool"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "Test-only stdio MCP server that emits resources/updated notifications. Used by savvagent-host integration tests."
+
+[lib]
+name = "resource_tool"
+path = "src/lib.rs"
+
+[[bin]]
+name = "resource-tool"
+path = "src/main.rs"
+
+[dependencies]
+rmcp = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "io-std"] }
+serde_json = { workspace = true }
+anyhow = { workspace = true }

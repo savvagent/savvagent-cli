@@ -349,6 +349,7 @@ save-failed = "Failed to save startup_providers to ~/.savvagent/config.toml: %{e
 tool-bash-not-found  = "Nota: savvagent-tool-bash não encontrado — bash desabilitado. Execute `cargo build` ou defina SAVVAGENT_TOOL_BASH_BIN."
 tool-fs-not-found    = "Nota: savvagent-tool-fs não encontrado — ferramentas fs desabilitadas. Execute `cargo build` ou defina SAVVAGENT_TOOL_FS_BIN."
 tool-grep-not-found  = "Nota: savvagent-tool-grep não encontrado — busca desabilitada. Execute `cargo build` ou defina SAVVAGENT_TOOL_GREP_BIN."
+tool-lsp-not-found   = "Nota: savvagent-tool-lsp não encontrado — ferramentas LSP desabilitadas. Execute `cargo build` ou defina SAVVAGENT_TOOL_LSP_BIN."
 
 # TODO: translate routing.* keys (Phase 5)
 [routing]

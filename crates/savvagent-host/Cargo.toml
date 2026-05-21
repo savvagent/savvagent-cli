@@ -39,6 +39,15 @@ provider-gemini.workspace = true
 provider-openai.workspace = true
 axum = { workspace = true, features = ["json"] }
 
+# Stdio MCP fixture used by tests/resources_integration.rs. Declared as
+# a path dev-dep so the fixture is kept in the workspace graph; the
+# integration test shells out to `cargo build` for the fixture and
+# probes target/debug/ at runtime to locate the binary. Cargo does NOT
+# set `CARGO_BIN_EXE_resource-tool` for path-dev-dep binaries (only for
+# bins owned by the crate-under-test), which is why we can't use the
+# usual `env!` lookup.
+resource-tool = { path = "tests/fixtures/resource-tool" }
+
 [[example]]
 name = "headless"
 path = "examples/headless.rs"

@@ -6,6 +6,25 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 (pre-1.0: `0.MINOR.PATCH`, where MINOR captures features + breaking
 boundary changes and PATCH captures fixes).
 
+## 0.16.0 - 2026-05-20
+
+### Added
+
+- **MCP resource subscriptions in `savvagent-host`**. Every connected tool server is now constructed with a `ResourceCapturingHandler` (rmcp `ClientHandler`) that forwards `notifications/resources/updated` and `notifications/resources/list_changed` into a host-owned mpsc channel. A new `resource_pump` task drains the channel into `ResourceCache` and emits the new `TurnEvent::ResourceUpdated { uri, owner, summary }` so the TUI can render a banner.
+- **Built-in `read_resource` synthetic tool**. Always advertised in `ToolRegistry::defs`, takes `{ uri: string }`, and routes through the cache to call `resources/read` on the URI's owning tool server.
+- **Iteration-boundary conversation injection**. At the start of every tool-use-loop iteration, dirty URIs are drained from `ResourceCache` and appended as `Message{role:User, content:Text}` blocks of the form `[resource updated: <uri>]`. The model decides whether to call `read_resource` on any of them.
+- **`tool-lsp` crate**. New stdio MCP server that wraps user-configured LSP servers behind seven MCP tools (`lsp_definition`, `lsp_references`, `lsp_hover`, `lsp_document_symbols`, `lsp_workspace_symbols`, `lsp_rename`, `lsp_code_actions`) and publishes diagnostics as MCP resources (`lsp://diagnostics/<absolute-path>`). Configured via `~/.savvagent/lsp.toml` + `<repo>/.savvagent/lsp.toml`; no languages are hardcoded.
+- **`savvagent-tool-lsp` binary**. Shim that delegates to `tool_lsp::run`; bundled alongside `savvagent-tool-fs`/`-bash`/`-grep` in the release archive.
+- **`lsp-types` workspace dep** at version 0.97.
+
+### Notes
+
+- Diagnostics flow as `[resource updated: lsp://diagnostics/<path>]` notes the model can pull via `read_resource`.
+- `lsp_rename` and `lsp_code_actions` return *edit descriptors only*; the model applies via `tool-fs::write_file`.
+- `WorkspaceEdit`s that include file rename/create/delete or version-tagged edits are rejected (v1 supports plain in-file text edits only).
+- Idle LSP sessions evicted after ten minutes (`tool_lsp::IDLE_TIMEOUT`).
+- No default `lsp.toml` ships — see README for copy-pasteable rust/typescript/python/go examples.
+
 ## v0.15.0 — Multi-provider pool + auto-routing + TUI polish (2026-05-20)
 
 This release rolls up Phases 1–6 of the multi-provider initiative

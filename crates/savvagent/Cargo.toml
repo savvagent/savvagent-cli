@@ -20,6 +20,10 @@ name = "savvagent-tool-fs"
 path = "src/bin/savvagent-tool-fs.rs"
 
 [[bin]]
+name = "savvagent-tool-lsp"
+path = "src/bin/savvagent-tool-lsp.rs"
+
+[[bin]]
 name = "savvagent-tool-bash"
 path = "src/bin/savvagent-tool-bash.rs"
 
@@ -49,6 +53,7 @@ provider-gemini = { workspace = true }
 provider-local = { workspace = true }
 provider-openai = { workspace = true }
 tool-fs = { workspace = true }
+tool-lsp = { workspace = true }
 tool-bash = { workspace = true }
 tool-grep = { workspace = true }
 async-trait.workspace = true

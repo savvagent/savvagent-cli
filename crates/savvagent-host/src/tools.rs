@@ -28,9 +28,9 @@ use std::sync::{Arc, RwLock};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use rmcp::{
-    RoleClient, ServiceExt,
-    model::CallToolRequestParams,
-    service::{RunningService, ServiceError},
+    ClientHandler, RoleClient, ServiceExt,
+    model::{CallToolRequestParams, ResourceUpdatedNotificationParam},
+    service::{NotificationContext, RunningService, ServiceError},
     transport::TokioChildProcess,
 };
 use savvagent_protocol::ToolDef;
@@ -44,6 +44,11 @@ use crate::sandbox::{SandboxConfig, SandboxWrapper, apply_sandbox};
 /// The substring we use to identify a `tool-bash` binary path. Mirrors the
 /// detection scheme used in `sandbox.rs::net_allowed_for`.
 const TOOL_BASH_MARKER: &str = "tool-bash";
+
+/// Name of the host-built-in tool that reads MCP resources by URI.
+/// Always present in `ToolRegistry::defs`, regardless of whether any
+/// connected tool publishes resources today.
+pub(crate) const READ_RESOURCE_TOOL_NAME: &str = "read_resource";
 
 /// Per-call override of `tool-bash`'s network access.
 ///
@@ -148,6 +153,98 @@ pub trait BashNetResolver: Send + Sync + 'static {
 /// after construction (see [`crate::session::Host::wire_self_into_resolver`]).
 pub(crate) type BashNetResolverHandle = Arc<dyn BashNetResolver>;
 
+/// Resource notification observed by a [`ResourceCapturingHandler`].
+///
+/// Currently only `Updated` carries a URI. `ListChanged` notifications
+/// don't include URIs in the MCP wire format — the receiver is expected
+/// to call `resources/list` to discover the new set. We don't need that
+/// today (tools we own publish updates eagerly), but the variant exists
+/// so the channel surface is forward-compatible.
+#[derive(Debug, Clone)]
+pub(crate) enum ResourceEvent {
+    /// `notifications/resources/updated` from `owner` for `uri`.
+    Updated {
+        /// Tool server label (matches `ToolServer.label`).
+        owner: String,
+        /// URI as published by the tool.
+        uri: String,
+    },
+    /// `notifications/resources/list_changed` from `owner`.
+    ListChanged {
+        /// Tool server label.
+        owner: String,
+    },
+}
+
+/// rmcp [`ClientHandler`] impl installed on every `ToolServer` so that
+/// server-initiated `notifications/resources/*` notifications flow into
+/// the host's resource pump instead of being silently dropped (which is
+/// what the default `impl ClientHandler for ()` does).
+///
+/// Each handler is bound to one tool's `label` at construction time so
+/// the pump knows which server published each event.
+pub(crate) struct ResourceCapturingHandler {
+    label: String,
+    tx: tokio::sync::mpsc::Sender<ResourceEvent>,
+}
+
+impl ResourceCapturingHandler {
+    pub(crate) fn new(label: String, tx: tokio::sync::mpsc::Sender<ResourceEvent>) -> Self {
+        Self { label, tx }
+    }
+
+    /// Test-only helper: forwards an `updated` notification through the
+    /// same code path the rmcp service uses, without needing to
+    /// synthesize a `NotificationContext` (whose fields are private).
+    #[cfg(test)]
+    pub(crate) async fn forward_updated_for_test(&self, params: ResourceUpdatedNotificationParam) {
+        self.send_updated(params.uri.to_string()).await;
+    }
+
+    async fn send_updated(&self, uri: String) {
+        let event = ResourceEvent::Updated {
+            owner: self.label.clone(),
+            uri,
+        };
+        if let Err(err) = self.tx.send(event).await {
+            // Receiver dropped — host is shutting down or the pump panicked.
+            // Either way, drop the event silently; we don't want to apply
+            // backpressure to the tool subprocess (which would stall a
+            // language server's reanalysis).
+            tracing::warn!(
+                owner = %self.label,
+                "resource pump receiver dropped; dropping notification: {err}"
+            );
+        }
+    }
+
+    async fn send_list_changed(&self) {
+        let event = ResourceEvent::ListChanged {
+            owner: self.label.clone(),
+        };
+        if let Err(err) = self.tx.send(event).await {
+            tracing::warn!(
+                owner = %self.label,
+                "resource pump receiver dropped; dropping list_changed: {err}"
+            );
+        }
+    }
+}
+
+impl ClientHandler for ResourceCapturingHandler {
+    async fn on_resource_updated(
+        &self,
+        params: ResourceUpdatedNotificationParam,
+        _context: NotificationContext<rmcp::RoleClient>,
+    ) {
+        self.send_updated(params.uri.to_string()).await;
+    }
+
+    async fn on_resource_list_changed(&self, _context: NotificationContext<rmcp::RoleClient>) {
+        self.send_list_changed().await;
+    }
+}
+
 /// Aggregate view of all connected tool servers.
 pub(crate) struct ToolRegistry {
     /// Eager (always-spawned) tool servers. Indices in `routes` for
@@ -166,7 +263,7 @@ pub(crate) struct ToolRegistry {
 
 struct ToolServer {
     label: String,
-    service: RunningService<RoleClient, ()>,
+    service: RunningService<RoleClient, ResourceCapturingHandler>,
 }
 
 /// Lazy-spawn slot for `tool-bash`. The server is spawned on demand by
@@ -267,6 +364,7 @@ impl ToolRegistry {
         project_root: &Path,
         sandbox: &SandboxConfig,
         bash_net_resolver: BashNetResolverHandle,
+        resource_tx: tokio::sync::mpsc::Sender<ResourceEvent>,
     ) -> Result<Self> {
         let mut eager_servers = Vec::new();
         let mut routes: HashMap<String, usize> = HashMap::new();
@@ -293,7 +391,9 @@ impl ToolRegistry {
                         let label = command.display().to_string();
                         let transport = TokioChildProcess::new(probe_cmd)
                             .with_context(|| format!("spawn tool-bash probe: {label}"))?;
-                        let service = ()
+                        let handler =
+                            ResourceCapturingHandler::new(label.clone(), resource_tx.clone());
+                        let service = handler
                             .serve(transport)
                             .await
                             .with_context(|| format!("init MCP session with {label}"))?;
@@ -357,7 +457,9 @@ impl ToolRegistry {
 
                         let transport = TokioChildProcess::new(cmd)
                             .with_context(|| format!("spawn tool server: {label}"))?;
-                        let service = ()
+                        let handler =
+                            ResourceCapturingHandler::new(label.clone(), resource_tx.clone());
+                        let service = handler
                             .serve(transport)
                             .await
                             .with_context(|| format!("init MCP session with {label}"))?;
@@ -393,6 +495,22 @@ impl ToolRegistry {
             },
             defs.len()
         );
+
+        // Synthetic built-in: read_resource. Always present; the dispatch
+        // path in Host::dispatch_tool routes it without consulting
+        // `routes` (which only knows about real, wire-spoken tools).
+        defs.push(ToolDef {
+            name: READ_RESOURCE_TOOL_NAME.to_string(),
+            description: "Fetch the contents of an MCP resource by URI. \
+                URIs are surfaced via `[resource updated: <uri>]` notes in the \
+                conversation. Returns the resource body as text or JSON."
+                .to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": { "uri": { "type": "string" } },
+                "required": ["uri"]
+            }),
+        });
 
         Ok(Self {
             eager_servers,
@@ -483,6 +601,36 @@ impl ToolRegistry {
                 && let Err(e) = active.service.cancel().await
             {
                 tracing::warn!("error closing lazy tool-bash {}: {e}", active.label);
+            }
+        }
+    }
+
+    /// Dispatch the synthetic `read_resource` tool. Looks up the owning
+    /// tool server in `eager_servers` (resources can't come from bash —
+    /// bash is request/response only — so we don't consult the lazy slot).
+    pub(crate) async fn dispatch_read_resource(&self, uri: &str, owner: &str) -> ToolCallOutcome {
+        let server = self.eager_servers.iter().find(|s| s.label == owner);
+        let Some(server) = server else {
+            return ToolCallOutcome::error(format!(
+                "unknown resource owner: {owner}; no tool advertises this URI ({uri})"
+            ));
+        };
+        // rmcp's RunningService exposes read_resource via peer().
+        // `ReadResourceRequestParams` is `#[non_exhaustive]` outside its
+        // defining crate — use the `::new` constructor.
+        let req = rmcp::model::ReadResourceRequestParams::new(uri.to_string());
+        match server.service.peer().read_resource(req).await {
+            Ok(result) => {
+                // result.contents is Vec<ResourceContents>. Serialize the
+                // whole envelope as JSON — the model gets text or blobs
+                // as the tool publishes them.
+                let body = serde_json::to_string(&result.contents)
+                    .unwrap_or_else(|_| "<unrenderable resource contents>".into());
+                ToolCallOutcome::success(body)
+            }
+            Err(err) => {
+                tracing::error!(uri, owner, error = ?err, "read_resource RPC failed");
+                ToolCallOutcome::error(format!("read_resource failed for {uri} on {owner}: {err}"))
             }
         }
     }
@@ -735,13 +883,13 @@ pub(crate) struct ToolCallOutcome {
 }
 
 impl ToolCallOutcome {
-    fn success(payload: String) -> Self {
+    pub(crate) fn success(payload: String) -> Self {
         Self {
             is_error: false,
             payload,
         }
     }
-    fn error(payload: String) -> Self {
+    pub(crate) fn error(payload: String) -> Self {
         Self {
             is_error: true,
             payload,
@@ -972,6 +1120,61 @@ mod lazy_bash_tests {
             lazy_bash: None,
         };
         assert!(!registry.bash_available());
+    }
+}
+
+#[cfg(test)]
+mod resource_handler_tests {
+    use super::*;
+    use rmcp::model::ResourceUpdatedNotificationParam;
+    use tokio::sync::mpsc;
+
+    #[tokio::test]
+    async fn handler_forwards_resource_updated_on_channel() {
+        let (tx, mut rx) = mpsc::channel::<ResourceEvent>(8);
+        let handler = ResourceCapturingHandler::new("tool-lsp".to_string(), tx);
+
+        // We can't easily build a real NotificationContext (Peer is
+        // private), so we exercise the path the rmcp service layer
+        // takes: it deconstructs the notification into params and a
+        // context, then calls on_resource_updated. We test the helper
+        // that actually forwards.
+        handler
+            .forward_updated_for_test(ResourceUpdatedNotificationParam {
+                uri: "lsp://diagnostics/foo.rs".into(),
+            })
+            .await;
+
+        let evt = rx.recv().await.expect("event must arrive");
+        assert!(matches!(evt, ResourceEvent::Updated { .. }));
+        if let ResourceEvent::Updated { owner, uri } = evt {
+            assert_eq!(owner, "tool-lsp");
+            assert_eq!(uri, "lsp://diagnostics/foo.rs");
+        }
+    }
+
+    #[tokio::test]
+    async fn handler_forward_failure_is_silent() {
+        // Receiver dropped → mpsc::Sender::send returns Err. The handler
+        // must not panic; it just logs and drops the event. We assert
+        // by calling forward and observing no panic.
+        let (tx, rx) = mpsc::channel::<ResourceEvent>(1);
+        drop(rx);
+        let handler = ResourceCapturingHandler::new("dead-tool".to_string(), tx);
+        handler
+            .forward_updated_for_test(ResourceUpdatedNotificationParam {
+                uri: "lsp://x".into(),
+            })
+            .await;
+        // If we got here we passed.
+    }
+
+    // Keep this import group local so the test module compiles regardless
+    // of whether the parent file imports rmcp::Arc.
+    fn _ensure_send_sync<T: Send + Sync>() {}
+    #[test]
+    fn handler_is_send_sync() {
+        _ensure_send_sync::<ResourceCapturingHandler>();
     }
 }
 
