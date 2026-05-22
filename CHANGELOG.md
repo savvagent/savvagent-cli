@@ -6,6 +6,29 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 (pre-1.0: `0.MINOR.PATCH`, where MINOR captures features + breaking
 boundary changes and PATCH captures fixes).
 
+## 0.16.1 - 2026-05-21
+
+### Added
+
+- **Live install-progress modal for `/lsp`** (`internal:lsp-installer` plugin). After confirming the picker, savvagent now opens a modal that streams per-server status (`queued → downloading… X.X MB / Y.Y MB → verifying SHA256… → extracting / running npm → installed / failed`) instead of waiting silently for the whole batch. The progress screen owns the install driver via `tokio::spawn` and reads shared `Arc<Mutex<ProgressState>>` on every render; the TUI's existing 50 ms render cadence keeps the UI fresh with no new `Effect`/`HostEvent`/`WorkerMsg` plumbing.
+
+### Changed
+
+- The `/lsp` picker's `Enter` no longer routes through the synchronous `/lsp __install` slash sub-command. It now opens the new `lsp_installer.progress` screen with the selected catalog ids. The legacy `__install` sub-command remains callable for external dispatchers (CI smoke, future keybindings).
+
+### Fixed
+
+- Terminal-state guard in `apply_notification` prevents a late-arriving `InstallProgress::Downloading` from un-failing an entry that the `Err` arm of `run_installs` just marked `Failed`.
+- `run_installs::Ok(outcome)` writes `Installed` directly into the shared state (instead of relying on the spawned `Done` notification), eliminating a race against `spawn_driver`'s outcomes collection.
+- Picker batch-abort displays the actual stored reason (`"batch aborted after SHA mismatch"`) for downstream entries, rather than misleadingly reporting them as individual SHA-mismatch failures.
+- "Restart savvagent to pick up the new servers" suggestion is suppressed when zero servers successfully installed.
+- `create_screen` rejects unexpected `ScreenArgs` variants instead of silently falling back to an empty entry list.
+- `tracing::warn!` on id-miss in `run_installs` state lookups (previously silent no-ops).
+
+### Notes
+
+- Sequential installs (v1). Esc dismisses the modal; the install continues in the background. On finish, Enter dismisses and emits summary `PushNote`s so the install record persists in the conversation log after the modal closes.
+
 ## 0.16.0 - 2026-05-21
 
 ### Added
