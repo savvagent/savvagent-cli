@@ -6,6 +6,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 (pre-1.0: `0.MINOR.PATCH`, where MINOR captures features + breaking
 boundary changes and PATCH captures fixes).
 
+## [Unreleased]
+
+### Added
+- User-defined slash commands. Drop markdown files under
+  `.savvagent/commands/` (project), `.claude/commands/` (project-claude),
+  `~/.savvagent/commands/`, or `~/.claude/commands/`; each becomes a
+  slash command. Frontmatter supports `description`, `argument-hint`,
+  `model`, and (forthcoming) `allowed-tools`. Body templating supports
+  `$ARGUMENTS`, `$1`/`$N`, `@<file>`, and `!<cmd>`. Project-local
+  commands that use `!<cmd>` are gated behind a first-run trust prompt
+  whose decisions persist to `~/.savvagent/trusted-projects.json`.
+  `/reload-commands` rescans directories after edits.
+
 ## 0.16.1 - 2026-05-21
 
 ### Added

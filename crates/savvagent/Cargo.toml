@@ -80,6 +80,9 @@ keyring.workspace = true
 reqwest.workspace = true
 self_update.workspace = true
 semver.workspace = true
+# user-defined slash commands
+serde_yaml_ng.workspace = true
+ignore.workspace = true
 # `/lsp` installer
 flate2.workspace = true
 tar.workspace = true

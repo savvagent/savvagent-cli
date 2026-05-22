@@ -79,6 +79,11 @@ pub mod splash;
 /// Theme catalog + `/theme` slash + theme picker modal.
 pub mod themes;
 
+/// `internal:user-slash-commands` — discovers user-authored slash commands
+/// from `.savvagent/commands/` / `.claude/commands/` and dispatches them
+/// with templating expansion.
+pub mod user_slash_commands;
+
 /// `internal:tool-bash-summary` — renders one-line summaries for the
 /// `tool-bash` `run` tool.
 pub mod tool_bash_summary;

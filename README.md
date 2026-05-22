@@ -137,6 +137,50 @@ provider has a key on file.
 
 `@` opens a file picker that inserts `@path` into the prompt.
 
+## User-defined slash commands
+
+Drop a markdown file under any of these directories and it becomes a slash command:
+
+- `<project>/.savvagent/commands/` — project-local, preferred
+- `<project>/.claude/commands/` — Claude Code compatible, project-local
+- `~/.savvagent/commands/` — user-wide
+- `~/.claude/commands/` — Claude Code compatible, user-wide
+
+Project paths outrank user paths; within the same scope, `.savvagent/` outranks `.claude/`. Subdirectories become namespaces: `commands/team/lint.md` → `/team:lint`.
+
+### Format
+
+```markdown
+---
+description: Review the current diff
+argument-hint: [commit range]
+model: claude-sonnet-4-6
+---
+
+Please review the following diff and flag any issues:
+
+!git diff $ARGUMENTS
+```
+
+| Token | Behavior |
+|---|---|
+| `$ARGUMENTS` | raw arg string |
+| `$1`, `$2`, … | positional args |
+| `@<path>` | inlined file contents (missing files leave the literal in place + warn) |
+| `!<cmd>` | shell stdout; non-zero exit aborts dispatch |
+
+### Trust prompt
+
+The first time you invoke a project-local command that includes `!<cmd>`, Savvagent asks whether to trust the project. Decisions persist in `~/.savvagent/trusted-projects.json` (only "trust always" is stored).
+
+### Reload
+
+After editing a command file, run `/reload-commands` to rescan all four directories.
+
+### `allowed-tools`
+
+Parsed but not yet enforced; reserved for the upcoming agents sub-project.
+
 ### Scrolling the conversation log
 
 | Input | What it does |
@@ -552,6 +596,9 @@ args = []
 | `~/.savvagent/update-check.json` | `internal:self-update` | 24-hour cache of the GitHub Releases version probe. |
 | `~/.savvagent/logs/savvagent.log` | TUI | All `tracing` output from the TUI process. |
 | `~/.savvagent/logs/tools/<binary>.log` | host | Captured stderr from each spawned tool subprocess. |
+| `~/.savvagent/trusted-projects.json` | user-defined slash commands | Project-trust persistence; only "trust always" decisions are stored. |
+| `~/.savvagent/commands/` | user-defined slash commands | User-wide slash command markdown files. |
+| `.savvagent/commands/` (per project) | user-defined slash commands | Project-local slash command markdown files. |
 | OS keyring (`service=savvagent`, `account=<provider id>`) | `/connect` | Provider API keys. Never written to disk in plaintext. |
 
 ## Project context: `SAVVAGENT.md`

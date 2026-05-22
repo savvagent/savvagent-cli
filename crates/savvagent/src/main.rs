@@ -96,6 +96,10 @@ enum WorkerMsg {
         provider: String,
         err: String,
     },
+    /// Sent by the turn worker after it restores the host's model back to
+    /// `original` following a one-turn `next_turn_model_override`. The main
+    /// loop syncs `app.model` so the status bar reflects the restored value.
+    ModelRestored(String),
 }
 
 type HostSlot = Arc<RwLock<Option<Arc<Host>>>>;
@@ -176,7 +180,7 @@ async fn main() -> Result<()> {
         use crate::plugin::registry::PluginRegistry;
         use savvagent_plugin::PluginKind;
 
-        let set = plugin::register_builtins();
+        let set = plugin::register_builtins(app.trust_levels.clone());
         let mut registry = PluginRegistry::new(set);
 
         // Apply persisted Optional-plugin enabled state from
@@ -2583,6 +2587,12 @@ async fn run_app(
                             .to_string(),
                     );
                 }
+                WorkerMsg::ModelRestored(original) => {
+                    // Sync app.model back to the original after a one-turn
+                    // model override so the status bar shows the correct
+                    // (restored) model id.
+                    app.model = original;
+                }
             }
         }
 
@@ -2862,8 +2872,28 @@ async fn run_app(
                                     "PromptSubmitted dispatch failed");
                             }
 
+                            // Consume the one-turn model override (if any)
+                            // before moving `app` references into the spawn.
+                            // `original_model` is saved so the host can be
+                            // restored after the turn completes.
+                            let model_override = app.consume_model_override();
+                            let original_model = app.model.clone();
+
                             let tx = worker_tx.clone();
                             tokio::spawn(async move {
+                                // Apply the per-turn model override to the host
+                                // before the turn starts. The host's `current_model`
+                                // is restored unconditionally after the turn
+                                // (success or error) so subsequent turns are
+                                // unaffected.
+                                if let Some(ref override_id) = model_override {
+                                    tracing::debug!(
+                                        model = %override_id,
+                                        "applying one-turn model override"
+                                    );
+                                    host.set_model(override_id.clone()).await;
+                                }
+
                                 let (ev_tx, mut ev_rx) = mpsc::channel(64);
                                 let host_for_run = host.clone();
                                 let prompt = value;
@@ -2875,7 +2905,23 @@ async fn run_app(
                                         break;
                                     }
                                 }
-                                match runner.await {
+                                let result = runner.await;
+
+                                // Restore the original model on the host after
+                                // the turn, whether it succeeded or failed. Only
+                                // needed when an override was actually applied.
+                                if model_override.is_some() {
+                                    tracing::debug!(
+                                        model = %original_model,
+                                        "restoring model after one-turn override"
+                                    );
+                                    host.set_model(original_model.clone()).await;
+                                    // Notify the main loop so app.model stays in
+                                    // sync with host.current_model.
+                                    let _ = tx.send(WorkerMsg::ModelRestored(original_model)).await;
+                                }
+
+                                match result {
                                     Ok(Ok(_)) => {}
                                     Ok(Err(e)) => {
                                         let _ = tx.send(WorkerMsg::Error(e.to_string())).await;

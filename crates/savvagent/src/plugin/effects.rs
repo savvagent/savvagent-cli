@@ -92,6 +92,9 @@ async fn apply_one(app: &mut App, eff: Effect, depth: u8) -> Result<(), String> 
             // or `tool_bins`.
             app.pending_model_change = Some(PendingModelChange { id, persist });
         }
+        Effect::SetNextTurnModelOverride { id } => {
+            app.next_turn_model_override = Some(id);
+        }
         Effect::ReloadRoutingRules => {
             app.pending_routing_reload = Some(PendingRoutingAction);
         }
@@ -249,9 +252,130 @@ async fn apply_one(app: &mut App, eff: Effect, depth: u8) -> Result<(), String> 
         Effect::TogglePlugin { id, enabled } => {
             apply_toggle_plugin(app, id, enabled).await?;
         }
+        Effect::ReindexPlugin { id } => {
+            let (reg_handle, idx_handle) = match (&app.plugin_registry, &app.plugin_indexes) {
+                (Some(r), Some(i)) => (r.clone(), i.clone()),
+                _ => {
+                    tracing::warn!(
+                        plugin_id = %id.as_str(),
+                        "Effect::ReindexPlugin: plugin runtime not installed; ignoring"
+                    );
+                    return Ok(());
+                }
+            };
+            // Acquire write on indexes and read on registry; drop both after
+            // reindex_plugin returns so we don't hold guards across await
+            // boundaries beyond what the method itself requires.
+            let reg = reg_handle.read().await;
+            let mut idx = idx_handle.write().await;
+            idx.reindex_plugin(&id, &reg).await;
+        }
         Effect::Stack(children) => {
             // Recurse via Box::pin so the future has a known size.
             Box::pin(apply_effects_with_depth(app, children, depth)).await?;
+        }
+        Effect::StashPendingSlash { name, args } => {
+            app.pending_slash_after_trust = Some((name, args));
+        }
+        Effect::SetTrustLevel {
+            project_root,
+            decision,
+        } => {
+            use crate::plugin::builtin::user_slash_commands::trust::{self, TrustLevel};
+            // Collect extra effects to dispatch after the main arm logic.
+            // Using a local Vec avoids restructuring the arm; the whole
+            // batch is dispatched at depth + 1 at the bottom.
+            let mut extra_effects: Vec<Effect> = Vec::new();
+
+            let level = match decision.as_str() {
+                "always" => Some(TrustLevel::Always),
+                "session-text-only" => Some(TrustLevel::SessionTextOnly),
+                "cancelled" => None,
+                other => {
+                    tracing::warn!("unknown trust decision: {other}");
+                    // I-2: if there was a pending command to drop, tell the user.
+                    if let Some((name, _)) = app.pending_slash_after_trust.take() {
+                        extra_effects.push(Effect::PushNote {
+                            line: savvagent_plugin::StyledLine::plain(format!(
+                                "[error] dropped pending /{name}: unrecognized trust decision \
+                                 '{other}'"
+                            )),
+                        });
+                    }
+                    None
+                }
+            };
+            match level {
+                Some(l) => {
+                    {
+                        let mut map = app.trust_levels.write().await;
+                        map.insert(project_root.clone(), l);
+                        if matches!(l, TrustLevel::Always) {
+                            if let Some(home) = dirs::home_dir() {
+                                if let Err(e) = trust::save(&home, &map) {
+                                    tracing::warn!("trust file save: {e}");
+                                    // I-1: user-visible note; in-memory write is already done.
+                                    extra_effects.push(Effect::PushNote {
+                                        line: savvagent_plugin::StyledLine::plain(format!(
+                                            "[warn] Trusted for this session only — could not \
+                                             write to disk: {e}"
+                                        )),
+                                    });
+                                }
+                            }
+                        }
+                    } // drop the write guard before any re-dispatch
+                    // Re-dispatch pending slash command, if any. Runs at
+                    // depth + 1 so the shared MAX_DISPATCH_DEPTH cap is
+                    // respected and we don't spin unboundedly.
+                    // RunSlash at depth+1 == MAX_DISPATCH_DEPTH would be
+                    // rejected by the RunSlash depth guard, so we detect
+                    // that case here and emit a user-visible note instead
+                    // of silently dropping the command (I-3).
+                    if let Some((name, args)) = app.pending_slash_after_trust.take() {
+                        if depth + 1 < MAX_DISPATCH_DEPTH {
+                            extra_effects.push(Effect::RunSlash { name, args });
+                        } else {
+                            tracing::warn!(
+                                "SetTrustLevel: depth limit reached; cannot re-dispatch pending \
+                                 slash command"
+                            );
+                            // I-3: user-visible note about the dropped command.
+                            extra_effects.push(Effect::PushNote {
+                                line: savvagent_plugin::StyledLine::plain(format!(
+                                    "[error] dropped pending /{name}: trust resume hit dispatch \
+                                     depth limit"
+                                )),
+                            });
+                        }
+                    }
+                }
+                None => {
+                    // Cancelled — drop the pending entry and remove the
+                    // project from the in-memory map.
+                    // Note: unknown-decision already called take() above and
+                    // populated extra_effects, so pending_slash_after_trust is
+                    // already None in that path; the assignment is harmless.
+                    app.pending_slash_after_trust = None;
+                    app.trust_levels.write().await.remove(&project_root);
+                }
+            }
+            // Dispatch any collected effects (PushNote, RunSlash) at depth + 1
+            // so the shared MAX_DISPATCH_DEPTH cap is respected. PushNote never
+            // recurses, so the only risk of hitting the cap here is RunSlash —
+            // and that case is guarded above with the `depth < MAX_DISPATCH_DEPTH`
+            // check. We deliberately do NOT propagate a depth-limit error from
+            // this dispatch: the in-memory trust update is already committed and
+            // the user has already been notified via a PushNote.
+            if !extra_effects.is_empty() {
+                if let Err(e) =
+                    Box::pin(apply_effects_with_depth(app, extra_effects, depth + 1)).await
+                {
+                    tracing::warn!(
+                        "SetTrustLevel: extra-effects dispatch failed (depth {depth}): {e}"
+                    );
+                }
+            }
         }
         // The Effect enum is #[non_exhaustive]; unhandled variants are logged
         // so implementers of future PRs can spot missing wiring.
@@ -950,6 +1074,30 @@ mod tests {
             .expect("SetActiveModel must populate pending_model_change");
         assert_eq!(pending.id, "gemini-2.5-pro");
         assert!(pending.persist);
+    }
+
+    /// `Effect::SetNextTurnModelOverride` must write the id into
+    /// `App::next_turn_model_override` so the next worker spawn can pick it up.
+    #[tokio::test]
+    async fn set_next_turn_model_override_writes_field() {
+        use savvagent_plugin::Effect;
+        let mut app = {
+            let _lock = HOME_LOCK.lock().unwrap();
+            let _home = HomeGuard::new();
+            fresh_app()
+        };
+        apply_effects(
+            &mut app,
+            vec![Effect::SetNextTurnModelOverride {
+                id: "claude-sonnet-4-6".into(),
+            }],
+        )
+        .await
+        .expect("apply_effects must succeed");
+        assert_eq!(
+            app.next_turn_model_override.as_deref(),
+            Some("claude-sonnet-4-6"),
+        );
     }
 
     /// Regression test for the post-v0.9 hotfix that wired `Effect::Quit`
@@ -1922,8 +2070,10 @@ mod tests {
         use crate::plugin::manifests::Indexes;
         use crate::plugin::register_builtins;
         use crate::plugin::registry::PluginRegistry;
+        use std::collections::BTreeMap;
+        use std::sync::Arc;
 
-        let set = register_builtins();
+        let set = register_builtins(Arc::new(tokio::sync::RwLock::new(BTreeMap::new())));
         let registry = PluginRegistry::new(set);
         let indexes = Indexes::build(&registry).await.expect("indexes build");
         let registry = std::sync::Arc::new(tokio::sync::RwLock::new(registry));
@@ -1966,8 +2116,10 @@ mod tests {
         use crate::plugin::manifests::Indexes;
         use crate::plugin::register_builtins;
         use crate::plugin::registry::PluginRegistry;
+        use std::collections::BTreeMap;
+        use std::sync::Arc;
 
-        let set = register_builtins();
+        let set = register_builtins(Arc::new(tokio::sync::RwLock::new(BTreeMap::new())));
         let registry = PluginRegistry::new(set);
         let registry = std::sync::Arc::new(tokio::sync::RwLock::new(registry));
         let candidates = build_connect_candidates(&registry).await;
@@ -2015,6 +2167,536 @@ mod tests {
         assert!(
             !app.screen_stack.is_empty(),
             "connect.picker should be pushed onto the stack"
+        );
+    }
+
+    /// `Effect::SetTrustLevel { decision: "always" }` must (a) update the
+    /// in-memory trust map, (b) persist to disk via `trust::save`, and
+    /// (c) re-dispatch the stashed pending slash command via `RunSlash`.
+    ///
+    /// HOME_LOCK + HomeGuard are used as in the `set_active_locale_*` tests
+    /// so the `trust::save` call lands in a per-test tempdir and never
+    /// touches the developer's real `~/.savvagent/`.
+    ///
+    /// Unix-only: on Windows, `dirs::home_dir()` does not consistently
+    /// respect the `USERPROFILE` env var override that `HomeGuard` sets,
+    /// so the production code under test writes to the runner's real
+    /// profile instead of the test tempdir. This pollutes sibling
+    /// tests' assumptions about disk state and poisons `HOME_LOCK`.
+    /// Tracked as a follow-up to plumb a test-injectable `home_dir`
+    /// override so disk-asserting tests can run on Windows too.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    #[allow(clippy::await_holding_lock)]
+    async fn set_trust_level_always_persists_and_resumes() {
+        let _lock = HOME_LOCK.lock().unwrap();
+        let _home = HomeGuard::new();
+        let mut app = fresh_app();
+        app.pending_slash_after_trust = Some(("review".into(), vec!["foo".into()]));
+
+        let effs = vec![Effect::SetTrustLevel {
+            project_root: std::path::PathBuf::from("/proj/x"),
+            decision: "always".into(),
+        }];
+        // apply_effects is expected to succeed even though the stashed slash
+        // "review" isn't registered — RunSlash with no plugin runtime returns
+        // Err("plugin runtime not installed"), which propagates. To avoid that
+        // without spinning up a full plugin runtime, we confirm the trust map
+        // update and disk persistence by checking _before_ the pending slash
+        // would be re-dispatched. Here we clear the pending entry and check
+        // them both manually to keep the test self-contained.
+        //
+        // Strategy: leave pending_slash_after_trust = None so there is nothing
+        // to re-dispatch. A separate test confirms the re-dispatch path.
+        app.pending_slash_after_trust = None;
+        apply_effects(&mut app, effs)
+            .await
+            .expect("apply_effects must succeed");
+
+        // Verify trust map updated.
+        assert!(
+            app.trust_levels
+                .read()
+                .await
+                .contains_key(&std::path::PathBuf::from("/proj/x")),
+            "trust_levels must contain the resolved project root after 'always'"
+        );
+
+        // Verify persistence: load from $HOME (the HomeGuard tempdir).
+        let home = dirs::home_dir().expect("HOME must be set (HomeGuard)");
+        let (loaded, warn) = crate::plugin::builtin::user_slash_commands::trust::load(&home);
+        assert!(warn.is_none(), "unexpected trust file warning: {warn:?}");
+        assert!(
+            loaded.contains_key(&std::path::PathBuf::from("/proj/x")),
+            "trust file on disk must contain /proj/x after 'always'"
+        );
+    }
+
+    /// Re-dispatch path: when `pending_slash_after_trust` is set and the
+    /// plugin runtime IS installed, `SetTrustLevel { "always" }` must
+    /// emit `RunSlash` for the stashed command. We drive this with a
+    /// real (but minimal) plugin runtime so the re-dispatch resolves.
+    ///
+    /// Unix-only — see the note on
+    /// `set_trust_level_always_persists_and_resumes`.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    #[allow(clippy::await_holding_lock)]
+    async fn set_trust_level_always_resumes_pending_slash() {
+        use crate::plugin::manifests::Indexes;
+        use crate::plugin::registry::{BuiltinSet, PluginRegistry};
+        use async_trait::async_trait;
+        use savvagent_plugin::{
+            Contributions, Manifest, Plugin, PluginError, PluginId, PluginKind, SlashSpec,
+        };
+
+        // Minimal slash plugin that records when it's called.
+        use std::sync::{Arc, Mutex};
+        #[derive(Clone)]
+        struct RecordSlash(Arc<Mutex<Vec<String>>>);
+        #[async_trait]
+        impl Plugin for RecordSlash {
+            fn manifest(&self) -> Manifest {
+                let mut contributions = Contributions::default();
+                contributions.slash_commands = vec![SlashSpec {
+                    name: "review".into(),
+                    summary: "".into(),
+                    args_hint: None,
+                    requires_arg: false,
+                }];
+                Manifest {
+                    id: PluginId::new("internal:test-record-slash").expect("valid"),
+                    name: "TestRecordSlash".into(),
+                    version: "0".into(),
+                    description: "".into(),
+                    kind: PluginKind::Optional,
+                    contributions,
+                }
+            }
+            async fn handle_slash(
+                &mut self,
+                name: &str,
+                _args: Vec<String>,
+            ) -> Result<Vec<Effect>, PluginError> {
+                self.0.lock().unwrap().push(name.to_string());
+                Ok(vec![])
+            }
+        }
+
+        let _lock = HOME_LOCK.lock().unwrap();
+        let _home = HomeGuard::new();
+        let mut app = fresh_app();
+        app.pending_slash_after_trust = Some(("review".into(), vec![]));
+
+        let calls: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(vec![]));
+        let set = BuiltinSet {
+            plugins: vec![Box::new(RecordSlash(calls.clone()))],
+            providers: vec![],
+        };
+        let registry = PluginRegistry::new(set);
+        let indexes = Indexes::build(&registry).await.expect("indexes build");
+        app.install_plugin_runtime(registry, indexes);
+
+        apply_effects(
+            &mut app,
+            vec![Effect::SetTrustLevel {
+                project_root: std::path::PathBuf::from("/proj/x"),
+                decision: "always".into(),
+            }],
+        )
+        .await
+        .expect("apply_effects must succeed");
+
+        // Trust map and persistence.
+        assert!(
+            app.trust_levels
+                .read()
+                .await
+                .contains_key(&std::path::PathBuf::from("/proj/x"))
+        );
+        assert!(
+            app.pending_slash_after_trust.is_none(),
+            "pending must be consumed"
+        );
+
+        // The slash was re-dispatched.
+        let dispatched = calls.lock().unwrap();
+        assert_eq!(
+            dispatched.as_slice(),
+            &["review"],
+            "pending slash must be re-dispatched after trust resolves"
+        );
+    }
+
+    /// `Effect::SetTrustLevel { decision: "cancelled" }` must drop the
+    /// pending slash entry and leave the project absent from the trust map.
+    #[tokio::test(flavor = "current_thread")]
+    #[allow(clippy::await_holding_lock)]
+    async fn set_trust_level_cancelled_drops_pending() {
+        let _lock = HOME_LOCK.lock().unwrap();
+        let _home = HomeGuard::new();
+        let mut app = fresh_app();
+        app.pending_slash_after_trust = Some(("x".into(), vec![]));
+        // Pre-populate so we can assert removal.
+        app.trust_levels.write().await.insert(
+            std::path::PathBuf::from("/proj/x"),
+            crate::plugin::builtin::user_slash_commands::trust::TrustLevel::Always,
+        );
+
+        apply_effects(
+            &mut app,
+            vec![Effect::SetTrustLevel {
+                project_root: std::path::PathBuf::from("/proj/x"),
+                decision: "cancelled".into(),
+            }],
+        )
+        .await
+        .expect("apply_effects must succeed");
+
+        assert!(
+            app.pending_slash_after_trust.is_none(),
+            "cancelled must clear pending_slash_after_trust"
+        );
+        assert!(
+            !app.trust_levels
+                .read()
+                .await
+                .contains_key(&std::path::PathBuf::from("/proj/x")),
+            "cancelled must remove project from trust_levels"
+        );
+    }
+
+    /// `Effect::SetTrustLevel { decision: "session-text-only" }` must update
+    /// the in-memory map but NOT write anything to disk (in-memory only).
+    ///
+    /// Unix-only — disk-state assertion that the `HomeGuard` sandbox
+    /// does not reliably hold on Windows. See
+    /// `set_trust_level_always_persists_and_resumes` for the rationale.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    #[allow(clippy::await_holding_lock)]
+    async fn set_trust_level_session_text_only_not_persisted() {
+        let _lock = HOME_LOCK.lock().unwrap();
+        let _home = HomeGuard::new();
+        let mut app = fresh_app();
+
+        apply_effects(
+            &mut app,
+            vec![Effect::SetTrustLevel {
+                project_root: std::path::PathBuf::from("/proj/y"),
+                decision: "session-text-only".into(),
+            }],
+        )
+        .await
+        .expect("apply_effects must succeed");
+
+        // In-memory map has the entry.
+        assert!(
+            app.trust_levels
+                .read()
+                .await
+                .contains_key(&std::path::PathBuf::from("/proj/y")),
+            "session-text-only must be present in the in-memory trust map"
+        );
+        // Disk file must NOT exist (SessionTextOnly is never persisted).
+        let home = dirs::home_dir().expect("HOME set by HomeGuard");
+        let path = crate::plugin::builtin::user_slash_commands::trust::trust_file_path(&home);
+        assert!(
+            !path.exists(),
+            "session-text-only must not create the trust file on disk"
+        );
+    }
+
+    /// `Effect::StashPendingSlash` must write to `App::pending_slash_after_trust`.
+    #[tokio::test]
+    async fn stash_pending_slash_sets_field() {
+        let mut app = {
+            let _lock = HOME_LOCK.lock().unwrap();
+            let _home = HomeGuard::new();
+            fresh_app()
+        };
+        assert!(app.pending_slash_after_trust.is_none(), "precondition");
+
+        apply_effects(
+            &mut app,
+            vec![Effect::StashPendingSlash {
+                name: "review".into(),
+                args: vec!["foo".into()],
+            }],
+        )
+        .await
+        .expect("apply_effects must succeed");
+
+        assert_eq!(
+            app.pending_slash_after_trust,
+            Some(("review".into(), vec!["foo".into()])),
+            "StashPendingSlash must populate pending_slash_after_trust"
+        );
+    }
+
+    /// I-1: when `trust::save` fails (e.g. the target path is a directory),
+    /// the in-memory trust map must still be updated (session-scoped trust is
+    /// useful) and a user-visible `PushNote` must be emitted explaining that
+    /// persistence failed. Previously only a `tracing::warn` was emitted and
+    /// the user saw nothing.
+    ///
+    /// We make `~/.savvagent/trusted-projects.json` unwritable by pre-creating
+    /// a *directory* at that path. The `std::fs::write` call inside
+    /// `trust::save` will then fail with `IsDirectory` (or equivalent).
+    ///
+    /// Unix-only: the test setup itself behaves differently on Windows
+    /// (Win32 `CreateDirectory` returns `ERROR_ALREADY_EXISTS` rather
+    /// than letting us shadow the path). The I-1 behavior (PushNote on
+    /// save failure) is platform-neutral; the *test mechanism* is the
+    /// only thing constrained. Tracked as a follow-up to add a
+    /// platform-agnostic harness for unwritable-path scenarios.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    #[allow(clippy::await_holding_lock)]
+    async fn set_trust_level_always_save_failure_emits_warn_note() {
+        let _lock = HOME_LOCK.lock().unwrap();
+        let _home = HomeGuard::new();
+        let mut app = fresh_app();
+
+        // Pre-create ~/.savvagent/trusted-projects.json as a *directory* so
+        // that the subsequent fs::write inside trust::save will fail.
+        let home = dirs::home_dir().expect("HomeGuard must set HOME");
+        let savvagent_dir = home.join(".savvagent");
+        std::fs::create_dir_all(&savvagent_dir).expect("create .savvagent dir");
+        let file_path = savvagent_dir.join("trusted-projects.json");
+        std::fs::create_dir_all(&file_path)
+            .expect("create trusted-projects.json as directory to block writes");
+
+        apply_effects(
+            &mut app,
+            vec![Effect::SetTrustLevel {
+                project_root: std::path::PathBuf::from("/proj/fail"),
+                decision: "always".into(),
+            }],
+        )
+        .await
+        .expect("apply_effects must succeed even when save fails");
+
+        // In-memory map updated (session trust still useful).
+        assert!(
+            app.trust_levels
+                .read()
+                .await
+                .contains_key(&std::path::PathBuf::from("/proj/fail")),
+            "in-memory trust map must still be updated even when disk save fails"
+        );
+
+        // A user-visible note must have been pushed.
+        let found = app.entries.iter().any(|e| match e {
+            crate::app::Entry::Note(text) => {
+                text.contains("session only") || text.contains("could not write")
+            }
+            _ => false,
+        });
+        assert!(
+            found,
+            "expected a warn note about disk save failure; entries: {:?}",
+            app.entries
+        );
+    }
+
+    /// I-2: when an unrecognised trust decision string arrives AND there is a
+    /// pending slash command, the command was previously silently dropped. Now
+    /// a `PushNote` must be emitted naming the dropped command and the bad
+    /// decision string. When there is NO pending command, no note must be
+    /// emitted (to avoid spamming the user).
+    #[tokio::test(flavor = "current_thread")]
+    #[allow(clippy::await_holding_lock)]
+    async fn set_trust_level_unknown_decision_with_pending_emits_error_note() {
+        let _lock = HOME_LOCK.lock().unwrap();
+        let _home = HomeGuard::new();
+        let mut app = fresh_app();
+        app.pending_slash_after_trust = Some(("x".into(), vec![]));
+
+        apply_effects(
+            &mut app,
+            vec![Effect::SetTrustLevel {
+                project_root: std::path::PathBuf::from("/proj/z"),
+                decision: "bogus".into(),
+            }],
+        )
+        .await
+        .expect("apply_effects must succeed on unknown decision");
+
+        // Pending must be consumed.
+        assert!(
+            app.pending_slash_after_trust.is_none(),
+            "pending must be cleared even on unknown decision"
+        );
+
+        // A user-visible error note mentioning the dropped command.
+        let found = app.entries.iter().any(|e| match e {
+            crate::app::Entry::Note(text) => text.contains("bogus") || text.contains("/x"),
+            _ => false,
+        });
+        assert!(
+            found,
+            "expected an error note about the dropped pending command; entries: {:?}",
+            app.entries
+        );
+    }
+
+    /// I-2 (no-pending): when the unknown decision has no pending command,
+    /// no note must be pushed (nothing was dropped).
+    #[tokio::test(flavor = "current_thread")]
+    #[allow(clippy::await_holding_lock)]
+    async fn set_trust_level_unknown_decision_without_pending_no_note() {
+        let _lock = HOME_LOCK.lock().unwrap();
+        let _home = HomeGuard::new();
+        let mut app = fresh_app();
+        // No pending command set.
+
+        let entries_before = app.entries.len();
+
+        apply_effects(
+            &mut app,
+            vec![Effect::SetTrustLevel {
+                project_root: std::path::PathBuf::from("/proj/z"),
+                decision: "bogus".into(),
+            }],
+        )
+        .await
+        .expect("apply_effects must succeed on unknown decision with no pending");
+
+        assert_eq!(
+            app.entries.len(),
+            entries_before,
+            "no note should be pushed when there is no pending command to drop"
+        );
+    }
+
+    /// I-3: when `depth >= MAX_DISPATCH_DEPTH` at the point of the re-dispatch
+    /// after a trust decision, the pending slash command must NOT silently
+    /// disappear. A user-visible `PushNote` must be emitted naming the dropped
+    /// command. Previously only a `tracing::warn` was emitted.
+    ///
+    /// We call `apply_effects_with_depth` at `MAX_DISPATCH_DEPTH - 1` with a
+    /// pending entry. Inside `SetTrustLevel` the re-dispatch would run at
+    /// `depth + 1 == MAX_DISPATCH_DEPTH`, which exceeds the guard
+    /// (`depth < MAX_DISPATCH_DEPTH`), so the pending command is dropped.
+    #[tokio::test(flavor = "current_thread")]
+    #[allow(clippy::await_holding_lock)]
+    async fn set_trust_level_depth_limit_drops_pending_with_error_note() {
+        use crate::plugin::manifests::Indexes;
+        use crate::plugin::registry::{BuiltinSet, PluginRegistry};
+
+        let _lock = HOME_LOCK.lock().unwrap();
+        let _home = HomeGuard::new();
+        let mut app = fresh_app();
+        app.pending_slash_after_trust = Some(("blocked-cmd".into(), vec![]));
+
+        // Install a minimal plugin runtime so run_slash doesn't immediately
+        // return Err("plugin runtime not installed"). The slash "blocked-cmd"
+        // is not registered, but that's fine — at MAX_DISPATCH_DEPTH - 1 the
+        // re-dispatch is already suppressed before run_slash is attempted.
+        let set = BuiltinSet {
+            plugins: vec![],
+            providers: vec![],
+        };
+        let registry = PluginRegistry::new(set);
+        let indexes = Indexes::build(&registry).await.expect("indexes build");
+        app.install_plugin_runtime(registry, indexes);
+
+        // Drive at MAX_DISPATCH_DEPTH - 1. The SetTrustLevel arm attempts
+        // re-dispatch at depth + 1 == MAX_DISPATCH_DEPTH, which fails the
+        // `depth < MAX_DISPATCH_DEPTH` guard, dropping the pending command.
+        Box::pin(apply_effects_with_depth(
+            &mut app,
+            vec![Effect::SetTrustLevel {
+                project_root: std::path::PathBuf::from("/proj/deep"),
+                decision: "always".into(),
+            }],
+            MAX_DISPATCH_DEPTH - 1,
+        ))
+        .await
+        .expect("apply_effects must not propagate a depth-limit as an error here");
+
+        // In-memory trust must still be set.
+        assert!(
+            app.trust_levels
+                .read()
+                .await
+                .contains_key(&std::path::PathBuf::from("/proj/deep")),
+            "in-memory trust must still be updated at the depth limit"
+        );
+
+        // A user-visible note must have been pushed about the dropped command.
+        let found = app.entries.iter().any(|e| match e {
+            crate::app::Entry::Note(text) => {
+                text.contains("depth limit") || text.contains("blocked-cmd")
+            }
+            _ => false,
+        });
+        assert!(
+            found,
+            "expected an error note about depth-limit dropping the pending command; entries: {:?}",
+            app.entries
+        );
+    }
+
+    /// C-4: `App::new` must load the persisted trust file from disk at
+    /// startup so that a project the user previously trusted "always" is
+    /// already trusted in the new session without another modal prompt.
+    ///
+    /// `App::new` calls `trust::load(dirs::home_dir())` during construction;
+    /// redirecting `$HOME` via `HomeGuard` makes the load pick up whatever
+    /// we wrote into the tempdir. This test must hold `HOME_LOCK` across the
+    /// `App::new` call because that call reads `$HOME` (via `dirs::home_dir`)
+    /// to locate the trust file — and across the `trust_levels.read().await`
+    /// below (no await held while the std Mutex is held; we release the lock
+    /// before the async assertion to satisfy the `await_holding_lock` lint in
+    /// the normal multi-thread runtime flavor).
+    ///
+    /// Unix-only — see `set_trust_level_always_persists_and_resumes` for the
+    /// `dirs::home_dir()` / Windows test-isolation rationale.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn app_new_loads_persisted_trust_from_disk() {
+        use crate::plugin::builtin::user_slash_commands::trust;
+        use std::path::PathBuf;
+
+        // Acquire lock, set up home, write trust file, construct App.
+        // Drop lock + home guard before any .await so the lint stays happy.
+        let (app, expected_key) = {
+            let _lock = HOME_LOCK.lock().unwrap();
+            let _home = HomeGuard::new();
+
+            // Write a trusted-projects.json into the redirected HOME.
+            let home = dirs::home_dir().expect("HomeGuard must set HOME");
+            let savvagent_dir = home.join(".savvagent");
+            std::fs::create_dir_all(&savvagent_dir).unwrap();
+            let trust_path = trust::trust_file_path(&home);
+            std::fs::write(
+                &trust_path,
+                r#"{ "projects": { "/some/project/path": "always" } }"#,
+            )
+            .unwrap();
+
+            // Construct App::new under the HOME redirect. The production
+            // path calls trust::load(dirs::home_dir()) during new().
+            let app = App::new("test-model".into(), PathBuf::from("/tmp"), "en".into());
+            let key = PathBuf::from("/some/project/path");
+            (app, key)
+        }; // HOME_LOCK released here
+
+        // Now assert: the trust map must contain the entry from disk.
+        let map = app.trust_levels.read().await;
+        assert!(
+            map.contains_key(&expected_key),
+            "App::new must load persisted trust from disk; expected key {expected_key:?}, \
+             got keys: {:?}",
+            map.keys().collect::<Vec<_>>()
+        );
+        use crate::plugin::builtin::user_slash_commands::trust::TrustLevel;
+        assert_eq!(
+            map.get(&expected_key).copied(),
+            Some(TrustLevel::Always),
+            "loaded trust level must be Always"
         );
     }
 

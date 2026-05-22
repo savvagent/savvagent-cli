@@ -212,6 +212,89 @@ impl Indexes {
         }
         idx.tool_summaries.insert(tool_name, pid.clone());
     }
+
+    /// Re-read `plugin_id`'s manifest and rebuild every derived index entry it
+    /// owns. All other plugins' contributions are untouched. Used by
+    /// `/reload-commands` (via `Effect::ReindexPlugin`).
+    ///
+    /// The method is infallible by design: if the refreshed manifest would
+    /// introduce a slash/screen/keybinding conflict with another plugin's
+    /// already-registered contribution, the conflicting new entry is skipped
+    /// and logged at `warn!` level rather than returning an error. This keeps
+    /// the indexes coherent even when a user edits a command file to use a
+    /// taken name — `/reload-commands` will note the conflict and leave the
+    /// existing winner's entry in place.
+    pub async fn reindex_plugin(
+        &mut self,
+        plugin_id: &savvagent_plugin::PluginId,
+        registry: &crate::plugin::registry::PluginRegistry,
+    ) {
+        // Step 1: remove all entries currently owned by plugin_id.
+        self.slash.retain(|_, owner| owner != plugin_id);
+        self.screens.retain(|_, owner| owner != plugin_id);
+        self.tool_summaries.retain(|_, owner| owner != plugin_id);
+
+        // hooks: retain entries in each vec that don't belong to plugin_id;
+        // drop the whole key if the vec becomes empty.
+        self.hooks.retain(|_, subscribers| {
+            subscribers.retain(|id| id != plugin_id);
+            !subscribers.is_empty()
+        });
+
+        // slots: retain slot entries whose owner != plugin_id; drop empty slot keys.
+        self.slots.retain(|_, contributors| {
+            contributors.retain(|(_, id)| id != plugin_id);
+            !contributors.is_empty()
+        });
+
+        // keybindings: retain entries whose owning plugin != plugin_id.
+        self.keybindings
+            .retain(|_, (owner, _action)| owner != plugin_id);
+
+        // Step 2: re-insert from the plugin's fresh manifest.
+        let Some(handle) = registry.get(plugin_id) else {
+            tracing::warn!(
+                plugin_id = %plugin_id.as_str(),
+                "reindex_plugin: plugin_id not present in registry; removal completed but no re-insert"
+            );
+            return;
+        };
+        let manifest = {
+            let plugin = handle.lock().await;
+            plugin.manifest()
+        };
+        let pid = manifest.id.clone();
+
+        for s in manifest.contributions.slash_commands {
+            if let Err(e) = Self::insert_slash(self, s, &pid) {
+                tracing::warn!(error = %e, "reindex_plugin: slash conflict skipped");
+            }
+        }
+        for s in manifest.contributions.screens {
+            if let Err(e) = Self::insert_screen(self, s, &pid) {
+                tracing::warn!(error = %e, "reindex_plugin: screen conflict skipped");
+            }
+        }
+        for s in manifest.contributions.slots {
+            Self::insert_slot(self, s, &pid);
+        }
+        for h in manifest.contributions.hooks {
+            self.hooks.entry(h).or_default().push(pid.clone());
+        }
+        for k in manifest.contributions.keybindings {
+            if let Err(e) = Self::insert_keybinding(self, k, &pid) {
+                tracing::warn!(error = %e, "reindex_plugin: keybinding conflict skipped");
+            }
+        }
+        for s in manifest.contributions.tool_summaries {
+            Self::insert_tool_summary(self, s, &pid);
+        }
+
+        // Re-sort each slot's contributors by priority ascending (mirrors build).
+        for v in self.slots.values_mut() {
+            v.sort_by_key(|(p, _)| *p);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -366,6 +449,48 @@ mod tests {
         let tips = idx.slots.get("home.tips").unwrap();
         assert_eq!(tips[0].0, 100);
         assert_eq!(tips[1].0, 200);
+    }
+
+    /// `reindex_plugin` idempotency: build with two plugins (A contributes
+    /// `cmd-a`, B contributes `cmd-b`), then call `reindex_plugin` for A.
+    /// After the call:
+    /// - A's slash entry must still be present (removed then re-inserted).
+    /// - B's slash entry must be untouched.
+    /// - The total slash index size is unchanged.
+    #[tokio::test]
+    async fn reindex_plugin_is_idempotent_and_preserves_other_plugin() {
+        let reg = PluginRegistry::from_plugins(vec![
+            Box::new(WithSlash("test:a".into(), "cmd-a".into())),
+            Box::new(WithSlash("test:b".into(), "cmd-b".into())),
+        ]);
+        let mut idx = Indexes::build(&reg).await.unwrap();
+
+        // Pre-conditions.
+        assert_eq!(idx.slash.len(), 2);
+        let pid_a = PluginId::new("test:a").unwrap();
+        let pid_b = PluginId::new("test:b").unwrap();
+        assert_eq!(idx.slash.get("cmd-a"), Some(&pid_a));
+        assert_eq!(idx.slash.get("cmd-b"), Some(&pid_b));
+
+        // Reindex A.
+        idx.reindex_plugin(&pid_a, &reg).await;
+
+        // Post-conditions: both entries still present, owners correct.
+        assert_eq!(
+            idx.slash.len(),
+            2,
+            "reindex must not alter total slash entry count"
+        );
+        assert_eq!(
+            idx.slash.get("cmd-a"),
+            Some(&pid_a),
+            "A's slash entry must survive reindex"
+        );
+        assert_eq!(
+            idx.slash.get("cmd-b"),
+            Some(&pid_b),
+            "B's slash entry must not be disturbed by reindexing A"
+        );
     }
 }
 

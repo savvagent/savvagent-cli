@@ -134,6 +134,51 @@ pub enum Effect {
     /// Useful for `vec![SetActiveTheme{..}, CloseScreen]`-style sequences from
     /// a single handler.
     Stack(Vec<Effect>),
+    /// Override the model used by the next *single* turn submitted via
+    /// [`Effect::PromptSend`]. Cleared after the turn completes. Used by
+    /// user-defined slash commands whose frontmatter contains `model:`.
+    SetNextTurnModelOverride {
+        /// Bare model id (e.g. `"claude-sonnet-4-6"`). Applied directly
+        /// to the host via `Host::set_model` before the turn starts; no
+        /// pre-flight catalog validation is performed. The provider may
+        /// reject an unknown id during the turn, surfaced as the turn's
+        /// normal failure mode. After the turn the prior model is
+        /// restored.
+        id: String,
+    },
+    /// Result of a trust prompt. Emitted by the trust modal screen and
+    /// consumed by the runtime to update the in-memory trust map (and
+    /// to persist `"always"` decisions to
+    /// `~/.savvagent/trusted-projects.json`). When applied, the runtime
+    /// resumes the slash command that triggered the prompt (stored on
+    /// `App::pending_slash_after_trust`).
+    SetTrustLevel {
+        /// Canonical project root path the decision applies to.
+        project_root: std::path::PathBuf,
+        /// User's choice: `"always"`, `"session-text-only"`, or
+        /// `"cancelled"`. Kept as a string to avoid pulling the runtime's
+        /// `TrustLevel` enum into the WIT-portable surface.
+        decision: String,
+    },
+    /// Re-call `Plugin::manifest()` for the named plugin and rebuild
+    /// the derived manifest indexes (slash commands, render slots,
+    /// hooks, keybindings, screens, tool_summaries) from the updated
+    /// bundle. Used by `/reload-commands`.
+    ReindexPlugin {
+        /// Plugin whose manifest should be re-read.
+        id: crate::types::PluginId,
+    },
+    /// Stash `(name, args)` on `App::pending_slash_after_trust` so a
+    /// trust modal can resume the dispatch after it resolves. Emitted
+    /// by `internal:user-slash-commands` before opening the trust
+    /// modal; consumed by `apply_effects` together with
+    /// `Effect::OpenScreen`.
+    StashPendingSlash {
+        /// Slash command name (no leading `/`).
+        name: String,
+        /// Positional arguments collected with the slash invocation.
+        args: Vec<String>,
+    },
 }
 
 /// The right-hand side of a [`crate::manifest::KeybindingSpec`]: either invoke a
@@ -248,5 +293,30 @@ mod tests {
     #[test]
     fn show_routing_rules_constructs() {
         let _ = Effect::ShowRoutingRules;
+    }
+}
+
+#[cfg(test)]
+mod added_effects_smoke {
+    use super::*;
+    use crate::types::PluginId;
+    use std::path::PathBuf;
+
+    #[test]
+    fn variants_constructable() {
+        let _ = Effect::SetNextTurnModelOverride {
+            id: "claude-sonnet-4-6".into(),
+        };
+        let _ = Effect::SetTrustLevel {
+            project_root: PathBuf::from("/proj"),
+            decision: "always".into(),
+        };
+        let _ = Effect::ReindexPlugin {
+            id: PluginId::new("internal:user-slash-commands").unwrap(),
+        };
+        let _ = Effect::StashPendingSlash {
+            name: "review".into(),
+            args: vec!["HEAD".into()],
+        };
     }
 }
