@@ -99,13 +99,12 @@ impl Screen for LspPickerScreen {
                 if items.is_empty() {
                     return Ok(vec![Effect::CloseScreen]);
                 }
-                let mut args = vec!["__install".to_string()];
-                args.extend(items.iter().map(|e| e.id.to_string()));
+                let entry_ids: Vec<String> = items.iter().map(|e| e.id.to_string()).collect();
                 Ok(vec![Effect::Stack(vec![
                     Effect::CloseScreen,
-                    Effect::RunSlash {
-                        name: "lsp".into(),
-                        args,
+                    Effect::OpenScreen {
+                        id: "lsp_installer.progress".into(),
+                        args: savvagent_plugin::ScreenArgs::LspInstallProgress { entry_ids },
                     },
                 ])])
             }
@@ -170,7 +169,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn enter_with_one_selection_emits_runslash_install() {
+    async fn enter_with_one_selection_emits_openscreen_progress() {
         let mut s = LspPickerScreen::new();
         s.on_key(key(KeyCodePortable::Char(' '))).await.unwrap();
         let effs = s.on_key(key(KeyCodePortable::Enter)).await.unwrap();
@@ -178,12 +177,16 @@ mod tests {
             [Effect::Stack(children)] => {
                 assert!(matches!(children[0], Effect::CloseScreen));
                 match &children[1] {
-                    Effect::RunSlash { name, args } => {
-                        assert_eq!(name, "lsp");
-                        assert_eq!(args[0], "__install");
-                        assert_eq!(args.len(), 2, "exactly one id appended");
+                    Effect::OpenScreen { id, args } => {
+                        assert_eq!(id, "lsp_installer.progress");
+                        match args {
+                            savvagent_plugin::ScreenArgs::LspInstallProgress { entry_ids } => {
+                                assert_eq!(entry_ids.len(), 1, "exactly one id");
+                            }
+                            other => panic!("expected LspInstallProgress args, got {other:?}"),
+                        }
                     }
-                    other => panic!("expected RunSlash, got {other:?}"),
+                    other => panic!("expected OpenScreen, got {other:?}"),
                 }
             }
             other => panic!("expected single Stack, got {other:?}"),

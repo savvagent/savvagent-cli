@@ -8,6 +8,8 @@ pub mod catalog;
 pub mod config_writer;
 pub mod installer;
 pub mod picker;
+pub mod progress;
+pub mod progress_screen;
 pub mod screen;
 
 use async_trait::async_trait;
@@ -47,14 +49,24 @@ impl Plugin for LspInstallerPlugin {
             args_hint: None,
             requires_arg: false,
         }];
-        contributions.screens = vec![ScreenSpec {
-            id: "lsp_installer.picker".into(),
-            layout: ScreenLayout::CenteredModal {
-                width_pct: 80,
-                height_pct: 80,
-                title: Some("Install language servers".into()),
+        contributions.screens = vec![
+            ScreenSpec {
+                id: "lsp_installer.picker".into(),
+                layout: ScreenLayout::CenteredModal {
+                    width_pct: 80,
+                    height_pct: 80,
+                    title: Some("Install language servers".into()),
+                },
             },
-        }];
+            ScreenSpec {
+                id: "lsp_installer.progress".into(),
+                layout: ScreenLayout::CenteredModal {
+                    width_pct: 70,
+                    height_pct: 60,
+                    title: Some("Installing language servers".into()),
+                },
+            },
+        ];
 
         Manifest {
             id: PluginId::new(PLUGIN_ID).expect("valid built-in id"),
@@ -88,9 +100,24 @@ impl Plugin for LspInstallerPlugin {
         }
     }
 
-    fn create_screen(&self, id: &str, _args: ScreenArgs) -> Result<Box<dyn Screen>, PluginError> {
+    fn create_screen(&self, id: &str, args: ScreenArgs) -> Result<Box<dyn Screen>, PluginError> {
         match id {
             "lsp_installer.picker" => Ok(Box::new(LspPickerScreen::new())),
+            "lsp_installer.progress" => {
+                let entry_ids = match args {
+                    ScreenArgs::LspInstallProgress { entry_ids } => entry_ids,
+                    other => {
+                        return Err(PluginError::ScreenNotFound(format!(
+                            "lsp_installer.progress: expected ScreenArgs::LspInstallProgress, got {other:?}"
+                        )));
+                    }
+                };
+                Ok(Box::new(
+                    crate::plugin::builtin::lsp_installer::progress_screen::LspProgressScreen::new(
+                        entry_ids,
+                    ),
+                ))
+            }
             other => Err(PluginError::ScreenNotFound(other.into())),
         }
     }
@@ -327,5 +354,48 @@ mod tests {
                 .iter()
                 .any(|s| s.id == "lsp_installer.picker")
         );
+    }
+
+    #[test]
+    fn manifest_advertises_progress_screen() {
+        let p = LspInstallerPlugin::new();
+        let m = p.manifest();
+        assert!(
+            m.contributions
+                .screens
+                .iter()
+                .any(|s| s.id == "lsp_installer.progress"),
+            "manifest must list the progress screen, got {:?}",
+            m.contributions.screens
+        );
+    }
+
+    #[test]
+    fn create_screen_returns_progress_screen() {
+        use savvagent_plugin::ScreenArgs;
+        let p = LspInstallerPlugin::new();
+        let screen = p
+            .create_screen(
+                "lsp_installer.progress",
+                ScreenArgs::LspInstallProgress { entry_ids: vec![] },
+            )
+            .expect("create_screen must accept the progress id");
+        assert_eq!(screen.id(), "lsp_installer.progress");
+    }
+
+    #[test]
+    fn create_screen_rejects_wrong_args_variant() {
+        use savvagent_plugin::ScreenArgs;
+        let p = LspInstallerPlugin::new();
+        match p.create_screen("lsp_installer.progress", ScreenArgs::None) {
+            Err(err) => {
+                let msg = format!("{err:?}");
+                assert!(
+                    msg.contains("LspInstallProgress"),
+                    "error must name the expected variant, got {msg}"
+                );
+            }
+            Ok(_) => panic!("None args must be rejected"),
+        }
     }
 }

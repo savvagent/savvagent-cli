@@ -295,6 +295,15 @@ pub enum ScreenArgs {
         /// Provider ids that have stored keyring credentials.
         detected: Vec<ProviderId>,
     },
+    /// Open the LSP-installer progress modal with the given catalog ids.
+    /// Emitted by the picker's `Confirm` outcome; the screen owns the
+    /// per-id install state and the spawned driver task.
+    LspInstallProgress {
+        /// Catalog ids the picker confirmed (e.g. `"rust-analyzer"`,
+        /// `"pyright"`). Unknown ids surface as `Failed` entries inside
+        /// the screen so a typo in the picker doesn't disappear silently.
+        entry_ids: Vec<String>,
+    },
 }
 
 impl ScreenArgs {
@@ -323,6 +332,7 @@ impl ScreenArgs {
             ScreenArgs::ModelPicker { .. } => Some("model.picker"),
             ScreenArgs::Changelog => Some("changelog"),
             ScreenArgs::MigrationPicker { .. } => Some("migration.picker"),
+            ScreenArgs::LspInstallProgress { .. } => Some("lsp_installer.progress"),
         }
     }
 }
@@ -500,6 +510,25 @@ mod tests {
             }],
         };
         assert_eq!(args.screen_id(), Some("model.picker"));
+    }
+
+    #[test]
+    fn lsp_install_progress_carries_entry_ids() {
+        let args = ScreenArgs::LspInstallProgress {
+            entry_ids: vec!["rust-analyzer".into(), "pyright".into()],
+        };
+        match args {
+            ScreenArgs::LspInstallProgress { entry_ids } => {
+                assert_eq!(entry_ids, vec!["rust-analyzer", "pyright"]);
+            }
+            _ => panic!("expected LspInstallProgress"),
+        }
+    }
+
+    #[test]
+    fn lsp_install_progress_screen_id_is_lsp_installer_progress() {
+        let args = ScreenArgs::LspInstallProgress { entry_ids: vec![] };
+        assert_eq!(args.screen_id(), Some("lsp_installer.progress"));
     }
 
     #[test]
