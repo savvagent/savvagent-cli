@@ -7,7 +7,46 @@ use savvagent_mcp::ProviderClient;
 use savvagent_plugin::{Plugin, PluginId};
 use tokio::sync::Mutex;
 
-use crate::plugin::builtin::provider_common::{BuiltinProviderPlugin, ProviderEntry};
+use crate::plugin::builtin::provider_common::{
+    BuiltinHookPlugin, BuiltinProviderPlugin, ProviderEntry,
+};
+
+/// One hook-plugin entry. The dual-Arc pattern mirrors [`ProviderEntry`]
+/// so both the `Plugin` view (for `register_builtins`' plugin list) and
+/// the `BuiltinHookPlugin` view (for the `RegisterPreToolGate` effect
+/// apply path) share the same instance.
+pub(crate) struct HookEntry {
+    /// Plugin-trait view used in the registry's slash/render/hook dispatch.
+    pub as_plugin: Arc<Mutex<dyn Plugin>>,
+    /// Hook-trait view used by the `RegisterPreToolGate` effect handler
+    /// to call `take_pre_tool_gate`.
+    pub as_hook: Arc<Mutex<dyn BuiltinHookPlugin>>,
+    /// Plugin id (cached from `manifest()`).
+    pub id: PluginId,
+}
+
+impl HookEntry {
+    /// Build a [`HookEntry`] from a concrete hook-plugin type. The two
+    /// `Arc`s point at the same allocation; mutations via either view
+    /// are observed by the other.
+    pub fn new<T>(concrete: T) -> Self
+    where
+        T: BuiltinHookPlugin + 'static,
+    {
+        let arc: Arc<Mutex<T>> = Arc::new(Mutex::new(concrete));
+        let id = {
+            let g = arc.try_lock().expect("constructor not contended");
+            g.manifest().id.clone()
+        };
+        let as_plugin: Arc<Mutex<dyn Plugin>> = arc.clone();
+        let as_hook: Arc<Mutex<dyn BuiltinHookPlugin>> = arc;
+        Self {
+            as_plugin,
+            as_hook,
+            id,
+        }
+    }
+}
 
 /// Plugin instances + provider-plugin parallel map handed to
 /// [`PluginRegistry::new`].
@@ -25,6 +64,12 @@ pub(crate) struct BuiltinSet {
     pub plugins: Vec<Box<dyn Plugin>>,
     /// Provider plugins with their dual trait-object views.
     pub providers: Vec<ProviderEntry>,
+    /// Hook-plugin entries (parallel to `providers`). Each entry's
+    /// `as_plugin` view also appears in the `plugins` Vec; the dual-Arc
+    /// pattern ensures they reference the same instance.
+    ///
+    /// Populated by B-T20/B-T21; initially empty.
+    pub hook_entries: Vec<HookEntry>,
 }
 
 /// Stores plugin instances behind `Arc<Mutex<dyn Plugin>>` keyed by
@@ -34,9 +79,14 @@ pub(crate) struct BuiltinSet {
 /// Both maps reference the **same** underlying `Arc<Mutex<T>>` for each
 /// provider plugin via [`ProviderEntry`], so mutations made through one
 /// view are visible to the other.
+///
+/// Hook plugins are indexed by a third parallel map keyed by [`PluginId`]
+/// so the `RegisterPreToolGate` effect handler can call
+/// `take_pre_tool_gate` without downcasting.
 pub struct PluginRegistry {
     plugins: HashMap<PluginId, Arc<Mutex<dyn Plugin>>>,
     providers: HashMap<PluginId, Arc<Mutex<dyn BuiltinProviderPlugin>>>,
+    hooks: HashMap<PluginId, Arc<Mutex<dyn BuiltinHookPlugin>>>,
     enabled: HashSet<PluginId>,
 }
 
@@ -50,18 +100,25 @@ impl PluginRegistry {
         Self::new(BuiltinSet {
             plugins,
             providers: vec![],
+            hook_entries: vec![],
         })
     }
 
     /// Construct from a [`BuiltinSet`]. Every plugin is inserted into the
     /// registry and added to the enabled set; every provider plugin is
-    /// additionally indexed in the parallel provider map. The enabled
+    /// additionally indexed in the parallel provider map; every hook plugin
+    /// is additionally indexed in the parallel hooks map. The enabled
     /// set is rewound at startup by reading `plugins.toml` (PR 8).
     pub(crate) fn new(set: BuiltinSet) -> Self {
-        let BuiltinSet { plugins, providers } = set;
+        let BuiltinSet {
+            plugins,
+            providers,
+            hook_entries,
+        } = set;
         let mut map: HashMap<PluginId, Arc<Mutex<dyn Plugin>>> =
-            HashMap::with_capacity(plugins.len() + providers.len());
-        let mut enabled = HashSet::with_capacity(plugins.len() + providers.len());
+            HashMap::with_capacity(plugins.len() + providers.len() + hook_entries.len());
+        let mut enabled =
+            HashSet::with_capacity(plugins.len() + providers.len() + hook_entries.len());
         for p in plugins {
             let id = p.manifest().id.clone();
             enabled.insert(id.clone());
@@ -89,9 +146,19 @@ impl PluginRegistry {
             map.insert(id.clone(), entry.as_plugin.clone());
             provider_map.insert(id, entry.as_provider);
         }
+        let mut hook_map: HashMap<PluginId, Arc<Mutex<dyn BuiltinHookPlugin>>> =
+            HashMap::with_capacity(hook_entries.len());
+        for entry in hook_entries {
+            // `entry.id` was cached at construction time (uncontended try_lock
+            // in HookEntry::new); no need to re-lock here.
+            enabled.insert(entry.id.clone());
+            map.insert(entry.id.clone(), entry.as_plugin.clone());
+            hook_map.insert(entry.id, entry.as_hook);
+        }
         Self {
             plugins: map,
             providers: provider_map,
+            hooks: hook_map,
             enabled,
         }
     }
@@ -164,6 +231,20 @@ impl PluginRegistry {
         let handle = self.providers.get(id)?.clone();
         let mut guard = handle.lock().await;
         guard.take_client()
+    }
+
+    /// Returns the hook-plugin handle for `id`, or `None` if no hook plugin
+    /// with that id is registered. Called by the `RegisterPreToolGate` effect
+    /// handler to retrieve the `Arc<Mutex<dyn BuiltinHookPlugin>>` so it can
+    /// call `take_pre_tool_gate`.
+    pub fn get_hook(&self, id: &PluginId) -> Option<Arc<Mutex<dyn BuiltinHookPlugin>>> {
+        self.hooks.get(id).cloned()
+    }
+
+    /// Returns the number of registered hook plugins.
+    #[cfg(test)]
+    pub(crate) fn hook_count(&self) -> usize {
+        self.hooks.len()
     }
 }
 
@@ -275,5 +356,65 @@ mod tests {
         assert!(reg.is_enabled(&id));
         reg.set_enabled(&id, false);
         assert!(!reg.is_enabled(&id));
+    }
+}
+
+#[cfg(test)]
+mod hook_entry_tests {
+    use super::*;
+    use async_trait::async_trait;
+    use savvagent_plugin::{Contributions, Manifest, PluginId, PluginKind};
+
+    struct StubHookPlugin;
+
+    #[async_trait]
+    impl Plugin for StubHookPlugin {
+        fn manifest(&self) -> Manifest {
+            Manifest {
+                id: PluginId::new("internal:hook-stub").unwrap(),
+                name: "stub".into(),
+                version: "0".into(),
+                description: "stub".into(),
+                kind: PluginKind::Core,
+                contributions: Contributions::default(),
+            }
+        }
+    }
+
+    impl BuiltinHookPlugin for StubHookPlugin {
+        fn take_pre_tool_gate(
+            &mut self,
+        ) -> Option<std::sync::Arc<dyn savvagent_host::PreToolUseGate>> {
+            None
+        }
+    }
+
+    #[test]
+    fn hook_entry_dual_arc_shares_allocation() {
+        let entry = HookEntry::new(StubHookPlugin);
+        // Both Arcs should be the same strong count after construction.
+        // (We hold two clones of the same Arc.)
+        let p_count = std::sync::Arc::strong_count(&entry.as_plugin);
+        let h_count = std::sync::Arc::strong_count(&entry.as_hook);
+        assert_eq!(p_count, h_count);
+        assert_eq!(p_count, 2);
+        assert_eq!(entry.id.as_str(), "internal:hook-stub");
+    }
+
+    #[test]
+    fn registry_indexes_hook_entry() {
+        let entry = HookEntry::new(StubHookPlugin);
+        let id = entry.id.clone();
+        let set = BuiltinSet {
+            plugins: vec![],
+            providers: vec![],
+            hook_entries: vec![entry],
+        };
+        let reg = PluginRegistry::new(set);
+        assert_eq!(reg.hook_count(), 1);
+        assert!(reg.get_hook(&id).is_some(), "hook must resolve by id");
+        // The plugin-view is also in the main dispatch map.
+        assert!(reg.get(&id).is_some(), "hook must appear in plugins map");
+        assert!(reg.is_enabled(&id), "hook must start enabled");
     }
 }

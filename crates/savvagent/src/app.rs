@@ -486,12 +486,27 @@ pub struct App {
     /// view).
     pub pending_pool_add: Option<PendingPoolAdd>,
 
+    /// Queued by `Effect::RegisterPreToolGate`; drained by
+    /// `main.rs::apply_pending_gate` which has host-slot access.
+    /// `None` when no gate is queued.
+    pub pending_gate: Option<std::sync::Arc<dyn savvagent_host::PreToolUseGate>>,
+
     /// Queued by `Effect::ReloadRoutingRules`; drained by
     /// `main.rs::apply_pending_routing_reload`.
     pub pending_routing_reload: Option<PendingRoutingAction>,
     /// Queued by `Effect::ShowRoutingRules`; drained by
     /// `main.rs::apply_pending_routing_show`.
     pub pending_routing_show: Option<PendingRoutingAction>,
+
+    /// Prompt text accumulated by `UserPromptSubmit` hooks before
+    /// dispatch. Each `Effect::PrependToPendingPrompt` adds to the
+    /// front; when the worker spawn fires, the full text becomes
+    /// `accumulated\n\n<user typed prompt>`.
+    pub pending_prompt_prefix: Option<String>,
+    /// If `Some`, the next attempted turn dispatch aborts and `reason`
+    /// is surfaced as a `[blocked]` PushNote. Set by
+    /// `Effect::CancelPendingTurn`; cleared after the abort fires.
+    pub pending_turn_cancellation: Option<String>,
 
     /// Per-project shell-style prompt history. Up at an empty input recalls
     /// the most recent entry; Up/Down then navigate while the recalled text
@@ -532,6 +547,22 @@ pub struct App {
             >,
         >,
     >,
+
+    /// Shared user-hooks index. Initialized to an empty `HooksIndex` by
+    /// `App::new`; populated by `main.rs` immediately after construction
+    /// once `project_root` is known; mutated thereafter by
+    /// `/reload-hooks`. Cloned into the `internal:user-hooks` plugin so
+    /// both views (App-side and plugin-side) see the same data.
+    pub user_hooks_index: std::sync::Arc<
+        tokio::sync::RwLock<crate::plugin::builtin::user_hooks::discovery::HooksIndex>,
+    >,
+    /// Mutable transcript path passed to the user-hooks plugin so hooks
+    /// can include the up-to-date path in their stdin payload. Initially
+    /// empty; the TUI replaces it once a real transcript is opened.
+    pub transcript_path: std::sync::Arc<tokio::sync::RwLock<std::path::PathBuf>>,
+    /// Per-process session id, generated at startup. Used as the
+    /// `session_id` field of every user-hook stdin payload.
+    pub session_id: String,
 }
 
 /// Compute the `scroll_y` value (number of wrapped rows hidden ABOVE the
@@ -653,8 +684,11 @@ impl App {
             cached_models: Vec::new(),
             pending_model_change: None,
             pending_pool_add: None,
+            pending_gate: None,
             pending_routing_reload: None,
             pending_routing_show: None,
+            pending_prompt_prefix: None,
+            pending_turn_cancellation: None,
             prompt_history: PromptHistory::default(),
             log_scroll_offset_from_bottom: None,
             next_turn_model_override: None,
@@ -674,6 +708,19 @@ impl App {
                 };
                 std::sync::Arc::new(tokio::sync::RwLock::new(loaded))
             },
+            user_hooks_index: std::sync::Arc::new(tokio::sync::RwLock::new(
+                crate::plugin::builtin::user_hooks::discovery::HooksIndex::default(),
+            )),
+            transcript_path: std::sync::Arc::new(tokio::sync::RwLock::new(
+                std::path::PathBuf::new(),
+            )),
+            session_id: format!(
+                "savvagent-{}",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis())
+                    .unwrap_or(0)
+            ),
         };
         app.refresh_commands();
         app

@@ -377,6 +377,63 @@ async fn apply_one(app: &mut App, eff: Effect, depth: u8) -> Result<(), String> 
                 }
             }
         }
+        Effect::PrependToPendingPrompt { text } => {
+            if text.is_empty() {
+                return Ok(());
+            }
+            let combined = match app.pending_prompt_prefix.take() {
+                Some(existing) => format!("{existing}\n\n{text}"),
+                None => text,
+            };
+            app.pending_prompt_prefix = Some(combined);
+        }
+        Effect::CancelPendingTurn { reason } => {
+            let reason = if reason.is_empty() {
+                "blocked by user hook".to_string()
+            } else {
+                reason
+            };
+            app.pending_turn_cancellation = Some(reason);
+        }
+        Effect::RegisterPreToolGate { plugin_id } => {
+            let reg = match &app.plugin_registry {
+                Some(r) => r.clone(),
+                None => {
+                    tracing::warn!(
+                        "RegisterPreToolGate: plugin runtime not installed; \
+                         cannot look up BuiltinHookPlugin for {}",
+                        plugin_id.as_str()
+                    );
+                    return Ok(());
+                }
+            };
+            let hook_arc = {
+                let reg_guard = reg.read().await;
+                reg_guard.get_hook(&plugin_id)
+            };
+            let Some(hook_arc) = hook_arc else {
+                tracing::warn!(
+                    "RegisterPreToolGate: no BuiltinHookPlugin for {}",
+                    plugin_id.as_str()
+                );
+                return Ok(());
+            };
+            let gate = {
+                let mut handle = hook_arc.lock().await;
+                handle.take_pre_tool_gate()
+            };
+            let Some(gate) = gate else {
+                tracing::warn!(
+                    "RegisterPreToolGate: {} returned no gate",
+                    plugin_id.as_str()
+                );
+                return Ok(());
+            };
+            // Store for main.rs::apply_pending_gate which has host-slot access.
+            // If a gate was already queued (shouldn't happen in normal startup),
+            // the new one wins — last writer takes effect.
+            app.pending_gate = Some(gate);
+        }
         // The Effect enum is #[non_exhaustive]; unhandled variants are logged
         // so implementers of future PRs can spot missing wiring.
         other => {
@@ -1239,6 +1296,7 @@ mod tests {
         let set = BuiltinSet {
             plugins: vec![],
             providers: vec![entry],
+            hook_entries: vec![],
         };
         let registry = PluginRegistry::new(set);
         let indexes = Indexes::build(&registry).await.expect("indexes build");
@@ -1364,6 +1422,7 @@ mod tests {
         let set = BuiltinSet {
             plugins: vec![Box::new(counter)],
             providers: vec![provider_entry],
+            hook_entries: vec![],
         };
         let registry = PluginRegistry::new(set);
         let indexes = Indexes::build(&registry).await.expect("indexes build");
@@ -1491,6 +1550,7 @@ mod tests {
         let set = BuiltinSet {
             plugins: vec![Box::new(bad), Box::new(good)],
             providers: vec![],
+            hook_entries: vec![],
         };
         let registry = PluginRegistry::new(set);
         let indexes = Indexes::build(&registry).await.expect("indexes build");
@@ -1577,6 +1637,7 @@ mod tests {
         let set = BuiltinSet {
             plugins: vec![Box::new(counter)],
             providers: vec![],
+            hook_entries: vec![],
         };
         let registry = PluginRegistry::new(set);
         let indexes = Indexes::build(&registry).await.expect("indexes build");
@@ -1652,6 +1713,7 @@ mod tests {
         let set = BuiltinSet {
             plugins: vec![Box::new(Optional)],
             providers: vec![],
+            hook_entries: vec![],
         };
         let registry = PluginRegistry::new(set);
         let indexes = Indexes::build(&registry).await.expect("indexes build");
@@ -1752,6 +1814,7 @@ mod tests {
         let set = BuiltinSet {
             plugins: vec![Box::new(a), Box::new(b)],
             providers: vec![],
+            hook_entries: vec![],
         };
         let mut registry = PluginRegistry::new(set);
 
@@ -1836,6 +1899,7 @@ mod tests {
         let set = BuiltinSet {
             plugins: vec![Box::new(Core)],
             providers: vec![],
+            hook_entries: vec![],
         };
         let registry = PluginRegistry::new(set);
         let indexes = Indexes::build(&registry).await.expect("indexes build");
@@ -1897,6 +1961,7 @@ mod tests {
         let set = BuiltinSet {
             plugins: vec![],
             providers: vec![],
+            hook_entries: vec![],
         };
         let registry = PluginRegistry::new(set);
         let indexes = Indexes::build(&registry).await.expect("indexes build");
@@ -2073,7 +2138,17 @@ mod tests {
         use std::collections::BTreeMap;
         use std::sync::Arc;
 
-        let set = register_builtins(Arc::new(tokio::sync::RwLock::new(BTreeMap::new())));
+        let set = register_builtins(
+            Arc::new(tokio::sync::RwLock::new(BTreeMap::new())),
+            Arc::new(tokio::sync::RwLock::new(
+                crate::plugin::builtin::user_hooks::discovery::HooksIndex::default(),
+            )),
+            "test-session".into(),
+            std::path::PathBuf::from("/tmp"),
+            Arc::new(tokio::sync::RwLock::new(std::path::PathBuf::from(
+                "/t.json",
+            ))),
+        );
         let registry = PluginRegistry::new(set);
         let indexes = Indexes::build(&registry).await.expect("indexes build");
         let registry = std::sync::Arc::new(tokio::sync::RwLock::new(registry));
@@ -2119,7 +2194,17 @@ mod tests {
         use std::collections::BTreeMap;
         use std::sync::Arc;
 
-        let set = register_builtins(Arc::new(tokio::sync::RwLock::new(BTreeMap::new())));
+        let set = register_builtins(
+            Arc::new(tokio::sync::RwLock::new(BTreeMap::new())),
+            Arc::new(tokio::sync::RwLock::new(
+                crate::plugin::builtin::user_hooks::discovery::HooksIndex::default(),
+            )),
+            "test-session".into(),
+            std::path::PathBuf::from("/tmp"),
+            Arc::new(tokio::sync::RwLock::new(std::path::PathBuf::from(
+                "/t.json",
+            ))),
+        );
         let registry = PluginRegistry::new(set);
         let registry = std::sync::Arc::new(tokio::sync::RwLock::new(registry));
         let candidates = build_connect_candidates(&registry).await;
@@ -2292,6 +2377,7 @@ mod tests {
         let set = BuiltinSet {
             plugins: vec![Box::new(RecordSlash(calls.clone()))],
             providers: vec![],
+            hook_entries: vec![],
         };
         let registry = PluginRegistry::new(set);
         let indexes = Indexes::build(&registry).await.expect("indexes build");
@@ -2597,6 +2683,7 @@ mod tests {
         let set = BuiltinSet {
             plugins: vec![],
             providers: vec![],
+            hook_entries: vec![],
         };
         let registry = PluginRegistry::new(set);
         let indexes = Indexes::build(&registry).await.expect("indexes build");
@@ -2731,6 +2818,59 @@ mod tests {
         assert!(
             !path.exists(),
             "persist must not fire when set_active_language rejected the code"
+        );
+    }
+
+    /// Applying `RegisterPreToolGate` for a plugin id that doesn't exist as a
+    /// `BuiltinHookPlugin` should warn-log and return `Ok` — no panic, no error.
+    #[tokio::test]
+    async fn register_pre_tool_gate_no_hook_entry_warns() {
+        let mut app = {
+            let _lock = HOME_LOCK.lock().unwrap();
+            let _home = HomeGuard::new();
+            fresh_app()
+        };
+        let pid = savvagent_plugin::PluginId::new("internal:does-not-exist").unwrap();
+        let effs = vec![savvagent_plugin::Effect::RegisterPreToolGate { plugin_id: pid }];
+        let res = apply_effects(&mut app, effs).await;
+        assert!(res.is_ok());
+    }
+
+    #[tokio::test]
+    async fn prepend_concatenates_in_order() {
+        let mut app = {
+            let _lock = HOME_LOCK.lock().unwrap();
+            let _home = HomeGuard::new();
+            fresh_app()
+        };
+        apply_effects(
+            &mut app,
+            vec![
+                Effect::PrependToPendingPrompt { text: "A".into() },
+                Effect::PrependToPendingPrompt { text: "B".into() },
+            ],
+        )
+        .await
+        .unwrap();
+        assert_eq!(app.pending_prompt_prefix.as_deref(), Some("A\n\nB"));
+    }
+
+    #[tokio::test]
+    async fn cancel_with_empty_reason_uses_default() {
+        let mut app = {
+            let _lock = HOME_LOCK.lock().unwrap();
+            let _home = HomeGuard::new();
+            fresh_app()
+        };
+        apply_effects(
+            &mut app,
+            vec![Effect::CancelPendingTurn { reason: "".into() }],
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            app.pending_turn_cancellation.as_deref(),
+            Some("blocked by user hook")
         );
     }
 }

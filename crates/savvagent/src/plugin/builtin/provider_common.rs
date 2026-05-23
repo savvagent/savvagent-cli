@@ -447,6 +447,56 @@ mod caps_helpers_tests {
     }
 }
 
+/// Savvagent-internal trait that hook plugins implement to hand the
+/// runtime an `Arc<dyn PreToolUseGate>`. Mirrors
+/// [`BuiltinProviderPlugin`]: the runtime calls `take_pre_tool_gate`
+/// after observing [`savvagent_plugin::Effect::RegisterPreToolGate`]
+/// and installs the result on the host.
+pub(crate) trait BuiltinHookPlugin: savvagent_plugin::Plugin {
+    /// Surrender the plugin's `PreToolUseGate` to the runtime. The
+    /// runtime calls this exactly once at startup. The plugin may
+    /// return the same `Arc` every call (the gate is shared state).
+    fn take_pre_tool_gate(&mut self) -> Option<std::sync::Arc<dyn savvagent_host::PreToolUseGate>>;
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::BuiltinHookPlugin;
+
+    #[test]
+    fn builtin_hook_plugin_trait_compiles() {
+        // Compile-time presence check: define a stub plugin that
+        // implements both Plugin and BuiltinHookPlugin. If the trait
+        // surface ever drifts, this stops compiling.
+        struct Stub;
+
+        #[async_trait::async_trait]
+        impl savvagent_plugin::Plugin for Stub {
+            fn manifest(&self) -> savvagent_plugin::Manifest {
+                savvagent_plugin::Manifest {
+                    id: savvagent_plugin::PluginId::new("internal:test-stub").unwrap(),
+                    name: "stub".into(),
+                    version: "0".into(),
+                    description: "stub".into(),
+                    kind: savvagent_plugin::PluginKind::Core,
+                    contributions: savvagent_plugin::Contributions::default(),
+                }
+            }
+        }
+
+        impl super::BuiltinHookPlugin for Stub {
+            fn take_pre_tool_gate(&mut self) -> Option<Arc<dyn savvagent_host::PreToolUseGate>> {
+                None
+            }
+        }
+
+        let mut s = Stub;
+        assert!(s.take_pre_tool_gate().is_none());
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod test_support {
     //! Process-wide in-memory keyring backend for tests.

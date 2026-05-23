@@ -18,6 +18,15 @@ boundary changes and PATCH captures fixes).
   commands that use `!<cmd>` are gated behind a first-run trust prompt
   whose decisions persist to `~/.savvagent/trusted-projects.json`.
   `/reload-commands` rescans directories after edits.
+- User-defined hooks. Drop a Claude-Code-compatible `settings.json`
+  under `.savvagent/` (project), `.claude/` (project-claude),
+  `~/.savvagent/`, or `~/.claude/`; the `hooks` block contributes shell
+  hooks for `PreToolUse`, `PostToolUse`, `UserPromptSubmit`,
+  `SessionStart`, and `Stop`. `PreToolUse` and `UserPromptSubmit`/`Stop`
+  can block (`exit 2` with stderr reason, or stdout JSON
+  `{"continue":false,"stopReason":"…"}`). `UserPromptSubmit` hooks can
+  inject `additionalContext` that gets prepended to the user's prompt
+  before the model sees it. `/reload-hooks` rescans without restart.
 
 ## 0.16.1 - 2026-05-21
 

@@ -83,6 +83,8 @@ semver.workspace = true
 # user-defined slash commands
 serde_yaml_ng.workspace = true
 ignore.workspace = true
+# user-defined hooks — tool-name matching
+globset.workspace = true
 # `/lsp` installer
 flate2.workspace = true
 tar.workspace = true

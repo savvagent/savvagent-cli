@@ -63,5 +63,9 @@ pub use session::{
 };
 pub use tools::{BashNetContext, BashNetResolver, NetOverride};
 
+/// `PreToolUseGate` trait and `PreToolDecision` enum.
+pub mod pre_tool_gate;
+pub use pre_tool_gate::{PreToolDecision, PreToolUseGate};
+
 #[doc(hidden)]
 pub use provider::RmcpProviderClient;

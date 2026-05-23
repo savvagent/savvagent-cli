@@ -181,6 +181,70 @@ After editing a command file, run `/reload-commands` to rescan all four director
 
 Parsed but not yet enforced; reserved for the upcoming agents sub-project.
 
+## User-defined hooks
+
+Drop a Claude-Code-compatible `settings.json` under any of these directories and the `hooks` block contributes shell hooks Savvagent fires at well-known event points:
+
+- `<project>/.savvagent/settings.json`
+- `<project>/.claude/settings.json`
+- `~/.savvagent/settings.json`
+- `~/.claude/settings.json`
+
+Same precedence as user-defined slash commands (project beats user; within the same scope `.savvagent/` beats `.claude/`). All four files merge into one per-event index; `/reload-hooks` rescans without restart.
+
+### Format
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "tool-fs:write_file",
+        "hooks": [
+          { "type": "command", "command": "scripts/audit-write.sh", "timeout": 5 }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          { "command": "scripts/inject-context.sh" }
+        ]
+      }
+    ]
+  }
+}
+```
+
+- `matcher` is a glob over the tool name (`*`, `tool-fs:*`, `tool-fs:write_file`); ignored for non-tool events.
+- `timeout` is per-hook in seconds (default 60); the child is killed on timeout.
+- `type` defaults to `"command"`; other values are reserved.
+- Multiple `hooks[]` entries in one group run sequentially in declaration order.
+
+### Events
+
+| Event | Mapped to | Can block? |
+|---|---|---|
+| `PreToolUse` | before any tool dispatch | yes — `exit 2` or `{"continue":false}` cancels the tool call |
+| `PostToolUse` | after a tool returns (observe-only, `*` matcher only in v1) | no |
+| `UserPromptSubmit` | after the user submits a prompt, before the turn starts | yes — Block cancels the turn; `additionalContext` is prepended to the prompt |
+| `SessionStart` | once at host startup | no |
+| `Stop` | after the agent turn ends | yes — Block flags the turn as cancelled |
+
+### Hook outcome protocol
+
+Each hook is a shell command. Its stdin is JSON describing the event (`session_id`, `transcript_path`, `cwd`, `hook_event_name`, plus per-event fields like `tool_name` / `tool_input` / `prompt`). The outcome is determined by:
+
+1. **Structured JSON stdout** — if the hook prints a JSON object with `{"continue": false, "stopReason": "…"}` or `{"hookSpecificOutput": {"additionalContext": "…"}}`, that takes precedence.
+2. **Exit code 2** — non-empty stderr becomes the Block reason. For PreToolUse / UserPromptSubmit / Stop this blocks; for PostToolUse / SessionStart it's demoted to a warning since those events can't block.
+3. **Any other exit code** — Continue. `suppressOutput` in stdout JSON silences the surfaced stdout/stderr PushNote.
+
+`SAVVAGENT_PROJECT_DIR` is set in the child env so hooks can locate the project root regardless of `cwd`.
+
+### Reload
+
+Run `/reload-hooks` to rescan all four `settings.json` files without restarting the session.
+
 ### Scrolling the conversation log
 
 | Input | What it does |

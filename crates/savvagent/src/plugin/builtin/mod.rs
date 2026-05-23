@@ -79,6 +79,10 @@ pub mod splash;
 /// Theme catalog + `/theme` slash + theme picker modal.
 pub mod themes;
 
+/// `internal:user-hooks` — Claude-Code-compatible user shell hooks from
+/// `settings.json` files. PreToolUse gating + observe-only events.
+pub mod user_hooks;
+
 /// `internal:user-slash-commands` — discovers user-authored slash commands
 /// from `.savvagent/commands/` / `.claude/commands/` and dispatches them
 /// with templating expansion.

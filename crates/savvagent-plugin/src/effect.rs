@@ -179,6 +179,33 @@ pub enum Effect {
         /// Positional arguments collected with the slash invocation.
         args: Vec<String>,
     },
+    /// Announce that this plugin provides a `PreToolUseGate`. The
+    /// runtime fetches the gate object via a savvagent-internal seam
+    /// (not part of the WIT-portable surface) and installs it on the
+    /// host. Mirrors the [`Effect::RegisterProvider`] pattern.
+    RegisterPreToolGate {
+        /// Plugin id whose `BuiltinHookPlugin::take_pre_tool_gate()`
+        /// will be invoked to materialize the gate.
+        plugin_id: crate::types::PluginId,
+    },
+    /// Prepend `text` to the most-recently-submitted user prompt
+    /// before it reaches the model. Used by `UserPromptSubmit` hooks
+    /// returning `additionalContext`. Multiple emissions concatenate
+    /// in order with a `\n\n` separator between each; the original
+    /// prompt remains last.
+    PrependToPendingPrompt {
+        /// Text to prepend. Empty string is a no-op.
+        text: String,
+    },
+    /// Abort the turn that's about to start. Used by `UserPromptSubmit`
+    /// or `Stop` hooks that blocked. The runtime renders `reason` as a
+    /// `[blocked] …` PushNote in the conversation log; the prompt or
+    /// stop is not sent to the model.
+    CancelPendingTurn {
+        /// User-visible reason. Empty string falls back to
+        /// `"blocked by user hook"`.
+        reason: String,
+    },
 }
 
 /// The right-hand side of a [`crate::manifest::KeybindingSpec`]: either invoke a
@@ -293,6 +320,25 @@ mod tests {
     #[test]
     fn show_routing_rules_constructs() {
         let _ = Effect::ShowRoutingRules;
+    }
+}
+
+#[cfg(test)]
+mod added_hook_effects_smoke {
+    use super::*;
+    use crate::types::PluginId;
+
+    #[test]
+    fn variants_constructable() {
+        let _ = Effect::RegisterPreToolGate {
+            plugin_id: PluginId::new("internal:user-hooks").unwrap(),
+        };
+        let _ = Effect::PrependToPendingPrompt {
+            text: "context".into(),
+        };
+        let _ = Effect::CancelPendingTurn {
+            reason: "no".into(),
+        };
     }
 }
 

@@ -175,12 +175,30 @@ async fn main() -> Result<()> {
     let mut app = App::new(header_model, transcript_dir, initial_locale);
     app.load_prompt_history(&project_root);
 
+    // Load user-defined hooks from settings.json. The HooksIndex is
+    // shared with the `internal:user-hooks` plugin via App's
+    // user_hooks_index Arc; the plugin reads it under each event
+    // dispatch and writes it on `/reload-hooks`.
+    {
+        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+        let initial_idx =
+            crate::plugin::builtin::user_hooks::discovery::walk_all(&project_root, &home);
+        let mut g = app.user_hooks_index.write().await;
+        *g = initial_idx;
+    }
+
     {
         use crate::plugin::manifests::Indexes;
         use crate::plugin::registry::PluginRegistry;
         use savvagent_plugin::PluginKind;
 
-        let set = plugin::register_builtins(app.trust_levels.clone());
+        let set = plugin::register_builtins(
+            app.trust_levels.clone(),
+            app.user_hooks_index.clone(),
+            app.session_id.clone(),
+            project_root.clone(),
+            app.transcript_path.clone(),
+        );
         let mut registry = PluginRegistry::new(set);
 
         // Apply persisted Optional-plugin enabled state from
@@ -728,6 +746,7 @@ async fn dispatch_slash_command(
                 }
                 apply_pending_model_change(app, host_slot, project_root, tool_bins).await;
                 apply_pending_pool_add(app, host_slot).await;
+                apply_pending_gate(app, host_slot).await;
                 apply_pending_routing_reload(app, host_slot).await;
                 apply_pending_routing_show(app, host_slot).await;
                 return;
@@ -1541,6 +1560,24 @@ fn render_routing_show(app: &mut App, rules: &savvagent_host::RoutingRules) {
         ),
         None => app.push_note(rust_i18n::t!("routing.show-no-last").to_string()),
     }
+}
+
+/// Drain `app.pending_gate` (set by `Effect::RegisterPreToolGate`) and
+/// install the gate on the active host. No-op when nothing is queued or
+/// when no host exists yet (the effect arm already warns in that case via
+/// a tracing::warn — the gate is simply dropped).
+async fn apply_pending_gate(app: &mut App, host_slot: &HostSlot) {
+    let Some(gate) = app.pending_gate.take() else {
+        return;
+    };
+    let Some(host) = current_host(host_slot).await else {
+        tracing::warn!(
+            "apply_pending_gate: no host yet; gate dropped — \
+             re-emit RegisterPreToolGate after /connect if needed"
+        );
+        return;
+    };
+    host.set_pre_tool_gate(gate).await;
 }
 
 fn format_rule_match(m: &savvagent_host::RuleMatch) -> String {
@@ -2447,6 +2484,7 @@ async fn run_app(
     // bootstrap_pool_host already added (apply_pending_pool_add handles
     // PoolError::AlreadyRegistered as a debug no-op).
     apply_pending_pool_add(app, &host_slot).await;
+    apply_pending_gate(app, &host_slot).await;
 
     // Populate `App::cached_models` from the bootstrap host's pool so the
     // `/model` picker has rows the moment the user opens it. Previously
@@ -2770,6 +2808,7 @@ async fn run_app(
             }
             apply_pending_model_change(app, &host_slot, &project_root, &tool_bins).await;
             apply_pending_pool_add(app, &host_slot).await;
+            apply_pending_gate(app, &host_slot).await;
             apply_pending_routing_reload(app, &host_slot).await;
             apply_pending_routing_show(app, &host_slot).await;
             continue;
@@ -2872,12 +2911,38 @@ async fn run_app(
                                     "PromptSubmitted dispatch failed");
                             }
 
+                            // Drain hook-driven prompt mutations now that
+                            // PromptSubmitted dispatch has completed.
+                            // CancelPendingTurn takes precedence over
+                            // PrependToPendingPrompt — if a hook blocked the
+                            // turn, drop the accumulated prefix too so it
+                            // doesn't bleed into a future turn.
+                            if let Some(reason) = app.pending_turn_cancellation.take() {
+                                app.push_note(format!("[blocked] {reason}"));
+                                app.is_loading = false;
+                                app.pending_prompt_prefix = None;
+                                continue;
+                            }
+                            let prefix = app.pending_prompt_prefix.take();
+
                             // Consume the one-turn model override (if any)
                             // before moving `app` references into the spawn.
                             // `original_model` is saved so the host can be
                             // restored after the turn completes.
                             let model_override = app.consume_model_override();
                             let original_model = app.model.clone();
+
+                            // Build the prompt text that goes to the host.
+                            // The hook-supplied prefix MUST NOT appear in
+                            // `push_user` / `prompt_history.append` /
+                            // `PromptSubmitted` (all of which already ran on
+                            // `value`); it only shapes the prompt the host
+                            // sees, so the user's transcript and history
+                            // stay clean.
+                            let prompt_text = match prefix {
+                                Some(p) => format!("{p}\n\n{value}"),
+                                None => value.clone(),
+                            };
 
                             let tx = worker_tx.clone();
                             tokio::spawn(async move {
@@ -2896,7 +2961,7 @@ async fn run_app(
 
                                 let (ev_tx, mut ev_rx) = mpsc::channel(64);
                                 let host_for_run = host.clone();
-                                let prompt = value;
+                                let prompt = prompt_text;
                                 let runner = tokio::spawn(async move {
                                     host_for_run.run_turn_streaming(prompt, ev_tx).await
                                 });
@@ -3026,6 +3091,7 @@ async fn run_app(
                                     )
                                     .await;
                                     apply_pending_pool_add(app, &host_slot).await;
+                                    apply_pending_gate(app, &host_slot).await;
                                     apply_pending_routing_reload(app, &host_slot).await;
                                     apply_pending_routing_show(app, &host_slot).await;
                                     handled = true;

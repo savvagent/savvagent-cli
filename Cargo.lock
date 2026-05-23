@@ -3714,6 +3714,7 @@ dependencies = [
  "dirs",
  "dotenvy",
  "flate2",
+ "globset",
  "hex",
  "ignore",
  "keyring",
