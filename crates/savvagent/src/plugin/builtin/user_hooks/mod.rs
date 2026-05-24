@@ -49,6 +49,15 @@ pub struct UserHooksPlugin {
     pub project_root: PathBuf,
     pub transcript_path: Arc<RwLock<PathBuf>>,
     cached_gate: Option<Arc<UserHooksPreToolGate>>,
+    /// Tracks whether a previous `Stop` hook in the current stop-cycle
+    /// returned `Block`. Flips to `true` after any `Block` decision in
+    /// `dispatch_stop`; reset to `false` on the next `TurnStart` (which
+    /// marks a fresh agent turn). The value is passed verbatim as the
+    /// `stop_hook_active` field of the next `Stop` payload — matching the
+    /// Claude Code contract so user hooks can detect "the agent already
+    /// tried to stop once" and avoid infinite block loops once the host
+    /// gains a re-run-on-Stop-block mechanism.
+    prev_stop_blocked: bool,
 }
 
 impl UserHooksPlugin {
@@ -65,6 +74,7 @@ impl UserHooksPlugin {
             project_root,
             transcript_path,
             cached_gate: None,
+            prev_stop_blocked: false,
         }
     }
 
@@ -306,12 +316,18 @@ impl UserHooksPlugin {
     /// Dispatch `Stop` hooks. Block decisions short-circuit and surface
     /// as `Effect::CancelPendingTurn`. `additional_context` is ignored
     /// for `Stop` (per spec the turn is ending, so prepending a prompt
-    /// prefix would be meaningless). `stop_hook_active` is hardcoded to
-    /// `false` in v1 — there is no re-entrancy guard yet.
+    /// prefix would be meaningless).
+    ///
+    /// `stop_hook_active` is `true` when a previous `Stop` hook in the
+    /// current stop-cycle already returned `Block`. The flag is captured
+    /// at the start of dispatch (so all hooks within one `TurnEnd` see
+    /// the same value) and updated to `true` if any hook in this
+    /// invocation blocks. `TurnStart` resets it (see `on_event`).
     async fn dispatch_stop(&mut self, success: bool) -> Result<Vec<Effect>, PluginError> {
         // `success` is reserved for a future stop-on-failure variant;
         // v1 payload does not expose it.
         let _ = success;
+        let stop_hook_active = self.prev_stop_blocked;
         let idx = self.hooks.read().await;
         let Some(groups) = idx.by_event.get(&HookEvent::Stop) else {
             return Ok(vec![]);
@@ -325,7 +341,7 @@ impl UserHooksPlugin {
             transcript_path: &transcript,
             cwd: &self.project_root,
         };
-        let payload = payload::stop(&ctx, false);
+        let payload = payload::stop(&ctx, stop_hook_active);
 
         let mut effects: Vec<Effect> = Vec::new();
         for group in &groups {
@@ -346,6 +362,7 @@ impl UserHooksPlugin {
                 }
                 match decision {
                     HookDecision::Block { reason, .. } => {
+                        self.prev_stop_blocked = true;
                         effects.push(Effect::CancelPendingTurn { reason });
                         return Ok(effects);
                     }
@@ -374,8 +391,9 @@ impl Plugin for UserHooksPlugin {
         contributions.hooks = vec![
             savvagent_plugin::HookKind::ToolCallEnd,     // -> PostToolUse
             savvagent_plugin::HookKind::HostStarting,    // -> SessionStart
-            savvagent_plugin::HookKind::PromptSubmitted, // -> UserPromptSubmit (Task 18)
-            savvagent_plugin::HookKind::TurnEnd,         // -> Stop (Task 18)
+            savvagent_plugin::HookKind::PromptSubmitted, // -> UserPromptSubmit
+            savvagent_plugin::HookKind::TurnStart,       // resets prev_stop_blocked
+            savvagent_plugin::HookKind::TurnEnd,         // -> Stop
         ];
         Manifest {
             id: PluginId::new("internal:user-hooks").expect("valid built-in id"),
@@ -426,6 +444,13 @@ impl Plugin for UserHooksPlugin {
             HostEvent::ToolCallEnd { success, .. } => self.dispatch_post_tool_use(success).await,
             HostEvent::HostStarting => self.dispatch_session_start().await,
             HostEvent::PromptSubmitted { text } => self.dispatch_user_prompt_submit(&text).await,
+            HostEvent::TurnStart { .. } => {
+                // Fresh agent turn — clear the Stop-blocked latch so the
+                // next dispatch_stop sees stop_hook_active = false unless
+                // a Block fires again inside this turn.
+                self.prev_stop_blocked = false;
+                Ok(vec![])
+            }
             HostEvent::TurnEnd { success, .. } => self.dispatch_stop(success).await,
             _ => Ok(vec![]),
         }
@@ -496,16 +521,41 @@ mod tests {
 
     #[tokio::test]
     async fn ignores_unrelated_events() {
+        // `Disconnect` isn't in `contributions.hooks` — the plugin should
+        // route it through the catch-all arm of `on_event` and emit no
+        // effects.
+        use savvagent_plugin::ProviderId;
         let mut p = mk_plugin(HooksIndex::default());
         let effs = p
-            .on_event(HostEvent::TurnStart { turn_id: 1 })
+            .on_event(HostEvent::Disconnect {
+                provider_id: ProviderId::new("anthropic").unwrap(),
+                reason: "test".into(),
+            })
             .await
             .unwrap();
         assert!(effs.is_empty());
     }
 
+    /// `HostEvent::TurnStart` resets the `prev_stop_blocked` latch so the
+    /// next `Stop` payload sees `stop_hook_active = false`. The arm emits
+    /// no effects (the reset is internal state).
+    #[tokio::test]
+    async fn turn_start_resets_prev_stop_blocked_latch() {
+        let mut p = mk_plugin(HooksIndex::default());
+        p.prev_stop_blocked = true;
+        let effs = p
+            .on_event(HostEvent::TurnStart { turn_id: 1 })
+            .await
+            .unwrap();
+        assert!(effs.is_empty(), "TurnStart must not emit effects");
+        assert!(
+            !p.prev_stop_blocked,
+            "TurnStart should clear the stop-blocked latch"
+        );
+    }
+
     #[test]
-    fn manifest_subscribes_to_four_kinds() {
+    fn manifest_subscribes_to_expected_kinds() {
         let p = stub_plugin();
         let m = p.manifest();
         let mut kinds = m.contributions.hooks.clone();
@@ -514,6 +564,7 @@ mod tests {
             HookKind::ToolCallEnd,
             HookKind::HostStarting,
             HookKind::PromptSubmitted,
+            HookKind::TurnStart,
             HookKind::TurnEnd,
         ];
         expected.sort_by_key(|k| format!("{k:?}"));
@@ -792,6 +843,81 @@ mod tests {
                 Effect::CancelPendingTurn { reason } if reason == "stop-block"
             )),
             "expected CancelPendingTurn{{reason=\"stop-block\"}} in {effs:?}"
+        );
+    }
+
+    /// After a `Stop` hook returns `Block`, the plugin sets the
+    /// `prev_stop_blocked` latch. This is what the next `Stop` dispatch
+    /// will pass as `stop_hook_active` in the payload.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stop_block_sets_prev_stop_blocked_latch() {
+        let cmd = r#"echo 'first-block' >&2; exit 2"#;
+        let idx = single_hook_index(HookEvent::Stop, cmd);
+        let mut p = mk_plugin(idx);
+        assert!(!p.prev_stop_blocked, "latch starts false");
+        let _ = p
+            .on_event(HostEvent::TurnEnd {
+                turn_id: 1,
+                success: true,
+            })
+            .await
+            .unwrap();
+        assert!(
+            p.prev_stop_blocked,
+            "latch should be true after a Block decision"
+        );
+    }
+
+    /// Second `Stop` dispatch (without an intervening `TurnStart`) must
+    /// pass `stop_hook_active: true` in the payload. The hook prints
+    /// `<stop_hook_active>` to stderr and `exit 2`s; the Block reason
+    /// carries that value back so we can assert it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn second_stop_payload_carries_stop_hook_active_true() {
+        // The hook reads `stop_hook_active` from its stdin JSON and writes
+        // it back to stderr verbatim, then `exit 2`s so the runner returns
+        // a Block with that stderr as the reason. The Block also stays in
+        // CancelPendingTurn — useful for asserting.
+        //
+        // Plain shell with `grep -oE` keeps the test free of jq/python.
+        let cmd = r#"grep -oE '"stop_hook_active":(true|false)' >&2; exit 2"#;
+        let idx = single_hook_index(HookEvent::Stop, cmd);
+        let mut p = mk_plugin(idx);
+
+        // First dispatch: latch starts false; payload carries `false`.
+        let effs1 = p
+            .on_event(HostEvent::TurnEnd {
+                turn_id: 1,
+                success: true,
+            })
+            .await
+            .unwrap();
+        assert!(
+            effs1.iter().any(|e| matches!(
+                e,
+                Effect::CancelPendingTurn { reason }
+                    if reason == r#""stop_hook_active":false"#
+            )),
+            "expected first-dispatch reason to confirm stop_hook_active=false; got {effs1:?}"
+        );
+
+        // Second dispatch (no intervening TurnStart): latch is true now.
+        let effs2 = p
+            .on_event(HostEvent::TurnEnd {
+                turn_id: 2,
+                success: true,
+            })
+            .await
+            .unwrap();
+        assert!(
+            effs2.iter().any(|e| matches!(
+                e,
+                Effect::CancelPendingTurn { reason }
+                    if reason == r#""stop_hook_active":true"#
+            )),
+            "expected second-dispatch reason to confirm stop_hook_active=true; got {effs2:?}"
         );
     }
 }

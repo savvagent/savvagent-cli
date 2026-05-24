@@ -50,7 +50,7 @@ mod ui;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use app::{
@@ -649,11 +649,7 @@ async fn save_transcript_now(app: &App, host: &Arc<Host>) -> Result<PathBuf> {
     if app.entries.is_empty() {
         return Ok(PathBuf::new());
     }
-    let ts = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let path = app.transcript_dir.join(format!("{ts}.json"));
+    let path = app.transcript_path.read().await.clone();
     host.save_transcript(&path)
         .await
         .context("save transcript")?;

@@ -28,6 +28,20 @@ boundary changes and PATCH captures fixes).
   inject `additionalContext` that gets prepended to the user's prompt
   before the model sees it. `/reload-hooks` rescans without restart.
 
+### Changed
+- User-hook stdin payloads now carry a real `transcript_path`
+  (`<transcript_dir>/<session_id>.json`) instead of an empty string. The
+  path is established at startup and reused for the lifetime of the
+  session; `save_transcript_now` writes to the same file so auto-saves
+  and manual `/save` coalesce into one transcript per session (previously
+  each save created a new timestamped file).
+- User-hook `Stop` payloads now carry the real `stop_hook_active` flag:
+  it stays `false` on the first `Stop` dispatch in a turn and flips to
+  `true` on any subsequent `Stop` dispatch following a `Block` decision
+  until the next `TurnStart` clears the latch. Matches Claude Code's
+  contract so Stop hooks can detect "the agent already tried to stop
+  once" once savvagent gains a re-run-on-Stop-block mechanism.
+
 ## 0.16.1 - 2026-05-21
 
 ### Added

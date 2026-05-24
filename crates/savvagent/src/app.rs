@@ -556,9 +556,19 @@ pub struct App {
     pub user_hooks_index: std::sync::Arc<
         tokio::sync::RwLock<crate::plugin::builtin::user_hooks::discovery::HooksIndex>,
     >,
-    /// Mutable transcript path passed to the user-hooks plugin so hooks
-    /// can include the up-to-date path in their stdin payload. Initially
-    /// empty; the TUI replaces it once a real transcript is opened.
+    /// Canonical per-session transcript path
+    /// (`<transcript_dir>/<session_id>.json`). Initialized by `App::new`
+    /// and read by:
+    ///
+    /// * `save_transcript_now` — the destination for auto-saves at
+    ///   `TurnComplete` and manual `/save`. Multiple saves overwrite the
+    ///   same file by design (one transcript per session).
+    /// * the `internal:user-hooks` plugin — included as the
+    ///   `transcript_path` field of every hook stdin payload so user
+    ///   scripts can locate the transcript even before the first save.
+    ///
+    /// Wrapped in `Arc<RwLock>` so future features (e.g. mid-session
+    /// relocation) can mutate it; today there is no writer.
     pub transcript_path: std::sync::Arc<tokio::sync::RwLock<std::path::PathBuf>>,
     /// Per-process session id, generated at startup. Used as the
     /// `session_id` field of every user-hook stdin payload.
@@ -620,6 +630,20 @@ impl App {
     /// model name (for the header), the directory transcripts get written
     /// into, and the conversation log it builds from streaming events.
     pub fn new(model: String, transcript_dir: PathBuf, initial_language: String) -> Self {
+        // Generate the per-process session id ONCE so it can seed both
+        // `session_id` and the canonical transcript path. The path is
+        // `<transcript_dir>/<session_id>.json` — deterministic, stable for
+        // the session's lifetime, and shared with user-hooks payloads so
+        // their `transcript_path` field points at a real file.
+        let session_id = format!(
+            "savvagent-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or(0)
+        );
+        let session_transcript_path = transcript_dir.join(format!("{session_id}.json"));
+
         let theme = Theme::default()
             .add_default_title()
             .with_block(
@@ -711,16 +735,8 @@ impl App {
             user_hooks_index: std::sync::Arc::new(tokio::sync::RwLock::new(
                 crate::plugin::builtin::user_hooks::discovery::HooksIndex::default(),
             )),
-            transcript_path: std::sync::Arc::new(tokio::sync::RwLock::new(
-                std::path::PathBuf::new(),
-            )),
-            session_id: format!(
-                "savvagent-{}",
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_millis())
-                    .unwrap_or(0)
-            ),
+            transcript_path: std::sync::Arc::new(tokio::sync::RwLock::new(session_transcript_path)),
+            session_id,
         };
         app.refresh_commands();
         app
@@ -1848,6 +1864,31 @@ mod tests {
 
     fn fresh_app() -> App {
         App::new("test-model".into(), PathBuf::from("/tmp"), "en".to_string())
+    }
+
+    /// `App::new` seeds `transcript_path` to a real path inside the
+    /// transcript directory (`<transcript_dir>/<session_id>.json`) so the
+    /// user-hooks plugin sees a real file location in stdin payloads even
+    /// before the first save fires.
+    #[tokio::test]
+    async fn new_app_transcript_path_is_session_scoped() {
+        let app = App::new(
+            "test-model".into(),
+            PathBuf::from("/tmp/transcripts"),
+            "en".to_string(),
+        );
+        let path = app.transcript_path.read().await.clone();
+        // Path is inside the transcript dir...
+        assert_eq!(
+            path.parent(),
+            Some(std::path::Path::new("/tmp/transcripts"))
+        );
+        // ...and is named after the session id with a .json extension.
+        let expected_name = format!("{}.json", app.session_id);
+        assert_eq!(
+            path.file_name().and_then(|n| n.to_str()),
+            Some(expected_name.as_str())
+        );
     }
 
     /// Auto-tail: when the user hasn't scrolled and content overflows the
