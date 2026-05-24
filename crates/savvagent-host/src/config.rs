@@ -194,6 +194,14 @@ pub struct HostConfig {
     /// TUI sets this to `~/.savvagent/routing.toml`; tests and the
     /// headless example pass `None`.
     pub routing_rules_path: Option<PathBuf>,
+
+    /// Stable identifier for the constructed [`crate::Host`]. Surfaced to
+    /// in-process tools via [`crate::ToolCallContext`] so subagent hooks
+    /// can correlate across nesting levels. When `None`, the host
+    /// generates a fresh UUID v4 at construction time. Embedders that
+    /// want to thread an external session id through (e.g. a TUI session
+    /// id) pass it here via [`Self::with_session_id`].
+    pub session_id: Option<String>,
 }
 
 impl HostConfig {
@@ -220,7 +228,15 @@ impl HostConfig {
             connect_timeout_ms: 3000,
             force_disconnect_grace_ms: 500,
             routing_rules_path: None,
+            session_id: None,
         }
+    }
+
+    /// Override the host session identifier. When unset, the host
+    /// generates a fresh UUID v4 at construction time.
+    pub fn with_session_id(mut self, id: impl Into<String>) -> Self {
+        self.session_id = Some(id.into());
+        self
     }
 
     /// Add a tool endpoint to the config.

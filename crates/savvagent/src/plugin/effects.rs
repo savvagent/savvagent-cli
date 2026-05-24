@@ -434,6 +434,15 @@ async fn apply_one(app: &mut App, eff: Effect, depth: u8) -> Result<(), String> 
             // the new one wins — last writer takes effect.
             app.pending_gate = Some(gate);
         }
+        Effect::RegisterInProcessTool { spec, handler } => {
+            // Queue for `main.rs::apply_pending_in_process_tools`, which
+            // has host-slot access and can call
+            // `ToolRegistry::register_in_process_tool` once the host
+            // exists. Multiple effects in the same startup pass append
+            // to the vec, so a future plugin that registers a second
+            // in-process tool composes correctly.
+            app.pending_in_process_tools.push((spec, handler));
+        }
         // The Effect enum is #[non_exhaustive]; unhandled variants are logged
         // so implementers of future PRs can spot missing wiring.
         other => {

@@ -8,6 +8,8 @@ boundary changes and PATCH captures fixes).
 
 ## [Unreleased]
 
+## 0.17.0 - 2026-05-23
+
 ### Added
 - User-defined slash commands. Drop markdown files under
   `.savvagent/commands/` (project), `.claude/commands/` (project-claude),
@@ -27,6 +29,55 @@ boundary changes and PATCH captures fixes).
   `{"continue":false,"stopReason":"…"}`). `UserPromptSubmit` hooks can
   inject `additionalContext` that gets prepended to the user's prompt
   before the model sees it. `/reload-hooks` rescans without restart.
+- **User-defined agents.** Drop markdown files under `.savvagent/agents/`,
+  `.claude/agents/`, `~/.savvagent/agents/`, or `~/.claude/agents/`; each
+  becomes a subagent the parent model can spawn via a new built-in
+  `task` tool. Frontmatter supports `description` (required), `tools`
+  (comma-separated string or YAML list — exact-name allowlist; absent
+  inherits parent's tool set, `[]` allows only `task`), `model` (per-agent
+  override), and `name`. Body `@<path>` includes are expanded once at
+  load time. The `task` tool is registered only when ≥1 agent is
+  discovered; its `subagent_type` enum is populated from the index and
+  refreshed by `/reload-agents`. Subagent execution gets its own Sub-Host
+  with own session state, system prompt, model selection, and filtered
+  tool view; shares the parent's `ProviderClient`, `ToolRegistry`,
+  `PreToolUseGate`, permissions, and sandbox via `Arc`. Tool scoping is
+  enforced both at the provider boundary (filtered `ToolDef` list) and
+  at runtime (`ScopedToolRegistry` rejects out-of-allowlist names).
+  `SAVVAGENT_AGENT_MAX_DEPTH` (default 3) caps subagent recursion.
+- `HookKind::SubagentStop` event. Fires after each subagent reaches a
+  clean `end_turn` (not on cancellation). User shell hooks subscribe via
+  the same `settings.json` shape; payload includes `subagent: "<name>"`
+  and `stop_hook_active`. `stop_hook_active` is hardcoded `false` in v1
+  (re-prompt mechanism is a future follow-up matching the parent `Stop`
+  pattern).
+- `PreToolUse` / `PostToolUse` stdin payloads gain an optional
+  `subagent: "<name>"` field. Absent for parent-turn calls (backward
+  compatible); present with the agent name for subagent-originated
+  tool calls. Threaded via a `tokio::task_local!` set by `SubHost`
+  during dispatch.
+- Transcript schema v2. Adds a top-level `subagent_transcripts: HashMap<String, SubagentTranscript>`
+  sidecar keyed by parent `task` tool-call id. v1 transcripts load
+  cleanly (with a one-time warn-log; the sidecar is empty).
+- New built-in plugins: `internal:user-agents` (discovery + `task` tool
+  registration + `/reload-agents`) and `internal:tool-task-summary`
+  (one-line summaries for the `task` tool in the conversation log).
+- `Effect::RegisterInProcessTool` variant. Savvagent-internal extension
+  point that lets built-in plugins contribute in-process tool handlers
+  (host-local; not exposed to WASM plugins).
+- `Host::session_id()` accessor and a `SAVVAGENT_AGENT_MAX_DEPTH` env
+  override are now public surfaces.
+
+### Changed
+
+- `ToolRegistry::call_with_bash_net_override` now rejects in-process
+  tool names with a guardrail error — those must be dispatched via
+  `call_in_process` (the parent turn loop and SubHost both do).
+- `Host::tools` is now `Mutex<Option<Arc<ToolRegistry>>>` (was
+  `Mutex<Option<ToolRegistry>>`) so `Arc` clones can be shared with
+  `SubHost`. Shutdown is unchanged in observable behavior; internally
+  uses `Arc::into_inner` and falls back to drop-time cleanup if a
+  subagent's Arc is still live.
 
 ### Changed
 - User-hook stdin payloads now carry a real `transcript_path`

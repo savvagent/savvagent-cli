@@ -114,6 +114,7 @@ impl UserHooksPlugin {
             "<unknown>",
             &json!({}),
             &json!({ "success": success }),
+            None,
         );
 
         let mut effects: Vec<Effect> = Vec::new();
@@ -376,6 +377,72 @@ impl UserHooksPlugin {
         }
         Ok(effects)
     }
+
+    /// Dispatch `SubagentStop` hooks. Fires when a subagent's
+    /// `SubHost` reaches a clean `end_turn`. Block decisions
+    /// short-circuit but do NOT cancel any turn — the subagent has
+    /// already returned. `stop_hook_active` is hardcoded to `false`
+    /// in v1 (same as `dispatch_stop`; full re-prompt mechanism is a
+    /// future follow-up).
+    async fn dispatch_subagent_stop(
+        &mut self,
+        agent_name: &str,
+        success: bool,
+    ) -> Result<Vec<Effect>, PluginError> {
+        // `success` is reserved for a future failure-aware variant;
+        // v1 payload does not expose it.
+        let _ = success;
+        let idx = self.hooks.read().await;
+        let Some(groups) = idx.by_event.get(&HookEvent::SubagentStop) else {
+            return Ok(vec![]);
+        };
+        let groups = groups.clone();
+        drop(idx);
+
+        let transcript = self.transcript_path.read().await.clone();
+        let ctx = HookContext {
+            session_id: &self.session_id,
+            transcript_path: &transcript,
+            cwd: &self.project_root,
+        };
+        let payload = payload::subagent_stop(&ctx, agent_name, false);
+
+        let mut effects: Vec<Effect> = Vec::new();
+        for group in &groups {
+            // SubagentStop is not a tool event; matcher is ignored.
+            for cmd in &group.commands {
+                let (decision, warnings, _stdout, _stderr) = runner::run_one(
+                    HookEvent::SubagentStop,
+                    &cmd.command,
+                    cmd.timeout,
+                    &payload,
+                    &self.project_root,
+                )
+                .await;
+                for w in &warnings {
+                    effects.push(Effect::PushNote {
+                        line: StyledLine::plain(format!("[warn] {w}")),
+                    });
+                }
+                match decision {
+                    HookDecision::Block { reason, .. } => {
+                        // Subagent has already returned its result to
+                        // the parent — a Block at this point can't
+                        // unwind. Surface as a PushNote so the user
+                        // sees the hook spoke up.
+                        effects.push(Effect::PushNote {
+                            line: StyledLine::plain(format!("[subagent-stop blocked] {reason}")),
+                        });
+                        return Ok(effects);
+                    }
+                    HookDecision::Continue { .. } => {
+                        // No re-prompt mechanism in v1.
+                    }
+                }
+            }
+        }
+        Ok(effects)
+    }
 }
 
 #[async_trait]
@@ -394,6 +461,7 @@ impl Plugin for UserHooksPlugin {
             savvagent_plugin::HookKind::PromptSubmitted, // -> UserPromptSubmit
             savvagent_plugin::HookKind::TurnStart,       // resets prev_stop_blocked
             savvagent_plugin::HookKind::TurnEnd,         // -> Stop
+            savvagent_plugin::HookKind::SubagentStop,    // -> SubagentStop
         ];
         Manifest {
             id: PluginId::new("internal:user-hooks").expect("valid built-in id"),
@@ -452,6 +520,10 @@ impl Plugin for UserHooksPlugin {
                 Ok(vec![])
             }
             HostEvent::TurnEnd { success, .. } => self.dispatch_stop(success).await,
+            HostEvent::SubagentStop {
+                agent_name,
+                success,
+            } => self.dispatch_subagent_stop(&agent_name, success).await,
             _ => Ok(vec![]),
         }
     }
@@ -566,6 +638,7 @@ mod tests {
             HookKind::PromptSubmitted,
             HookKind::TurnStart,
             HookKind::TurnEnd,
+            HookKind::SubagentStop,
         ];
         expected.sort_by_key(|k| format!("{k:?}"));
         assert_eq!(kinds, expected);
@@ -844,6 +917,76 @@ mod tests {
             )),
             "expected CancelPendingTurn{{reason=\"stop-block\"}} in {effs:?}"
         );
+    }
+
+    /// End-to-end: a `SubagentStop` user shell hook fires when the
+    /// dispatcher sees `HostEvent::SubagentStop`. The hook's stdin
+    /// payload must include `hook_event_name=SubagentStop`,
+    /// `subagent=<name>`, and `stop_hook_active=false`.
+    ///
+    /// This lives inline (rather than in `tests/`) because the
+    /// `savvagent` crate is binary-only — there is no `lib.rs` to
+    /// re-export `UserHooksPlugin` through. The test still exercises
+    /// the full dispatch pipeline: settings.json -> discovery ->
+    /// HooksIndex -> on_event(SubagentStop) -> shell hook execution.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn subagent_stop_hook_fires_with_payload() {
+        let project = tempfile::tempdir().unwrap();
+        let stdout_capture = project.path().join("captured.json");
+
+        // Hook reads stdin and writes it to a tempfile so we can
+        // inspect what was actually passed.
+        let cmd = format!(
+            "cat > {} ; echo ok",
+            stdout_capture.to_string_lossy().replace('\'', "'\\''"),
+        );
+
+        // Build a discovery-shaped HooksIndex directly so the test
+        // doesn't depend on the on-disk discovery walker (which has
+        // its own coverage). The index points the SubagentStop event
+        // at our capture command.
+        use crate::plugin::builtin::user_hooks::config::HookCommand;
+        use crate::plugin::builtin::user_hooks::discovery::CompiledGroup;
+        use crate::plugin::builtin::user_hooks::matcher::CompiledMatcher;
+
+        let group = CompiledGroup {
+            matcher: CompiledMatcher::compile("*").expect("compile *"),
+            commands: vec![HookCommand {
+                type_field: "command".into(),
+                command: cmd,
+                timeout: 5,
+            }],
+            source: project.path().to_path_buf(),
+        };
+        let mut idx = HooksIndex::default();
+        idx.by_event
+            .entry(HookEvent::SubagentStop)
+            .or_default()
+            .push(group);
+
+        let mut p = UserHooksPlugin::new(
+            Arc::new(RwLock::new(idx)),
+            "test-session".into(),
+            project.path().to_path_buf(),
+            Arc::new(RwLock::new(project.path().join("transcript.json"))),
+        );
+
+        let _ = p
+            .on_event(HostEvent::SubagentStop {
+                agent_name: "code-reviewer".into(),
+                success: true,
+            })
+            .await
+            .expect("dispatch should not error");
+
+        let captured = std::fs::read_to_string(&stdout_capture)
+            .expect("hook should have written stdin to captured.json");
+        let payload: serde_json::Value = serde_json::from_str(&captured).expect("payload is JSON");
+
+        assert_eq!(payload["hook_event_name"], "SubagentStop");
+        assert_eq!(payload["subagent"], "code-reviewer");
+        assert_eq!(payload["stop_hook_active"], false);
     }
 
     /// After a `Stop` hook returns `Block`, the plugin sets the

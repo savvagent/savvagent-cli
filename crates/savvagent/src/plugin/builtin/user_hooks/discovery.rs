@@ -22,6 +22,7 @@ pub enum HookEvent {
     UserPromptSubmit,
     SessionStart,
     Stop,
+    SubagentStop,
 }
 
 impl HookEvent {
@@ -32,6 +33,7 @@ impl HookEvent {
             "UserPromptSubmit" => Some(HookEvent::UserPromptSubmit),
             "SessionStart" => Some(HookEvent::SessionStart),
             "Stop" => Some(HookEvent::Stop),
+            "SubagentStop" => Some(HookEvent::SubagentStop),
             _ => None,
         }
     }
@@ -218,14 +220,33 @@ mod tests {
         write(
             &proj.path().join(".savvagent"),
             "settings.json",
-            r#"{ "hooks": { "SubagentStop": [ { "hooks": [ { "command": "x" } ] } ], "Stop": [ { "hooks": [ { "command": "y" } ] } ] } }"#,
+            r#"{ "hooks": { "Notification": [ { "hooks": [ { "command": "x" } ] } ], "Stop": [ { "hooks": [ { "command": "y" } ] } ] } }"#,
         );
 
         let idx = walk_all(proj.path(), home.path());
         assert_eq!(idx.warnings.len(), 1);
-        assert!(idx.warnings[0].contains("SubagentStop"));
+        assert!(idx.warnings[0].contains("Notification"));
         let groups = idx.by_event.get(&HookEvent::Stop).unwrap();
         assert_eq!(groups[0].commands[0].command, "y");
+    }
+
+    #[test]
+    fn subagent_stop_event_is_recognized() {
+        let proj = TempDir::new().unwrap();
+        let home = TempDir::new().unwrap();
+        write(
+            &proj.path().join(".savvagent"),
+            "settings.json",
+            r#"{ "hooks": { "SubagentStop": [ { "hooks": [ { "command": "z" } ] } ] } }"#,
+        );
+
+        let idx = walk_all(proj.path(), home.path());
+        assert!(idx.warnings.is_empty());
+        let groups = idx
+            .by_event
+            .get(&HookEvent::SubagentStop)
+            .expect("SubagentStop indexed");
+        assert_eq!(groups[0].commands[0].command, "z");
     }
 
     #[test]

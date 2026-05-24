@@ -32,15 +32,24 @@ use crate::tools::{
 /// Current transcript file schema version.
 ///
 /// Increment when the on-disk shape changes incompatibly. The loader rejects
-/// files whose `schema_version` doesn't match this constant with
+/// files whose `schema_version` is unknown with
 /// [`TranscriptError::SchemaMismatch`], which lets callers surface a clear
 /// error rather than silently misinterpreting old data.
+///
+/// **v2 (current):** adds the `subagent_transcripts` sidecar map keyed by the
+/// parent `task` tool-call id. Populated by the user-agents plugin's task
+/// tool handler when a subagent run completes; absent (empty map, elided
+/// from JSON) when no subagent ran.
+///
+/// **v1:** the original wrapper format — `schema_version`, `model`,
+/// `saved_at`, `messages`. Still accepted by the loader (a warn-log is
+/// emitted noting that subagent transcripts will be absent).
 ///
 /// **Pre-resume files** (written before this version field was introduced)
 /// lack the `schema_version` field entirely. They are accepted as v1
 /// transcripts — the only field they carry is the raw `Vec<Message>` array,
-/// which is identical in shape to `TranscriptFile::messages` in v1.
-pub const TRANSCRIPT_SCHEMA_VERSION: u32 = 1;
+/// which is identical in shape to `TranscriptFile::messages` in v1/v2.
+pub const TRANSCRIPT_SCHEMA_VERSION: u32 = 2;
 
 /// On-disk transcript format.
 ///
@@ -57,6 +66,28 @@ pub struct TranscriptFile {
     /// Unix timestamp (seconds) of when the transcript was saved.
     pub saved_at: u64,
     /// Conversation messages in chronological order.
+    pub messages: Vec<Message>,
+    /// Map from parent `task` tool-call id → subagent transcript.
+    /// Empty in transcripts where no subagent ran. Added in schema v2.
+    ///
+    /// `#[serde(default)]` lets v1 transcripts deserialize cleanly with an
+    /// empty map; `skip_serializing_if` keeps the output clean when no
+    /// subagent ran.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub subagent_transcripts: HashMap<String, SubagentTranscript>,
+}
+
+/// A subagent's full message history, embedded in [`TranscriptFile`]
+/// under its parent `task` tool call's id. Populated by the user-agents
+/// plugin's task tool handler when a subagent run completes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubagentTranscript {
+    /// Agent name (slug) that ran.
+    pub agent_name: String,
+    /// Per-agent model override that was active for this run, or
+    /// `None` if the parent's active model was used.
+    pub model: Option<String>,
+    /// Subagent message history in chronological order.
     pub messages: Vec<Message>,
 }
 
@@ -267,6 +298,18 @@ pub enum TurnEvent {
         /// Final outcome — same value `run_turn_streaming` returns.
         outcome: TurnOutcome,
     },
+    /// Fired by a [`SubHost`] when its subagent loop reaches a clean
+    /// `end_turn`. Not fired for cancelled subagent turns. The TUI's
+    /// `TurnEvent → HostEvent` translator forwards this as
+    /// `HostEvent::SubagentStop` so the user-hooks plugin can fire a
+    /// `SubagentStop` shell hook.
+    SubagentStop {
+        /// Name (slug) of the agent whose turn just ended.
+        agent_name: String,
+        /// Whether the turn ended cleanly (always `true` in v1 — kept
+        /// for forward-compat with future failure-pathway variants).
+        success: bool,
+    },
     /// A cooperative cancel signal was received and acted upon. The turn
     /// did not complete normally; the in-flight `complete` future was
     /// dropped. Emitted before returning [`HostError::Cancelled`].
@@ -299,7 +342,7 @@ pub struct Host {
     /// `/model <id>`. A separate lock (not a mutable `config`) so that
     /// concurrent readers of `config` remain unaffected.
     current_model: tokio::sync::RwLock<String>,
-    tools: Mutex<Option<ToolRegistry>>,
+    tools: Mutex<Option<Arc<ToolRegistry>>>,
     state: Mutex<SessionState>,
     system_prompt: Option<String>,
     /// Layered permission policy: sensitive-path floor + SAVVAGENT.md
@@ -363,6 +406,18 @@ pub struct Host {
     /// installs itself via [`Host::set_pre_tool_gate`].
     pre_tool_gate:
         tokio::sync::RwLock<Option<std::sync::Arc<dyn crate::pre_tool_gate::PreToolUseGate>>>,
+    /// Stable identifier for this `Host` instance. Surfaced to in-process
+    /// tools via [`crate::ToolCallContext`] so subagent hooks can correlate
+    /// across nesting levels. Defaults to a fresh UUID v4 at construction
+    /// time; embedders that want to thread an external session id through
+    /// can set it via [`HostConfig::session_id`].
+    session_id: String,
+    /// `Weak<Self>` populated post-construction by [`Host::wire_self_weak`].
+    /// `run_turn_inner` upgrades it when dispatching an in-process tool so
+    /// the handler's [`crate::ToolCallContext::host`] receives a real
+    /// `Arc<Host>` reference back to this host. Tests that never register
+    /// in-process tools can skip the wiring without harm.
+    self_weak: std::sync::OnceLock<std::sync::Weak<Self>>,
 }
 
 struct SessionState {
@@ -504,6 +559,7 @@ impl Host {
             .collect();
 
         let initial_model = config.model.clone();
+        let config_session_id = config.session_id.clone();
         let mut startup_notes: Vec<String> = Vec::new();
         let routing_rules = match config.routing_rules_path.as_ref() {
             Some(path) => match crate::router::RoutingRules::load_from_path(path) {
@@ -527,7 +583,7 @@ impl Host {
             pool: tokio::sync::RwLock::new(pool_map),
             active_provider: tokio::sync::RwLock::new(active_id),
             current_model: tokio::sync::RwLock::new(initial_model),
-            tools: Mutex::new(Some(tools)),
+            tools: Mutex::new(Some(Arc::new(tools))),
             state: Mutex::new(SessionState {
                 messages: Vec::new(),
             }),
@@ -546,6 +602,8 @@ impl Host {
                 crate::resources::ResourceCache::default(),
             )),
             pre_tool_gate: tokio::sync::RwLock::new(None),
+            session_id: config_session_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+            self_weak: std::sync::OnceLock::new(),
         };
         host.wire_self_into_resolver().await;
         // Spawn the resource pump. It owns the receiver, the cache handle,
@@ -620,6 +678,7 @@ impl Host {
         cancel_signal_map.insert(default_id.clone(), broadcast::channel(8).0);
 
         let initial_model = config.model.clone();
+        let config_session_id = config.session_id.clone();
         let mut startup_notes: Vec<String> = Vec::new();
         let routing_rules = match config.routing_rules_path.as_ref() {
             Some(path) => match crate::router::RoutingRules::load_from_path(path) {
@@ -643,7 +702,7 @@ impl Host {
             pool: tokio::sync::RwLock::new(pool_map),
             active_provider: tokio::sync::RwLock::new(default_id),
             current_model: tokio::sync::RwLock::new(initial_model),
-            tools: Mutex::new(Some(tools)),
+            tools: Mutex::new(Some(Arc::new(tools))),
             state: Mutex::new(SessionState {
                 messages: Vec::new(),
             }),
@@ -662,6 +721,8 @@ impl Host {
                 crate::resources::ResourceCache::default(),
             )),
             pre_tool_gate: tokio::sync::RwLock::new(None),
+            session_id: config_session_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+            self_weak: std::sync::OnceLock::new(),
         };
         host.wire_self_into_resolver().await;
         // Spawn the resource pump. Mirrors the spawn in `Host::start`.
@@ -929,9 +990,22 @@ impl Host {
             }
         }
 
+        // Use the async `tool_defs()` aggregator so the model sees both
+        // stdio-served tools AND any in-process tools registered via
+        // `Effect::RegisterInProcessTool` (e.g. the `task` tool from
+        // the user-agents plugin). The previous code read `defs.clone()`
+        // directly, which only captured the stdio set and silently hid
+        // in-process tools from the parent model's tool list.
         let tool_defs = {
             let guard = self.tools.lock().await;
-            guard.as_ref().map(|t| t.defs.clone()).unwrap_or_default()
+            match guard.as_ref() {
+                Some(registry) => {
+                    let registry = Arc::clone(registry);
+                    drop(guard);
+                    registry.tool_defs().await
+                }
+                None => Vec::new(),
+            }
         };
 
         let mut tool_calls: Vec<ToolCall> = Vec::new();
@@ -1218,6 +1292,18 @@ impl Host {
                                 })
                                 .await;
                         }
+                        // Snapshot the registry up front so we can check
+                        // in-process membership before consulting the
+                        // pre-tool gate. Cloning the Arc is cheap; the
+                        // lock is dropped immediately after.
+                        let registry_arc: Option<Arc<crate::tools::ToolRegistry>> = {
+                            let guard = self.tools.lock().await;
+                            guard.as_ref().map(Arc::clone)
+                        };
+                        let is_in_process = match &registry_arc {
+                            Some(r) => r.in_process_has(&name).await,
+                            None => false,
+                        };
                         let outcome = if name == crate::tools::READ_RESOURCE_TOOL_NAME {
                             // Synthetic read_resource: parse uri, look up owner via
                             // resource cache, dispatch via the registry helper.
@@ -1252,6 +1338,44 @@ impl Host {
                         } else if let Some(blocked) = self.check_pre_tool_gate(&name, &input).await
                         {
                             blocked
+                        } else if is_in_process {
+                            // In-process tool — dispatch via
+                            // `call_in_process` with a `ToolCallContext`
+                            // so handlers can downcast to get back a
+                            // typed reference to the host + cancellation
+                            // token. `self_arc()` returns None if the
+                            // embedder forgot to call `wire_self_arc`;
+                            // in that case we surface a clear error
+                            // rather than fail open.
+                            match (registry_arc, self.self_arc()) {
+                                (Some(registry), Some(host_arc)) => {
+                                    let ctx_value =
+                                        std::sync::Arc::new(crate::tools::ToolCallContext {
+                                            host: host_arc,
+                                            subagent: None,
+                                            cancellation: tokio_util::sync::CancellationToken::new(
+                                            ),
+                                        });
+                                    let ctx: std::sync::Arc<dyn std::any::Any + Send + Sync> =
+                                        ctx_value;
+                                    match registry.call_in_process(&name, input.clone(), ctx).await
+                                    {
+                                        Ok(v) => crate::tools::ToolCallOutcome::success(match v {
+                                            serde_json::Value::String(s) => s,
+                                            other => other.to_string(),
+                                        }),
+                                        Err(e) => crate::tools::ToolCallOutcome::error(e),
+                                    }
+                                }
+                                (None, _) => crate::tools::ToolCallOutcome::error(
+                                    "in-process tool: registry unavailable".to_string(),
+                                ),
+                                (_, None) => crate::tools::ToolCallOutcome::error(
+                                    "in-process tool: Host::wire_self_arc was not called; \
+                                     cannot construct ToolCallContext"
+                                        .to_string(),
+                                ),
+                            }
                         } else {
                             let guard = self.tools.lock().await;
                             let registry = guard.as_ref().expect("tools registry present");
@@ -1348,6 +1472,10 @@ impl Host {
             model: self.current_model.read().await.clone(),
             saved_at,
             messages,
+            // Sidecar populated by SubHost when subagents run; empty here
+            // since this path is the parent host's save flow and we don't
+            // yet plumb the map through.
+            subagent_transcripts: HashMap::new(),
         };
         let json = serde_json::to_vec_pretty(&record)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
@@ -1390,7 +1518,16 @@ impl Host {
             serde_json::Value::Object(map) if map.contains_key("schema_version") => {
                 let record: TranscriptFile = serde_json::from_value(root)
                     .map_err(|e| TranscriptError::Malformed(e.to_string()))?;
-                if record.schema_version != TRANSCRIPT_SCHEMA_VERSION {
+                if record.schema_version == 1 {
+                    // v1 is forward-compatible with v2 — the only new field
+                    // is `subagent_transcripts`, which `#[serde(default)]`
+                    // already populated as an empty map. Warn so an operator
+                    // who tails logs can see they're loading an older shape.
+                    tracing::warn!(
+                        path = %path.display(),
+                        "loading transcript written with schema v1; subagent_transcripts will be absent"
+                    );
+                } else if record.schema_version != TRANSCRIPT_SCHEMA_VERSION {
                     return Err(TranscriptError::SchemaMismatch {
                         found: record.schema_version,
                         expected: TRANSCRIPT_SCHEMA_VERSION,
@@ -1407,6 +1544,7 @@ impl Host {
                     model: self.current_model.read().await.clone(),
                     saved_at: 0,
                     messages,
+                    subagent_transcripts: HashMap::new(),
                 }
             }
             _ => {
@@ -1618,14 +1756,62 @@ impl Host {
     /// Cleanly shut down tool-server children. The provider session is
     /// dropped along with `self`. Idempotent — calling twice is a no-op for
     /// the second call.
+    ///
+    /// The wrapped `ToolRegistry::shutdown(self)` consumes the registry,
+    /// so we use `Arc::into_inner` to recover ownership. If any clones
+    /// of the registry are still outstanding (e.g. a live `SubHost`),
+    /// we log a warning and skip the cleanup — the child processes will
+    /// be reaped when the last `Arc` drops.
     pub async fn shutdown(&self) {
         let registry = {
             let mut guard = self.tools.lock().await;
             guard.take()
         };
         if let Some(r) = registry {
-            r.shutdown().await;
+            match Arc::into_inner(r) {
+                Some(reg) => reg.shutdown().await,
+                None => {
+                    tracing::warn!(
+                        "Host::shutdown: ToolRegistry still has outstanding Arc references; \
+                         skipping explicit child cleanup (drop-time cleanup will run)"
+                    );
+                }
+            }
         }
+    }
+
+    /// Clone the underlying `Arc<ToolRegistry>` for sharing with a
+    /// `SubHost`. Returns `None` if the host has already been shut down.
+    /// Internal API surfaced for the in-process tool path; consumed by
+    /// the `task` tool handler when it builds a `SubHost`.
+    pub async fn tool_registry_arc(&self) -> Option<Arc<crate::tools::ToolRegistry>> {
+        let guard = self.tools.lock().await;
+        guard.as_ref().map(Arc::clone)
+    }
+
+    /// Acquire a [`ProviderLease`] on the currently-active provider.
+    /// Used by [`crate::SubHost`] to drive its own turn loop on the
+    /// parent's pool. Mirrors the lease-acquisition discipline in
+    /// `run_turn_inner`: the pool read guard is taken and dropped
+    /// before any `.await`, so callers can hold the lease across
+    /// `provider.complete` without blocking pool writers.
+    ///
+    /// Returns [`HostError::NoActiveProvider`] when the pool has no
+    /// entry for the active provider id (e.g. mid-disconnect).
+    pub(crate) async fn active_provider_lease(&self) -> Result<ProviderLease, HostError> {
+        let active = self.active_provider.read().await.clone();
+        let pool = self.pool.read().await;
+        let Some(entry) = pool.get(&active) else {
+            return Err(HostError::NoActiveProvider);
+        };
+        Ok(entry.lease())
+    }
+
+    /// Snapshot the model id forwarded in every `CompleteRequest`. Used
+    /// by [`crate::SubHost`] when a subagent doesn't override the model
+    /// in its frontmatter.
+    pub(crate) async fn current_model_snapshot(&self) -> String {
+        self.current_model.read().await.clone()
     }
 
     /// The currently-active provider id. Turns are routed to this entry.
@@ -1860,6 +2046,38 @@ impl Host {
         *g = Some(gate);
     }
 
+    /// Stable session identifier for this `Host` instance. Set at
+    /// construction time via [`HostConfig::with_session_id`] or defaulted
+    /// to a fresh UUID v4. Surfaced to in-process tool handlers through
+    /// [`crate::ToolCallContext`] so subagent hooks can correlate
+    /// across nesting levels.
+    pub fn session_id(&self) -> String {
+        self.session_id.clone()
+    }
+
+    /// Register an `Arc<Self>` reference so that `run_turn_inner` can
+    /// hand a real `Arc<Host>` to in-process tool handlers via
+    /// [`crate::ToolCallContext::host`]. Must be called by the embedder
+    /// after wrapping the host in `Arc`. Idempotent — subsequent calls
+    /// after the first are no-ops.
+    ///
+    /// Embedders that never dispatch in-process tools can skip this
+    /// wiring; the parent dispatch path falls back to a synthesized
+    /// error result in that case.
+    pub fn wire_self_arc(self: &std::sync::Arc<Self>) {
+        let weak = std::sync::Arc::downgrade(self);
+        let _ = self.self_weak.set(weak);
+    }
+
+    /// Try to upgrade the stored `Weak<Self>` into an `Arc<Self>`.
+    /// Returns `None` when [`Self::wire_self_arc`] was never called, or
+    /// when every other `Arc<Self>` has been dropped (impossible while
+    /// `&self` is live since the caller necessarily holds one, but the
+    /// fallible API keeps the contract honest).
+    fn self_arc(&self) -> Option<std::sync::Arc<Self>> {
+        self.self_weak.get().and_then(|w| w.upgrade())
+    }
+
     /// Borrow the currently-installed gate. Used by the dispatch path.
     pub(crate) async fn pre_tool_gate_snapshot(
         &self,
@@ -1882,7 +2100,21 @@ impl Host {
         let name = tool_name.to_string();
         let input_owned = input.clone();
         let gate_owned = gate.clone();
-        let join = tokio::spawn(async move { gate_owned.check(&name, &input_owned).await }).await;
+        // Propagate the `SUBAGENT_NAME` task-local across the `tokio::spawn`
+        // boundary — task-locals do not auto-inherit into spawned tasks, so
+        // read the current value here and re-enter a scope inside the
+        // spawned future. Outside any subagent scope this is `None` and
+        // the re-entered scope is harmless.
+        let subagent = crate::subhost::SUBAGENT_NAME
+            .try_with(|v| v.clone())
+            .ok()
+            .flatten();
+        let join = tokio::spawn(async move {
+            crate::subhost::SUBAGENT_NAME
+                .scope(subagent, gate_owned.check(&name, &input_owned))
+                .await
+        })
+        .await;
         match join {
             Ok(crate::pre_tool_gate::PreToolDecision::Allow) => None,
             Ok(crate::pre_tool_gate::PreToolDecision::Block(reason)) => Some(
@@ -3500,6 +3732,113 @@ mod transcript_tests {
         let record = host.load_transcript(&path).await.unwrap();
         assert_eq!(record.messages, messages);
         assert_eq!(record.schema_version, TRANSCRIPT_SCHEMA_VERSION);
+    }
+
+    /// Pin the schema version constant so accidental rollbacks fail loudly.
+    #[tokio::test]
+    async fn transcript_schema_version_is_two() {
+        assert_eq!(TRANSCRIPT_SCHEMA_VERSION, 2);
+    }
+
+    /// A `TranscriptFile` carrying a `subagent_transcripts` entry round-trips
+    /// through serde without losing the sidecar payload.
+    #[tokio::test]
+    async fn subagent_transcript_round_trip() {
+        let mut map: HashMap<String, SubagentTranscript> = HashMap::new();
+        map.insert(
+            "toolu_abc".into(),
+            SubagentTranscript {
+                agent_name: "code-reviewer".into(),
+                model: Some("claude-sonnet-4-6".into()),
+                messages: vec![Message {
+                    role: Role::User,
+                    content: vec![ContentBlock::Text {
+                        text: "review this".into(),
+                    }],
+                }],
+            },
+        );
+        let original = TranscriptFile {
+            schema_version: TRANSCRIPT_SCHEMA_VERSION,
+            model: "m".into(),
+            saved_at: 1234,
+            messages: vec![],
+            subagent_transcripts: map,
+        };
+        let json = serde_json::to_string(&original).expect("serialize");
+        let parsed: TranscriptFile = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(parsed.subagent_transcripts.len(), 1);
+        let sub = parsed.subagent_transcripts.get("toolu_abc").expect("entry");
+        assert_eq!(sub.agent_name, "code-reviewer");
+        assert_eq!(sub.model.as_deref(), Some("claude-sonnet-4-6"));
+        assert_eq!(sub.messages.len(), 1);
+    }
+
+    /// v1 transcripts (no `subagent_transcripts` field) deserialize cleanly
+    /// thanks to `#[serde(default)]`, with an empty sidecar map.
+    #[tokio::test]
+    async fn transcript_v1_without_subagent_field_loads_clean() {
+        let v1_json = serde_json::json!({
+            "schema_version": 1,
+            "model": "m",
+            "saved_at": 1234,
+            "messages": []
+        });
+        let parsed: TranscriptFile = serde_json::from_value(v1_json).expect("v1 deserializes");
+        assert_eq!(parsed.schema_version, 1);
+        assert!(parsed.subagent_transcripts.is_empty());
+    }
+
+    /// `load_transcript` accepts a v1 file (warn-logged), returning a record
+    /// whose `schema_version` is still 1 and whose sidecar map is empty.
+    #[tokio::test]
+    async fn load_transcript_accepts_v1_with_warn_log() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("v1.json");
+        let v1_content = serde_json::to_vec_pretty(&serde_json::json!({
+            "schema_version": 1,
+            "model": "m",
+            "saved_at": 0,
+            "messages": []
+        }))
+        .unwrap();
+        tokio::fs::write(&path, v1_content).await.unwrap();
+
+        let host = Host::with_components(
+            tmp_config(dir.path()),
+            Box::new(NoopProvider) as Box<dyn ProviderClient + Send + Sync>,
+        )
+        .await
+        .unwrap();
+        let record = host
+            .load_transcript(&path)
+            .await
+            .expect("v1 transcript should load");
+        assert_eq!(record.schema_version, 1);
+        assert!(record.subagent_transcripts.is_empty());
+        assert!(record.messages.is_empty());
+    }
+
+    /// Saving omits an empty `subagent_transcripts` from the JSON output so
+    /// transcripts that don't use subagents stay visually clean.
+    #[tokio::test]
+    async fn save_transcript_omits_empty_subagent_map_from_json() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("clean.json");
+
+        let host = Host::with_components(
+            tmp_config(dir.path()),
+            Box::new(NoopProvider) as Box<dyn ProviderClient + Send + Sync>,
+        )
+        .await
+        .unwrap();
+        host.save_transcript(&path).await.unwrap();
+
+        let on_disk = tokio::fs::read_to_string(&path).await.unwrap();
+        assert!(
+            !on_disk.contains("subagent_transcripts"),
+            "empty sidecar map must be skipped in serialized form; got:\n{on_disk}"
+        );
     }
 
     /// `run_turn_streaming_with_blocks` must push the caller's blocks

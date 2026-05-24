@@ -36,6 +36,7 @@ use rmcp::{
 use savvagent_protocol::ToolDef;
 use serde_json::Value;
 use tokio::sync::Mutex;
+use tokio_util::sync::CancellationToken;
 
 use crate::config::ToolEndpoint;
 use crate::logging::tool_stderr_log_file;
@@ -102,6 +103,34 @@ impl<'a> BashNetContext<'a> {
             command: Some(command),
         }
     }
+}
+
+/// Per-subagent context passed through the in-process tool path.
+/// Carried inside [`ToolCallContext::subagent`] as an `Option`: `None`
+/// means the call originates from the parent's main turn loop.
+#[derive(Debug, Clone)]
+pub struct SubagentContext {
+    /// Nesting depth. Parent's first `task` call → depth 1; that
+    /// subagent's `task` call → depth 2; and so on. Capped at
+    /// `SAVVAGENT_AGENT_MAX_DEPTH` (default 3).
+    pub depth: u8,
+    /// The agent name (slug) currently executing.
+    pub agent_name: String,
+    /// The parent (top-level) session ID. Stable across subagent
+    /// nesting so hooks can correlate across levels.
+    pub parent_session_id: String,
+}
+
+/// Concrete context passed to `InProcessToolHandler::call`. Handlers
+/// downcast `Arc<dyn Any>` to `Arc<ToolCallContext>` to obtain this.
+pub struct ToolCallContext {
+    /// The parent `Host`. In-process handlers use this to clone the
+    /// provider client, tool registry, gate, permissions, etc.
+    pub host: Arc<crate::Host>,
+    /// `Some` iff this call originates from a Sub-Host.
+    pub subagent: Option<SubagentContext>,
+    /// Cancellation token; child of the parent turn's token.
+    pub cancellation: CancellationToken,
 }
 
 /// Resolver invoked by [`ToolRegistry::call_with_bash_net_override`] when a
@@ -246,7 +275,7 @@ impl ClientHandler for ResourceCapturingHandler {
 }
 
 /// Aggregate view of all connected tool servers.
-pub(crate) struct ToolRegistry {
+pub struct ToolRegistry {
     /// Eager (always-spawned) tool servers. Indices in `routes` for
     /// non-bash tools point into this vector.
     eager_servers: Vec<ToolServer>,
@@ -259,6 +288,14 @@ pub(crate) struct ToolRegistry {
     /// Optional lazy slot for the configured `tool-bash` endpoint. `None`
     /// when no bash endpoint was supplied (e.g. tests).
     lazy_bash: Option<LazyBash>,
+    /// In-process tool handlers, registered by built-in plugins via
+    /// `Effect::RegisterInProcessTool`. Looked up before the stdio
+    /// children map.
+    in_process: tokio::sync::RwLock<
+        std::collections::HashMap<String, savvagent_plugin::InProcessToolHandlerArc>,
+    >,
+    /// Tool definitions for in-process tools, exposed via [`Self::tool_defs`].
+    in_process_defs: tokio::sync::RwLock<std::collections::HashMap<String, ToolDef>>,
 }
 
 struct ToolServer {
@@ -359,7 +396,7 @@ impl ToolRegistry {
     ///
     /// `bash_net_resolver` is invoked on every `tool-bash` call to resolve
     /// the `allow_net` for that call's spawn. See [`BashNetResolver`].
-    pub async fn connect(
+    pub(crate) async fn connect(
         endpoints: &[ToolEndpoint],
         project_root: &Path,
         sandbox: &SandboxConfig,
@@ -517,6 +554,8 @@ impl ToolRegistry {
             routes,
             defs,
             lazy_bash,
+            in_process: tokio::sync::RwLock::new(std::collections::HashMap::new()),
+            in_process_defs: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         })
     }
 
@@ -528,17 +567,113 @@ impl ToolRegistry {
         self.lazy_bash.is_some()
     }
 
+    /// Test-only constructor for an empty registry. Mirrors what
+    /// `connect()` produces when given a `HostConfig` with no tools.
+    #[cfg(test)]
+    pub(crate) fn empty_for_test() -> Arc<Self> {
+        Arc::new(Self {
+            eager_servers: Vec::new(),
+            routes: HashMap::new(),
+            defs: Vec::new(),
+            lazy_bash: None,
+            in_process: tokio::sync::RwLock::new(std::collections::HashMap::new()),
+            in_process_defs: tokio::sync::RwLock::new(std::collections::HashMap::new()),
+        })
+    }
+
+    /// Register an in-process tool handler under `spec.name`. Subsequent
+    /// calls to [`Self::call_in_process`] with that name dispatch to
+    /// `handler`; `spec` is exposed via [`Self::tool_defs`] so the
+    /// provider sees the tool in the model-facing tool list.
+    ///
+    /// If a handler is already registered for `spec.name`, it is replaced.
+    ///
+    /// Called from the TUI by `apply_pending_in_process_tools` in
+    /// response to an `Effect::RegisterInProcessTool`.
+    pub async fn register_in_process_tool(
+        &self,
+        spec: ToolDef,
+        handler: savvagent_plugin::InProcessToolHandlerArc,
+    ) {
+        let name = spec.name.clone();
+        let mut handlers = self.in_process.write().await;
+        handlers.insert(name.clone(), handler);
+        drop(handlers);
+        let mut defs = self.in_process_defs.write().await;
+        defs.insert(name, spec);
+    }
+
+    /// Snapshot of all tool definitions known to this registry: the
+    /// stdio-served ones (eager + lazy bash, plus the synthetic
+    /// `read_resource`) followed by any in-process tools registered via
+    /// [`Self::register_in_process_tool`]. Used by the host when
+    /// building the provider's tool list and by
+    /// [`crate::SubHost`] callers (e.g. `TaskToolHandler`) that need
+    /// the full parent-tool view to compute a per-subagent allowlist.
+    pub async fn tool_defs(&self) -> Vec<ToolDef> {
+        let mut out: Vec<ToolDef> = self.defs.clone();
+        let in_proc = self.in_process_defs.read().await;
+        for def in in_proc.values() {
+            out.push(def.clone());
+        }
+        out
+    }
+
+    /// Dispatch an in-process tool call. The handler receives the
+    /// caller-supplied `ctx` as-is (typically downcast to
+    /// `Arc<ToolCallContext>`).
+    ///
+    /// Currently unused outside tests; the SubHost dispatch path
+    /// (Task 7+) will route through here when the tool name resolves
+    /// to an in-process handler.
+    #[allow(dead_code)]
+    pub(crate) async fn call_in_process(
+        &self,
+        name: &str,
+        input: serde_json::Value,
+        ctx: std::sync::Arc<dyn std::any::Any + Send + Sync>,
+    ) -> Result<serde_json::Value, String> {
+        let handler = {
+            let guard = self.in_process.read().await;
+            let Some(arc) = guard.get(name) else {
+                return Err(format!("unknown in-process tool: {name}"));
+            };
+            arc.clone()
+        };
+        handler.as_arc().call(input, ctx).await
+    }
+
+    /// True iff `name` is registered as an in-process tool. Used by
+    /// callers that want to choose between [`Self::call_in_process`]
+    /// and the stdio-path [`Self::call_with_bash_net_override`].
+    ///
+    /// Currently unused outside tests; the SubHost dispatch path
+    /// (Task 7+) will consult this to choose the right entry point.
+    #[allow(dead_code)]
+    pub(crate) async fn in_process_has(&self, name: &str) -> bool {
+        self.in_process.read().await.contains_key(name)
+    }
+
     /// Call `name` with a per-call bash network override.
     ///
     /// For non-bash tools, `net_override` is ignored. For bash tools, the
     /// override is passed to the resolver and to the spawn logic; see
     /// [`LazyBash`] for the spawn-vs-reuse decision.
-    pub async fn call_with_bash_net_override(
+    pub(crate) async fn call_with_bash_net_override(
         &self,
         name: &str,
         input: Value,
         net_override: NetOverride,
     ) -> ToolCallOutcome {
+        // In-process tools take precedence over stdio routes. Callers
+        // who hit this path lack a `ToolCallContext`, so this is a
+        // guardrail to surface the bug rather than fail open.
+        if self.in_process.read().await.contains_key(name) {
+            return ToolCallOutcome::error(format!(
+                "in-process tool `{name}` must be dispatched via call_in_process"
+            ));
+        }
+
         // Validate args shape up-front; both paths need it as an object.
         let args = match input {
             Value::Object(m) => m,
@@ -589,7 +724,7 @@ impl ToolRegistry {
     }
 
     /// Cancel each tool server session, draining its child process.
-    pub async fn shutdown(self) {
+    pub(crate) async fn shutdown(self) {
         for s in self.eager_servers {
             if let Err(e) = s.service.cancel().await {
                 tracing::warn!("error closing tool server {}: {e}", s.label);
@@ -1118,6 +1253,8 @@ mod lazy_bash_tests {
             routes: HashMap::new(),
             defs: Vec::new(),
             lazy_bash: None,
+            in_process: tokio::sync::RwLock::new(std::collections::HashMap::new()),
+            in_process_defs: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         };
         assert!(!registry.bash_available());
     }
@@ -1225,5 +1362,66 @@ mod tool_call_outcome_tests {
             "transport-error payload must self-identify: {}",
             outcome.payload
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn subagent_context_carries_depth_and_name() {
+        let ctx = SubagentContext {
+            depth: 1,
+            agent_name: "code-reviewer".into(),
+            parent_session_id: "abc-123".into(),
+        };
+        assert_eq!(ctx.depth, 1);
+        assert_eq!(ctx.agent_name, "code-reviewer");
+    }
+
+    #[test]
+    fn tool_call_context_struct_compiles() {
+        fn _accepts_ctx(_ctx: ToolCallContext) {}
+        // Type-only smoke; no construction (requires Arc<Host> which is impractical here).
+    }
+
+    #[tokio::test]
+    async fn registry_routes_in_process_tool() {
+        use async_trait::async_trait;
+        use savvagent_plugin::{InProcessToolHandler, InProcessToolHandlerArc};
+        use serde_json::{Value, json};
+        use std::any::Any;
+        use std::sync::Arc;
+
+        struct Echo;
+
+        #[async_trait]
+        impl InProcessToolHandler for Echo {
+            async fn call(
+                &self,
+                input: Value,
+                _ctx: Arc<dyn Any + Send + Sync>,
+            ) -> Result<Value, String> {
+                Ok(input)
+            }
+        }
+
+        let registry = ToolRegistry::empty_for_test();
+        let spec = ToolDef {
+            name: "echo".into(),
+            description: "echo input".into(),
+            input_schema: json!({"type": "object"}),
+        };
+        registry
+            .register_in_process_tool(spec, InProcessToolHandlerArc::new(Echo))
+            .await;
+
+        let ctx: Arc<dyn Any + Send + Sync> = Arc::new(()) as Arc<dyn Any + Send + Sync>;
+        let outcome = registry
+            .call_in_process("echo", json!({"hi": 1}), ctx)
+            .await;
+        assert!(outcome.is_ok(), "call_in_process returned: {outcome:?}");
+        assert_eq!(outcome.unwrap(), json!({"hi": 1}));
     }
 }

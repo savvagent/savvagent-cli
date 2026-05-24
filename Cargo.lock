@@ -2787,7 +2787,7 @@ dependencies = [
 
 [[package]]
 name = "provider-anthropic"
-version = "0.16.1"
+version = "0.17.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2809,7 +2809,7 @@ dependencies = [
 
 [[package]]
 name = "provider-gemini"
-version = "0.16.1"
+version = "0.17.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2831,7 +2831,7 @@ dependencies = [
 
 [[package]]
 name = "provider-local"
-version = "0.16.1"
+version = "0.17.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2850,7 +2850,7 @@ dependencies = [
 
 [[package]]
 name = "provider-openai"
-version = "0.16.1"
+version = "0.17.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3705,7 +3705,7 @@ dependencies = [
 
 [[package]]
 name = "savvagent"
-version = "0.16.1"
+version = "0.17.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3759,7 +3759,7 @@ dependencies = [
 
 [[package]]
 name = "savvagent-host"
-version = "0.16.1"
+version = "0.17.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3771,6 +3771,7 @@ dependencies = [
  "resource-tool",
  "rmcp",
  "savvagent-mcp",
+ "savvagent-plugin",
  "savvagent-protocol",
  "serde",
  "serde_json",
@@ -3778,6 +3779,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-util",
  "toml",
  "tracing",
  "tracing-subscriber",
@@ -3786,7 +3788,7 @@ dependencies = [
 
 [[package]]
 name = "savvagent-mcp"
-version = "0.16.1"
+version = "0.17.0"
 dependencies = [
  "async-trait",
  "savvagent-protocol",
@@ -3799,7 +3801,7 @@ dependencies = [
 
 [[package]]
 name = "savvagent-plugin"
-version = "0.16.1"
+version = "0.17.0"
 dependencies = [
  "async-trait",
  "savvagent-protocol",
@@ -3809,7 +3811,7 @@ dependencies = [
 
 [[package]]
 name = "savvagent-protocol"
-version = "0.16.1"
+version = "0.17.0"
 dependencies = [
  "schemars",
  "serde",
@@ -4709,7 +4711,7 @@ checksum = "5d99f8c9a7727884afe522e9bd5edbfc91a3312b36a77b5fb8926e4c31a41801"
 
 [[package]]
 name = "tool-bash"
-version = "0.16.1"
+version = "0.17.0"
 dependencies = [
  "anyhow",
  "rmcp",
@@ -4725,7 +4727,7 @@ dependencies = [
 
 [[package]]
 name = "tool-fs"
-version = "0.16.1"
+version = "0.17.0"
 dependencies = [
  "anyhow",
  "globset",
@@ -4743,7 +4745,7 @@ dependencies = [
 
 [[package]]
 name = "tool-grep"
-version = "0.16.1"
+version = "0.17.0"
 dependencies = [
  "anyhow",
  "grep-matcher",
@@ -4763,7 +4765,7 @@ dependencies = [
 
 [[package]]
 name = "tool-lsp"
-version = "0.16.1"
+version = "0.17.0"
 dependencies = [
  "anyhow",
  "async-trait",

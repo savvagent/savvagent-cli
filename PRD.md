@@ -59,6 +59,7 @@ What we change:
 - A clean separation in which `savvagent-host` knows nothing about Anthropic, and `provider-anthropic` knows nothing about the TUI.
 - A protocol (SPP) frozen enough to publish v0.1 on crates.io.
 - Installing Savvagent on Linux/macOS/Windows should be downloading a single archive (or running a one-line install script) plus authenticating with a provider — either an env var like `ANTHROPIC_API_KEY` or running `/connect` once to store the key in the OS keyring. Each platform archive bundles the TUI plus the `savvagent-tool-fs` / `savvagent-anthropic` / `savvagent-gemini` MCP servers under a single installer.
+- **User-defined subagents.** Users drop markdown files into `.savvagent/agents/` (or `.claude/agents/` for Claude-Code compat) to make them available as subagents the parent model can spawn via the built-in `task` tool, with per-agent tool scoping and optional model override. Subagent execution gets its own session state, system prompt, and tool view while sharing the parent's provider client, registry, hook gate, and permissions.
 
 ### Non-goals (v0.1)
 
@@ -69,6 +70,9 @@ What we change:
 - Multi-session UI, conversation branching, undo.
 - Auth beyond API keys in env / config file.
 - Caching policy (providers decide for now).
+- **Per-agent provider override.** Subagents run against the parent's active provider. Cross-provider subagent routing is a future concern.
+- **Parallel subagent fan-out.** Multiple `task` calls in a single round run sequentially, not concurrently.
+- **Subagent-only cancellation.** Esc cancels the whole parent turn (and all in-flight subagents); there's no UI for cancelling just one subagent.
 
 ### Explicit non-goals (long-term)
 

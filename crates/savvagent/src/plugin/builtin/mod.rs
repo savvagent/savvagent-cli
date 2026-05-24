@@ -79,6 +79,10 @@ pub mod splash;
 /// Theme catalog + `/theme` slash + theme picker modal.
 pub mod themes;
 
+/// `internal:user-agents` — discovers user-defined subagent definitions
+/// and exposes them via an in-process `task` tool.
+pub mod user_agents;
+
 /// `internal:user-hooks` — Claude-Code-compatible user shell hooks from
 /// `settings.json` files. PreToolUse gating + observe-only events.
 pub mod user_hooks;
@@ -99,6 +103,10 @@ pub mod tool_fs_summary;
 /// `internal:tool-grep-summary` — renders one-line summaries for the
 /// `tool-grep` `search` tool.
 pub mod tool_grep_summary;
+
+/// `internal:tool-task-summary` — renders one-line summaries for the
+/// `task` tool (in-process subagent dispatch from `internal:user-agents`).
+pub mod tool_task_summary;
 
 /// Fullscreen read-only file viewer; opened via `/view <path>`.
 pub mod view_file;

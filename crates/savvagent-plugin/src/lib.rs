@@ -51,6 +51,11 @@ pub use plugin::Plugin;
 pub mod screen;
 pub use screen::Screen;
 
+/// The [`InProcessToolHandler`] trait — savvagent-internal trait for tools
+/// whose implementation runs on the calling tokio runtime.
+pub mod in_process_tool;
+pub use in_process_tool::{InProcessToolHandler, InProcessToolHandlerArc};
+
 #[cfg(test)]
 mod trait_smoke {
     use super::*;

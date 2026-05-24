@@ -58,6 +58,7 @@ fn event_name(event: HookEvent) -> &'static str {
         HookEvent::UserPromptSubmit => "UserPromptSubmit",
         HookEvent::SessionStart => "SessionStart",
         HookEvent::Stop => "Stop",
+        HookEvent::SubagentStop => "SubagentStop",
     }
 }
 

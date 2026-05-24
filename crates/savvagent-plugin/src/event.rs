@@ -40,6 +40,10 @@ pub enum HookKind {
     /// the user runs `/use <provider>`. Subscribers (typically provider
     /// plugins) use this to update their slot rendering.
     ActiveProviderChanged,
+    /// Emitted once per subagent (Sub-Host) turn after it reaches
+    /// `end_turn`, before the result is returned to the parent as a
+    /// `task` ToolResult. Does NOT fire for cancelled subagent turns.
+    SubagentStop,
 }
 
 /// Typed host-lifecycle events that the runtime fires into the plugin bus.
@@ -123,6 +127,15 @@ pub enum HostEvent {
         /// Identifier of the provider that is now active.
         id: ProviderId,
     },
+    /// Fired when a Sub-Host (subagent) reaches `end_turn`. The result
+    /// has not yet been returned to the parent's `task` tool call.
+    /// Not fired on cancelled subagent turns.
+    SubagentStop {
+        /// The agent name (slug) that just finished.
+        agent_name: String,
+        /// Whether the subagent's turn ended cleanly.
+        success: bool,
+    },
 }
 
 impl HostEvent {
@@ -144,6 +157,7 @@ impl HostEvent {
             HostEvent::ProviderRegistered { .. } => HookKind::ProviderRegistered,
             HostEvent::ContextSizeChanged { .. } => HookKind::ContextSizeChanged,
             HostEvent::ActiveProviderChanged { .. } => HookKind::ActiveProviderChanged,
+            HostEvent::SubagentStop { .. } => HookKind::SubagentStop,
         }
     }
 }
@@ -239,5 +253,14 @@ mod tests {
         for (event, expected) in cases {
             assert_eq!(event.kind(), expected, "kind() mismatch for {:?}", event);
         }
+    }
+
+    #[test]
+    fn subagent_stop_kind_round_trip() {
+        let e = HostEvent::SubagentStop {
+            agent_name: "code-reviewer".into(),
+            success: true,
+        };
+        assert_eq!(e.kind(), HookKind::SubagentStop);
     }
 }

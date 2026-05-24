@@ -39,7 +39,15 @@ impl PreToolUseGate for UserHooksPreToolGate {
             transcript_path: &transcript,
             cwd: &self.project_root,
         };
-        let payload = payload::pre_tool_use(&ctx, tool_name, input);
+        // When called from inside a `SubHost::dispatch_tool` invocation,
+        // pick up the subagent name via the task-local. Outside any
+        // scope (parent-turn calls), `try_with` returns `Err`, which
+        // `.ok().flatten()` collapses to `None`.
+        let subagent = savvagent_host::SUBAGENT_NAME
+            .try_with(|v| v.clone())
+            .ok()
+            .flatten();
+        let payload = payload::pre_tool_use(&ctx, tool_name, input, subagent.as_deref());
         for group in groups {
             if !group.matcher.is_match(tool_name) {
                 continue;

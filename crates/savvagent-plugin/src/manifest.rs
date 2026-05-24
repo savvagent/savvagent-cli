@@ -6,7 +6,11 @@ use crate::types::{ChordPortable, PluginId, ProviderId, ThemeEntry};
 
 /// Static metadata a plugin advertises at registration. Indexed by the
 /// runtime; not re-queried per frame.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `Eq` is not derived because the transitively-contained
+/// [`crate::Effect::RegisterInProcessTool`] carries a `ToolDef` whose
+/// `input_schema: serde_json::Value` is not `Eq`.
+#[derive(Debug, Clone, PartialEq)]
 pub struct Manifest {
     /// The plugin id; must be unique across all registered plugins.
     pub id: PluginId,
@@ -35,7 +39,9 @@ pub enum PluginKind {
 ///
 /// Constructed by `Plugin::manifest` and indexed once at startup by the
 /// runtime. Fields are independent; a plugin may fill any subset.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+///
+/// `Eq` is not derived (see [`Manifest`] for why).
+#[derive(Debug, Clone, Default, PartialEq)]
 #[non_exhaustive]
 pub struct Contributions {
     /// Slash commands this plugin handles (name + summary + optional args hint).
@@ -140,7 +146,9 @@ pub struct SlotSpec {
 }
 
 /// Registration descriptor for a keybinding contributed by a plugin.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `Eq` is not derived because [`BoundAction`] cannot be `Eq` (see [`Effect`](crate::Effect)).
+#[derive(Debug, Clone, PartialEq)]
 pub struct KeybindingSpec {
     /// The key chord that triggers this binding.
     pub chord: ChordPortable,

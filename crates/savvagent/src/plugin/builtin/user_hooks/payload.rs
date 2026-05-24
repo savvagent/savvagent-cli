@@ -16,25 +16,49 @@ pub struct HookContext<'a> {
 }
 
 /// Build a `PreToolUse` stdin payload.
-pub fn pre_tool_use(ctx: &HookContext<'_>, tool_name: &str, tool_input: &Value) -> Value {
-    base(ctx, HookEvent::PreToolUse).extend(&[
+///
+/// When `subagent` is `Some(name)`, the payload includes a `"subagent"`
+/// field so user hooks can distinguish subagent tool calls from
+/// parent-turn calls. Parent-turn calls pass `None`.
+pub fn pre_tool_use(
+    ctx: &HookContext<'_>,
+    tool_name: &str,
+    tool_input: &Value,
+    subagent: Option<&str>,
+) -> Value {
+    let mut payload = base(ctx, HookEvent::PreToolUse).extend(&[
         ("tool_name", json!(tool_name)),
         ("tool_input", tool_input.clone()),
-    ])
+    ]);
+    if let Some(name) = subagent {
+        if let Some(obj) = payload.as_object_mut() {
+            obj.insert("subagent".into(), json!(name));
+        }
+    }
+    payload
 }
 
 /// Build a `PostToolUse` stdin payload.
+///
+/// See [`pre_tool_use`] for the `subagent` parameter contract.
 pub fn post_tool_use(
     ctx: &HookContext<'_>,
     tool_name: &str,
     tool_input: &Value,
     tool_response: &Value,
+    subagent: Option<&str>,
 ) -> Value {
-    base(ctx, HookEvent::PostToolUse).extend(&[
+    let mut payload = base(ctx, HookEvent::PostToolUse).extend(&[
         ("tool_name", json!(tool_name)),
         ("tool_input", tool_input.clone()),
         ("tool_response", tool_response.clone()),
-    ])
+    ]);
+    if let Some(name) = subagent {
+        if let Some(obj) = payload.as_object_mut() {
+            obj.insert("subagent".into(), json!(name));
+        }
+    }
+    payload
 }
 
 /// Build a `UserPromptSubmit` stdin payload.
@@ -52,6 +76,19 @@ pub fn stop(ctx: &HookContext<'_>, stop_hook_active: bool) -> Value {
     base(ctx, HookEvent::Stop).extend(&[("stop_hook_active", json!(stop_hook_active))])
 }
 
+/// Build a `SubagentStop` stdin payload.
+///
+/// Emitted when a subagent (Task tool invocation) finishes its turn
+/// cleanly with `end_turn`. The `agent_name` identifies which
+/// subagent definition produced the run; `stop_hook_active` mirrors
+/// the parent-turn `Stop` flag so hooks can detect loop-back chains.
+pub fn subagent_stop(ctx: &HookContext<'_>, agent_name: &str, stop_hook_active: bool) -> Value {
+    base(ctx, HookEvent::SubagentStop).extend(&[
+        ("subagent", json!(agent_name)),
+        ("stop_hook_active", json!(stop_hook_active)),
+    ])
+}
+
 fn event_name(event: HookEvent) -> &'static str {
     match event {
         HookEvent::PreToolUse => "PreToolUse",
@@ -59,6 +96,7 @@ fn event_name(event: HookEvent) -> &'static str {
         HookEvent::UserPromptSubmit => "UserPromptSubmit",
         HookEvent::SessionStart => "SessionStart",
         HookEvent::Stop => "Stop",
+        HookEvent::SubagentStop => "SubagentStop",
     }
 }
 
@@ -107,7 +145,7 @@ mod tests {
     #[test]
     fn pre_tool_use_payload_has_all_fields() {
         let (_, _, c) = ctx();
-        let v = pre_tool_use(&c, "tool-fs:write_file", &json!({ "path": "/etc" }));
+        let v = pre_tool_use(&c, "tool-fs:write_file", &json!({ "path": "/etc" }), None);
         assert_eq!(v["session_id"], "sid");
         assert_eq!(v["transcript_path"], "/t/123.json");
         assert_eq!(v["cwd"], "/cwd");
@@ -119,9 +157,70 @@ mod tests {
     #[test]
     fn post_tool_use_includes_response() {
         let (_, _, c) = ctx();
-        let v = post_tool_use(&c, "run", &json!({}), &json!({ "ok": true }));
+        let v = post_tool_use(&c, "run", &json!({}), &json!({ "ok": true }), None);
         assert_eq!(v["hook_event_name"], "PostToolUse");
         assert_eq!(v["tool_response"]["ok"], true);
+    }
+
+    #[test]
+    fn pre_tool_use_payload_omits_subagent_for_parent_turn() {
+        use std::path::Path;
+        let ctx = HookContext {
+            session_id: "s",
+            transcript_path: Path::new("/tmp/t.json"),
+            cwd: Path::new("/proj"),
+        };
+        let payload = pre_tool_use(&ctx, "tool-fs:read_file", &json!({"path": "x"}), None);
+        assert!(payload.get("subagent").is_none());
+    }
+
+    #[test]
+    fn pre_tool_use_payload_includes_subagent_when_set() {
+        use std::path::Path;
+        let ctx = HookContext {
+            session_id: "s",
+            transcript_path: Path::new("/tmp/t.json"),
+            cwd: Path::new("/proj"),
+        };
+        let payload = pre_tool_use(
+            &ctx,
+            "tool-fs:read_file",
+            &json!({"path": "x"}),
+            Some("code-reviewer"),
+        );
+        assert_eq!(payload.get("subagent"), Some(&json!("code-reviewer")));
+    }
+
+    #[test]
+    fn post_tool_use_payload_includes_subagent_when_set() {
+        use std::path::Path;
+        let ctx = HookContext {
+            session_id: "s",
+            transcript_path: Path::new("/tmp/t.json"),
+            cwd: Path::new("/proj"),
+        };
+        let payload = post_tool_use(
+            &ctx,
+            "tool-fs:read_file",
+            &json!({"path": "x"}),
+            &json!({"content": "data"}),
+            Some("explorer"),
+        );
+        assert_eq!(payload.get("subagent"), Some(&json!("explorer")));
+    }
+
+    #[test]
+    fn subagent_stop_payload_shape() {
+        use std::path::Path;
+        let ctx = HookContext {
+            session_id: "s",
+            transcript_path: Path::new("/tmp/t.json"),
+            cwd: Path::new("/proj"),
+        };
+        let payload = subagent_stop(&ctx, "code-reviewer", false);
+        assert_eq!(payload.get("hook_event_name"), Some(&json!("SubagentStop")));
+        assert_eq!(payload.get("subagent"), Some(&json!("code-reviewer")));
+        assert_eq!(payload.get("stop_hook_active"), Some(&json!(false)));
     }
 
     #[test]

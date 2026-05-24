@@ -3,10 +3,21 @@
 
 use crate::styled::StyledLine;
 use crate::types::{ProviderId, ScreenArgs};
+use savvagent_protocol::ToolDef;
 
 /// Closed vocabulary of host operations a plugin can request. Returned from
 /// `Plugin::handle_slash`, `Plugin::on_event`, and `Screen::on_key`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `Debug` is hand-rolled (see below) because
+/// [`Effect::RegisterInProcessTool`] carries
+/// [`InProcessToolHandlerArc`](crate::InProcessToolHandlerArc), a newtype over
+/// `Arc<dyn InProcessToolHandler>` whose target is not itself `Debug`.
+///
+/// `Eq` is intentionally not derived: the same variant carries a
+/// `savvagent_protocol::ToolDef` whose `input_schema: serde_json::Value`
+/// transitively includes `f64` and therefore can't be `Eq`. `PartialEq`
+/// still works — the newtype supplies pointer-equality for the handler.
+#[derive(Clone, PartialEq)]
 #[non_exhaustive]
 pub enum Effect {
     /// Append a styled-line note to the conversation log.
@@ -206,11 +217,136 @@ pub enum Effect {
         /// `"blocked by user hook"`.
         reason: String,
     },
+    /// Register an in-process tool whose handler runs on the calling
+    /// tokio runtime. Used by built-in plugins that need direct access
+    /// to host state (the `task` tool from user-agents). The host
+    /// stores the handler in `ToolRegistry`'s in-process map; the
+    /// `spec.name` must be unique across both in-process and stdio
+    /// tools.
+    RegisterInProcessTool {
+        /// Tool definition forwarded to providers (name, description, schema).
+        spec: ToolDef,
+        /// Handler invoked when the model calls this tool. The
+        /// [`InProcessToolHandlerArc`](crate::InProcessToolHandlerArc) newtype
+        /// wraps `Arc<dyn InProcessToolHandler>` and supplies pointer-equality
+        /// `PartialEq` plus an opaque `Debug` so this variant works with
+        /// `Effect`'s derives.
+        handler: crate::InProcessToolHandlerArc,
+    },
+}
+
+impl std::fmt::Debug for Effect {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Effect::PushNote { line } => f.debug_struct("PushNote").field("line", line).finish(),
+            Effect::OpenScreen { id, args } => f
+                .debug_struct("OpenScreen")
+                .field("id", id)
+                .field("args", args)
+                .finish(),
+            Effect::CloseScreen => f.write_str("CloseScreen"),
+            Effect::SetActiveTheme { slug, persist } => f
+                .debug_struct("SetActiveTheme")
+                .field("slug", slug)
+                .field("persist", persist)
+                .finish(),
+            Effect::SetActiveLocale { code, persist } => f
+                .debug_struct("SetActiveLocale")
+                .field("code", code)
+                .field("persist", persist)
+                .finish(),
+            Effect::SetActiveModel { id, persist } => f
+                .debug_struct("SetActiveModel")
+                .field("id", id)
+                .field("persist", persist)
+                .finish(),
+            Effect::SetActiveProvider { id, persist } => f
+                .debug_struct("SetActiveProvider")
+                .field("id", id)
+                .field("persist", persist)
+                .finish(),
+            Effect::RegisterProvider { id, display_name } => f
+                .debug_struct("RegisterProvider")
+                .field("id", id)
+                .field("display_name", display_name)
+                .finish(),
+            Effect::SaveTranscript { path } => f
+                .debug_struct("SaveTranscript")
+                .field("path", path)
+                .finish(),
+            Effect::PromptSend { text } => {
+                f.debug_struct("PromptSend").field("text", text).finish()
+            }
+            Effect::RunSlash { name, args } => f
+                .debug_struct("RunSlash")
+                .field("name", name)
+                .field("args", args)
+                .finish(),
+            Effect::ClearLog => f.write_str("ClearLog"),
+            Effect::PrefillInput { text } => {
+                f.debug_struct("PrefillInput").field("text", text).finish()
+            }
+            Effect::Quit => f.write_str("Quit"),
+            Effect::PromptApiKey { provider_id } => f
+                .debug_struct("PromptApiKey")
+                .field("provider_id", provider_id)
+                .finish(),
+            Effect::SaveActiveFile => f.write_str("SaveActiveFile"),
+            Effect::TogglePlugin { id, enabled } => f
+                .debug_struct("TogglePlugin")
+                .field("id", id)
+                .field("enabled", enabled)
+                .finish(),
+            Effect::ReloadRoutingRules => f.write_str("ReloadRoutingRules"),
+            Effect::ShowRoutingRules => f.write_str("ShowRoutingRules"),
+            Effect::Stack(children) => f.debug_tuple("Stack").field(children).finish(),
+            Effect::SetNextTurnModelOverride { id } => f
+                .debug_struct("SetNextTurnModelOverride")
+                .field("id", id)
+                .finish(),
+            Effect::SetTrustLevel {
+                project_root,
+                decision,
+            } => f
+                .debug_struct("SetTrustLevel")
+                .field("project_root", project_root)
+                .field("decision", decision)
+                .finish(),
+            Effect::ReindexPlugin { id } => {
+                f.debug_struct("ReindexPlugin").field("id", id).finish()
+            }
+            Effect::StashPendingSlash { name, args } => f
+                .debug_struct("StashPendingSlash")
+                .field("name", name)
+                .field("args", args)
+                .finish(),
+            Effect::RegisterPreToolGate { plugin_id } => f
+                .debug_struct("RegisterPreToolGate")
+                .field("plugin_id", plugin_id)
+                .finish(),
+            Effect::PrependToPendingPrompt { text } => f
+                .debug_struct("PrependToPendingPrompt")
+                .field("text", text)
+                .finish(),
+            Effect::CancelPendingTurn { reason } => f
+                .debug_struct("CancelPendingTurn")
+                .field("reason", reason)
+                .finish(),
+            Effect::RegisterInProcessTool { spec, .. } => f
+                .debug_struct("RegisterInProcessTool")
+                .field("spec", spec)
+                .field("handler", &"<dyn InProcessToolHandler>")
+                .finish(),
+        }
+    }
 }
 
 /// The right-hand side of a [`crate::manifest::KeybindingSpec`]: either invoke a
 /// slash command or emit a typed effect directly.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `Eq` is not derived because the contained [`Effect`] cannot derive `Eq`
+/// (see the comment on `Effect`).
+#[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub enum BoundAction {
     /// Invoke a registered slash command when the keybinding fires.
@@ -364,5 +500,79 @@ mod added_effects_smoke {
             name: "review".into(),
             args: vec!["HEAD".into()],
         };
+    }
+}
+
+#[cfg(test)]
+mod tests_in_process_tool {
+    use super::*;
+    use crate::InProcessToolHandler;
+    use async_trait::async_trait;
+    use savvagent_protocol::ToolDef;
+    use serde_json::Value;
+    use std::sync::Arc;
+
+    struct Stub;
+
+    #[async_trait]
+    impl InProcessToolHandler for Stub {
+        async fn call(
+            &self,
+            _input: Value,
+            _ctx: Arc<dyn std::any::Any + Send + Sync>,
+        ) -> Result<Value, String> {
+            Ok(Value::String("ok".into()))
+        }
+    }
+
+    #[test]
+    fn register_in_process_tool_holds_handler() {
+        let spec = ToolDef {
+            name: "task".into(),
+            description: "spawn a subagent".into(),
+            input_schema: serde_json::json!({}),
+        };
+        let effect = Effect::RegisterInProcessTool {
+            spec,
+            handler: crate::InProcessToolHandlerArc::new(Stub),
+        };
+        match effect {
+            Effect::RegisterInProcessTool { spec, .. } => {
+                assert_eq!(spec.name, "task");
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn handler_arc_partial_eq_uses_pointer_identity() {
+        let a = crate::InProcessToolHandlerArc::new(Stub);
+        let b = a.clone();
+        assert_eq!(a, b, "clones of the same Arc compare equal");
+
+        let c = crate::InProcessToolHandlerArc::new(Stub);
+        assert_ne!(a, c, "independently-constructed handlers compare unequal");
+    }
+
+    #[test]
+    fn effect_debug_renders_handler_opaquely() {
+        let spec = ToolDef {
+            name: "task".into(),
+            description: "spawn a subagent".into(),
+            input_schema: serde_json::json!({}),
+        };
+        let effect = Effect::RegisterInProcessTool {
+            spec,
+            handler: crate::InProcessToolHandlerArc::new(Stub),
+        };
+        let rendered = format!("{effect:?}");
+        assert!(
+            rendered.contains("RegisterInProcessTool"),
+            "expected RegisterInProcessTool variant name in debug output, got: {rendered}"
+        );
+        assert!(
+            rendered.contains("<dyn InProcessToolHandler>"),
+            "expected opaque handler placeholder, got: {rendered}"
+        );
     }
 }

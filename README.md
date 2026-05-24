@@ -245,6 +245,48 @@ Each hook is a shell command. Its stdin is JSON describing the event (`session_i
 
 Run `/reload-hooks` to rescan all four `settings.json` files without restarting the session.
 
+## User-defined agents
+
+Drop markdown files into any of these directories and Savvagent exposes them as subagents the model can spawn via the built-in `task` tool:
+
+- `<project>/.savvagent/agents/**/*.md`
+- `<project>/.claude/agents/**/*.md`
+- `~/.savvagent/agents/**/*.md`
+- `~/.claude/agents/**/*.md`
+
+Same precedence as user-defined slash commands and hooks (project beats user; `.savvagent/` beats `.claude/`). First-wins dedup by filename slug. `/reload-agents` rescans without restarting the session.
+
+### Format
+
+```markdown
+---
+description: Reviews staged diffs for correctness bugs. Use after writing code, before commit.
+tools: tool-fs:read_file, tool-fs:glob, tool-grep:search
+model: claude-sonnet-4-6
+---
+
+You are a senior code reviewer. When invoked, ...
+```
+
+| Key | Required | Purpose |
+|---|---|---|
+| `description` | yes | Shown to the parent model as the `subagent_type` enum description (so the model knows when to pick this agent) |
+| `tools` | no | Comma-separated string or YAML list of fully-qualified tool names. Omit to inherit the parent's full tool set. `[]` means only `task` is available. Defends against the model hallucinating tool names |
+| `model` | no | Per-agent model override; falls back to the active model |
+| `name` | no | Defaults to filename slug; warn-log if frontmatter disagrees |
+
+Agent bodies may use `@<path>` on a line by itself to inline another file at load time (single-pass — included files containing `@<other>` are NOT recursively expanded). The body is the subagent's system prompt.
+
+### The `task` tool
+
+When at least one agent is discovered, Savvagent registers a built-in `task` tool whose `subagent_type` enum is populated from the discovered set. The parent model calls it with `{ description, prompt, subagent_type }`; the host spawns a Sub-Host (own session state, own model, filtered tool view) and returns the subagent's final assistant text as the tool result.
+
+Subagent depth is capped by `SAVVAGENT_AGENT_MAX_DEPTH` (default 3); a subagent can spawn sub-subagents until that limit. PreToolUse user hooks (above) fire on subagent tool calls with an additional `subagent: "<name>"` field in the stdin payload. The `SubagentStop` event fires after each subagent's clean end-of-turn.
+
+### Reload
+
+Run `/reload-agents` to rescan all four `agents/` directories without restarting the session.
+
 ### Scrolling the conversation log
 
 | Input | What it does |

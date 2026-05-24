@@ -533,12 +533,9 @@ async fn bootstrap_pool_host(
             // a `routing.toml` parse failure). These are appended to
             // `deferred_notes` so `run_app` pushes them once `App` exists.
             deferred_notes.extend(host.take_startup_notes());
-            Some((
-                Arc::new(host),
-                initial_model,
-                initial_provider_id,
-                deferred_notes,
-            ))
+            let host_arc = Arc::new(host);
+            host_arc.wire_self_arc();
+            Some((host_arc, initial_model, initial_provider_id, deferred_notes))
         }
         Err(e) => {
             eprintln!("warning: pool host start failed: {e:#}");
@@ -560,7 +557,9 @@ async fn start_host_remote(
     );
     config.routing_rules_path = crate::routing_pref::routing_toml_path();
     let host = Host::start(config).await.context("failed to start host")?;
-    Ok(Arc::new(host))
+    let host_arc = Arc::new(host);
+    host_arc.wire_self_arc();
+    Ok(host_arc)
 }
 
 /// Resolve a bundled tool-server binary by name. Tries (in order):
@@ -743,6 +742,7 @@ async fn dispatch_slash_command(
                 apply_pending_model_change(app, host_slot, project_root, tool_bins).await;
                 apply_pending_pool_add(app, host_slot).await;
                 apply_pending_gate(app, host_slot).await;
+                apply_pending_in_process_tools(app, host_slot).await;
                 apply_pending_routing_reload(app, host_slot).await;
                 apply_pending_routing_show(app, host_slot).await;
                 return;
@@ -1576,6 +1576,40 @@ async fn apply_pending_gate(app: &mut App, host_slot: &HostSlot) {
     host.set_pre_tool_gate(gate).await;
 }
 
+/// Drain `app.pending_in_process_tools` (set by
+/// `Effect::RegisterInProcessTool`) and register each pair with the
+/// active host's `ToolRegistry`. No-op when the queue is empty or no
+/// host exists yet. When the host exists but its registry slot is empty
+/// (post-shutdown race), each tool is dropped with a warn-log; the
+/// effect can be re-emitted by the plugin on the next host connection.
+async fn apply_pending_in_process_tools(app: &mut App, host_slot: &HostSlot) {
+    let queued = std::mem::take(&mut app.pending_in_process_tools);
+    if queued.is_empty() {
+        return;
+    }
+    let Some(host) = current_host(host_slot).await else {
+        tracing::warn!(
+            count = queued.len(),
+            "apply_pending_in_process_tools: no host yet; tools dropped — \
+             re-emit RegisterInProcessTool after /connect if needed"
+        );
+        return;
+    };
+    let Some(registry) = host.tool_registry_arc().await else {
+        tracing::warn!(
+            count = queued.len(),
+            "apply_pending_in_process_tools: host registry slot empty; \
+             tools dropped"
+        );
+        return;
+    };
+    for (spec, handler) in queued {
+        let name = spec.name.clone();
+        registry.register_in_process_tool(spec, handler).await;
+        tracing::debug!(tool = %name, "registered in-process tool");
+    }
+}
+
 fn format_rule_match(m: &savvagent_host::RuleMatch) -> String {
     let mut parts: Vec<String> = Vec::new();
     if let Some(b) = m.has_image {
@@ -2150,7 +2184,13 @@ async fn perform_connect(
                 for note in h.take_startup_notes() {
                     app.push_note(note);
                 }
-                *host_slot.write().await = Some(Arc::new(h));
+                let host_arc = Arc::new(h);
+                // Register the `Arc<Host>` back into the host so
+                // `run_turn_inner` can construct a `ToolCallContext`
+                // for in-process tools (the `task` tool from the
+                // user-agents plugin, future built-ins, etc.).
+                host_arc.wire_self_arc();
+                *host_slot.write().await = Some(host_arc);
             }
             Err(e) => {
                 app.push_note(
@@ -2368,6 +2408,13 @@ fn translate_turn_event_to_host_event(
                 success: true,
             })
         }
+        TurnEvent::SubagentStop {
+            agent_name,
+            success,
+        } => Some(savvagent_plugin::HostEvent::SubagentStop {
+            agent_name: agent_name.clone(),
+            success: *success,
+        }),
         // No analog — these stay TUI-private.
         TurnEvent::RouteSelected { .. }
         | TurnEvent::ModalityWarning { .. }
@@ -2481,6 +2528,7 @@ async fn run_app(
     // PoolError::AlreadyRegistered as a debug no-op).
     apply_pending_pool_add(app, &host_slot).await;
     apply_pending_gate(app, &host_slot).await;
+    apply_pending_in_process_tools(app, &host_slot).await;
 
     // Populate `App::cached_models` from the bootstrap host's pool so the
     // `/model` picker has rows the moment the user opens it. Previously
@@ -2805,6 +2853,7 @@ async fn run_app(
             apply_pending_model_change(app, &host_slot, &project_root, &tool_bins).await;
             apply_pending_pool_add(app, &host_slot).await;
             apply_pending_gate(app, &host_slot).await;
+            apply_pending_in_process_tools(app, &host_slot).await;
             apply_pending_routing_reload(app, &host_slot).await;
             apply_pending_routing_show(app, &host_slot).await;
             continue;
@@ -3088,6 +3137,7 @@ async fn run_app(
                                     .await;
                                     apply_pending_pool_add(app, &host_slot).await;
                                     apply_pending_gate(app, &host_slot).await;
+                                    apply_pending_in_process_tools(app, &host_slot).await;
                                     apply_pending_routing_reload(app, &host_slot).await;
                                     apply_pending_routing_show(app, &host_slot).await;
                                     handled = true;
