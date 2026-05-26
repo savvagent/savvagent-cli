@@ -454,6 +454,7 @@ impl Plugin for UserHooksPlugin {
             summary: "Rescan user-defined hooks (settings.json)".into(),
             args_hint: None,
             requires_arg: false,
+            suppress_prompt_segments: vec![],
         }];
         contributions.hooks = vec![
             savvagent_plugin::HookKind::ToolCallEnd,     // -> PostToolUse

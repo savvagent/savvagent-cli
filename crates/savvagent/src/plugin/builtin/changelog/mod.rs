@@ -60,6 +60,7 @@ impl Plugin for ChangelogPlugin {
             summary: rust_i18n::t!("changelog.slash-summary").to_string(),
             args_hint: None,
             requires_arg: false,
+            suppress_prompt_segments: vec![],
         }];
         contributions.screens = vec![ScreenSpec {
             id: SCREEN_ID.into(),

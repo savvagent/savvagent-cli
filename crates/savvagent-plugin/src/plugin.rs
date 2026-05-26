@@ -105,6 +105,23 @@ pub trait Plugin: Send + Sync {
         None
     }
 
+    /// Construct a fresh `ContentRenderer` for an inline content block.
+    /// Called when the conversation log encounters a `ContentBlock` whose
+    /// `type` discriminator matches one of this plugin's
+    /// `ContentRendererSpec`s. Each invocation produces a new
+    /// instance — per-block state lives in the returned renderer.
+    ///
+    /// Default impl returns [`PluginError::ContentRendererNotFound`].
+    fn create_renderer(
+        &self,
+        block_type: &str,
+        id: crate::content::ContentBlockId,
+        source: &str,
+    ) -> Result<Box<dyn crate::content::ContentRenderer>, PluginError> {
+        let _ = (id, source);
+        Err(PluginError::ContentRendererNotFound(block_type.to_string()))
+    }
+
     /// Static theme catalog this plugin contributes. Pulled once at registration
     /// time and merged into the runtime's theme catalog.
     fn themes(&self) -> Vec<ThemeEntry> {

@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use savvagent_mcp::ProviderClient;
+use savvagent_plugin::SystemPromptSegment;
 use savvagent_protocol::{
     BlockDelta, CompleteRequest, ContentBlock, Message, ProviderError, ProviderId, Role,
     StopReason, StreamEvent, ToolDef,
@@ -293,6 +294,32 @@ pub enum TurnEvent {
         /// Defaults to the URI when the producer didn't include one.
         summary: String,
     },
+    /// A streaming HTML content block started. Emitted when the provider
+    /// emits `ContentBlockStart { block: ContentBlock::Html }`. The TUI
+    /// pushes an `Entry::Canvas` with an empty `source_preview`.
+    HtmlBlockStart {
+        /// Zero-based block index within the streamed message. Subsequent
+        /// `HtmlBlockDelta` and `HtmlBlockStop` events carry the same index.
+        index: u32,
+    },
+    /// A fragment of HTML source arrived during streaming. Emitted for each
+    /// `ContentBlockDelta { delta: BlockDelta::HtmlSourceDelta }` for an
+    /// HTML block. The TUI appends `source` to the matching entry's
+    /// `source_preview` buffer.
+    HtmlBlockDelta {
+        /// Block index, matching the corresponding [`TurnEvent::HtmlBlockStart`].
+        index: u32,
+        /// HTML source fragment to append.
+        source: String,
+    },
+    /// The streaming HTML block is complete. Emitted on
+    /// `ContentBlockStop` for an HTML block. The TUI swaps
+    /// `source_preview` into `source` and creates a renderer.
+    HtmlBlockStop {
+        /// Block index, matching the corresponding [`TurnEvent::HtmlBlockStart`].
+        index: u32,
+    },
+
     /// The whole turn finished.
     TurnComplete {
         /// Final outcome — same value `run_turn_streaming` returns.
@@ -401,6 +428,19 @@ pub struct Host {
     /// tool-use-loop iteration boundary to inject `[resource updated: …]`
     /// user-text blocks into the conversation.
     resources: Arc<tokio::sync::Mutex<crate::resources::ResourceCache>>,
+    /// Active plugin-contributed system-prompt segments. Replaced atomically
+    /// by [`Self::set_prompt_segments`] whenever the enabled-plugin set
+    /// changes. Read once per turn (before composing the `CompleteRequest`
+    /// `system` field) under a brief read lock — no guard is held across an
+    /// await. `std::sync::RwLock` (not tokio) because the read path inside
+    /// `run_turn_inner` is synchronous (snapshot then drop).
+    prompt_segments: std::sync::RwLock<Vec<SystemPromptSegment>>,
+    /// Suppression list for the next turn. Set by the slash dispatcher
+    /// before calling `run_turn_streaming` when the dispatched slash carries
+    /// a non-empty `suppress_prompt_segments`. Cleared automatically at the
+    /// end of each turn so stale lists never bleed into subsequent turns.
+    /// Plain `std::sync::Mutex` — set and cleared from non-async callers.
+    pending_slash_suppression: std::sync::Mutex<Vec<String>>,
     /// Optional `PreToolUseGate` consulted before every tool dispatch.
     /// `None` means "no gate; allow all". The user-hooks plugin
     /// installs itself via [`Host::set_pre_tool_gate`].
@@ -601,6 +641,8 @@ impl Host {
             resources: Arc::new(tokio::sync::Mutex::new(
                 crate::resources::ResourceCache::default(),
             )),
+            prompt_segments: std::sync::RwLock::new(Vec::new()),
+            pending_slash_suppression: std::sync::Mutex::new(Vec::new()),
             pre_tool_gate: tokio::sync::RwLock::new(None),
             session_id: config_session_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
             self_weak: std::sync::OnceLock::new(),
@@ -720,6 +762,8 @@ impl Host {
             resources: Arc::new(tokio::sync::Mutex::new(
                 crate::resources::ResourceCache::default(),
             )),
+            prompt_segments: std::sync::RwLock::new(Vec::new()),
+            pending_slash_suppression: std::sync::Mutex::new(Vec::new()),
             pre_tool_gate: tokio::sync::RwLock::new(None),
             session_id: config_session_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
             self_weak: std::sync::OnceLock::new(),
@@ -1012,6 +1056,47 @@ impl Host {
         let mut iterations: u32 = 0;
         let want_stream = events.is_some();
 
+        // Compose the per-turn system prompt: base (default + SAVVAGENT.md +
+        // embedder override) with plugin-contributed segments appended, minus
+        // any segments suppressed by the slash dispatcher for this turn.
+        // The suppression list is consumed here (cleared via `take`) so stale
+        // suppressions never bleed into subsequent turns.
+        let turn_system: Option<String> = {
+            let segments = self.active_prompt_segments();
+            let suppressed = self.take_suppressed_segments_for_turn();
+            if segments.is_empty() {
+                self.system_prompt.clone()
+            } else {
+                match &self.system_prompt {
+                    Some(base) => {
+                        let suppressed_refs: Vec<&str> =
+                            suppressed.iter().map(String::as_str).collect();
+                        Some(crate::default_prompt::append_prompt_segments(
+                            base,
+                            &segments,
+                            &suppressed_refs,
+                        ))
+                    }
+                    None => {
+                        // No base prompt — append segments to an empty string
+                        // so the model still receives the plugin contributions.
+                        let suppressed_refs: Vec<&str> =
+                            suppressed.iter().map(String::as_str).collect();
+                        let composed = crate::default_prompt::append_prompt_segments(
+                            "",
+                            &segments,
+                            &suppressed_refs,
+                        );
+                        if composed.is_empty() {
+                            None
+                        } else {
+                            Some(composed)
+                        }
+                    }
+                }
+            }
+        };
+
         loop {
             if iterations >= self.config.max_iterations {
                 return Err(HostError::LoopLimit(self.config.max_iterations));
@@ -1059,7 +1144,7 @@ impl Host {
             let req = CompleteRequest {
                 model: decision.model_id.clone(),
                 messages: req_messages,
-                system: self.system_prompt.clone(),
+                system: turn_system.clone(),
                 tools: tool_defs.clone(),
                 temperature: None,
                 top_p: None,
@@ -1403,9 +1488,7 @@ impl Host {
                         }
                         tool_results.push(ContentBlock::ToolResult {
                             tool_use_id,
-                            content: vec![ContentBlock::Text {
-                                text: outcome.payload.clone(),
-                            }],
+                            content: outcome.blocks.clone(),
                             is_error: outcome.is_error,
                         });
                         tool_calls.push(ToolCall {
@@ -1451,6 +1534,47 @@ impl Host {
     /// Read-only snapshot of the conversation history.
     pub async fn messages(&self) -> Vec<Message> {
         self.state.lock().await.messages.clone()
+    }
+
+    /// Inject persisted interactive-state blobs into the session's stored
+    /// `ContentBlock::Html` blocks before a transcript is written. Each
+    /// `(ordinal, base64_state)` pair sets the `state` field of the
+    /// `ordinal`-th **top-level** `Html` block (0-indexed across all
+    /// messages, in message + content order). Ordinals with no matching
+    /// `Html` block are ignored. Existing `state` on a block is overwritten
+    /// (latest snapshot wins).
+    ///
+    /// The TUI calls this just before [`Self::save_transcript`], passing
+    /// each live canvas renderer's `snapshot_state()` keyed by its
+    /// `ContentBlockId.0`. That id is allocated monotonically (0, 1, 2, …)
+    /// once per `TurnEvent::HtmlBlockStart`, which the host emits only for
+    /// **provider-stream** (top-level) `Html` blocks. Tool-emitted `Html`
+    /// (nested inside `ContentBlock::ToolResult.content`) never gets a
+    /// `ContentBlockId` and is *not* a live renderer, so it must be excluded
+    /// from the ordinal count here — otherwise the ordinal→block mapping
+    /// would skew whenever a tool-emitted canvas precedes a streamed one.
+    /// We therefore count only top-level `Html` blocks, matching the id
+    /// allocation exactly.
+    pub async fn set_canvas_states(&self, states: &[(u32, String)]) {
+        if states.is_empty() {
+            return;
+        }
+        let by_ordinal: HashMap<u32, &str> = states.iter().map(|(o, s)| (*o, s.as_str())).collect();
+        let mut state = self.state.lock().await;
+        let mut ordinal: u32 = 0;
+        for message in state.messages.iter_mut() {
+            for block in message.content.iter_mut() {
+                // Only top-level Html blocks correspond to a live canvas
+                // renderer (and thus a ContentBlockId). Deliberately do not
+                // recurse into ToolResult content.
+                if let ContentBlock::Html { state: blob, .. } = block {
+                    if let Some(new_state) = by_ordinal.get(&ordinal) {
+                        *blob = Some((*new_state).to_string());
+                    }
+                    ordinal += 1;
+                }
+            }
+        }
     }
 
     /// Persist the current message history as pretty-printed JSON to `path`.
@@ -1749,6 +1873,63 @@ impl Host {
                     Ok(PermissionDecision::Deny) => Err("denied by user".into()),
                     Err(_) => Err("permission channel dropped".into()),
                 }
+            }
+        }
+    }
+
+    /// Replace the active prompt segments. Called by the TUI runtime
+    /// each time the enabled-plugin set changes.
+    pub fn set_prompt_segments(&self, segments: Vec<SystemPromptSegment>) {
+        match self.prompt_segments.write() {
+            Ok(mut guard) => *guard = segments,
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    "prompt_segments RwLock poisoned; skipping set"
+                );
+            }
+        }
+    }
+
+    /// Set the suppression list for the next turn. Called by the slash
+    /// dispatcher *before* invoking `run_turn_streaming` when the
+    /// dispatched slash has a non-empty `suppress_prompt_segments`.
+    /// Cleared automatically after the turn completes.
+    pub fn set_turn_suppression(&self, suppressed: Vec<String>) {
+        match self.pending_slash_suppression.lock() {
+            Ok(mut guard) => *guard = suppressed,
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    "pending_slash_suppression mutex poisoned; skipping set"
+                );
+            }
+        }
+    }
+
+    /// Snapshot the active prompt segments. Called once per turn inside
+    /// `run_turn_inner` before composing the `CompleteRequest` `system`
+    /// field. The guard is held only for the clone; no `.await` is
+    /// crossed while holding it.
+    pub(crate) fn active_prompt_segments(&self) -> Vec<SystemPromptSegment> {
+        self.prompt_segments
+            .read()
+            .map(|g| g.clone())
+            .unwrap_or_default()
+    }
+
+    /// Snapshot and clear the per-turn suppression list. Called once per
+    /// turn inside `run_turn_inner`; clearing ensures stale suppressions
+    /// never bleed into subsequent turns.
+    pub(crate) fn take_suppressed_segments_for_turn(&self) -> Vec<String> {
+        match self.pending_slash_suppression.lock() {
+            Ok(mut guard) => std::mem::take(&mut *guard),
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    "pending_slash_suppression mutex poisoned; returning empty suppression list"
+                );
+                Vec::new()
             }
         }
     }
@@ -2388,19 +2569,54 @@ async fn resolve_bash_network_with_state(
     }
 }
 
-/// Convert a stream of provider [`StreamEvent`]s into [`TurnEvent::TextDelta`]s
-/// and forward them to the host caller. Non-text events are dropped (they're
-/// re-derivable from the final response, which the loop already has).
+/// Convert a stream of provider [`StreamEvent`]s into [`TurnEvent`]s and
+/// forward them to the host caller.
+///
+/// Translated events:
+/// - `ContentBlockDelta { TextDelta }` → `TurnEvent::TextDelta`
+/// - `ContentBlockStart { Html }` → `TurnEvent::HtmlBlockStart`
+/// - `ContentBlockDelta { HtmlSourceDelta }` → `TurnEvent::HtmlBlockDelta`
+/// - `ContentBlockStop` (for an HTML block) → `TurnEvent::HtmlBlockStop`
+///
+/// All other events are dropped — they're re-derivable from the final
+/// `CompleteResponse`, which the host loop already processes.
 async fn forward_text_deltas(mut rx: mpsc::Receiver<StreamEvent>, out: mpsc::Sender<TurnEvent>) {
+    // Track which block indices are HTML so we can emit HtmlBlockStop at the
+    // right ContentBlockStop event.
+    let mut html_indices: std::collections::HashSet<u32> = std::collections::HashSet::new();
+
     while let Some(ev) = rx.recv().await {
-        if let StreamEvent::ContentBlockDelta {
-            delta: BlockDelta::TextDelta { text },
-            ..
-        } = ev
-        {
-            if out.send(TurnEvent::TextDelta { text }).await.is_err() {
-                break;
+        let turn_ev = match ev {
+            StreamEvent::ContentBlockDelta {
+                delta: BlockDelta::TextDelta { text },
+                ..
+            } => Some(TurnEvent::TextDelta { text }),
+
+            StreamEvent::ContentBlockStart {
+                index,
+                block: ContentBlock::Html { .. },
+            } => {
+                html_indices.insert(index);
+                Some(TurnEvent::HtmlBlockStart { index })
             }
+
+            StreamEvent::ContentBlockDelta {
+                index,
+                delta: BlockDelta::HtmlSourceDelta { source },
+            } => Some(TurnEvent::HtmlBlockDelta { index, source }),
+
+            StreamEvent::ContentBlockStop { index } if html_indices.contains(&index) => {
+                html_indices.remove(&index);
+                Some(TurnEvent::HtmlBlockStop { index })
+            }
+
+            _ => None,
+        };
+
+        if let Some(ev) = turn_ev
+            && out.send(ev).await.is_err()
+        {
+            break;
         }
     }
 }
@@ -3654,6 +3870,100 @@ mod transcript_tests {
         assert_eq!(saved, loaded, "message history must survive round-trip");
         assert_eq!(record.schema_version, TRANSCRIPT_SCHEMA_VERSION);
         assert_eq!(record.model, "test-model");
+    }
+
+    /// `set_canvas_states` writes each blob into the matching top-level
+    /// `Html` block, keyed by stream ordinal (0-indexed across messages,
+    /// content order). Tool-emitted `Html` (nested in `ToolResult`) is not
+    /// counted, so it neither shifts the ordinal nor receives a blob.
+    #[tokio::test]
+    async fn set_canvas_states_injects_into_nth_html_block() {
+        let dir = tempdir().unwrap();
+        let host = Host::with_components(
+            tmp_config(dir.path()),
+            Box::new(NoopProvider) as Box<dyn ProviderClient + Send + Sync>,
+        )
+        .await
+        .unwrap();
+
+        // Seed: [text, Html#0, text, ToolResult{Html(nested)}, Html#1].
+        // The nested Html must NOT be counted as an ordinal.
+        {
+            let mut state = host.state.lock().await;
+            state.messages = vec![
+                Message {
+                    role: Role::Assistant,
+                    content: vec![
+                        ContentBlock::Text {
+                            text: "intro".into(),
+                        },
+                        ContentBlock::Html {
+                            source: "<p>first</p>".into(),
+                            state: None,
+                        },
+                    ],
+                },
+                Message {
+                    role: Role::User,
+                    content: vec![
+                        ContentBlock::Text {
+                            text: "between".into(),
+                        },
+                        ContentBlock::ToolResult {
+                            tool_use_id: "t1".into(),
+                            content: vec![ContentBlock::Html {
+                                source: "<p>tool-emitted</p>".into(),
+                                state: None,
+                            }],
+                            is_error: false,
+                        },
+                    ],
+                },
+                Message {
+                    role: Role::Assistant,
+                    content: vec![ContentBlock::Html {
+                        source: "<p>second</p>".into(),
+                        state: None,
+                    }],
+                },
+            ];
+        }
+
+        host.set_canvas_states(&[(0, "AAA".into()), (1, "BBB".into())])
+            .await;
+
+        let messages = host.messages().await;
+        // Top-level Html#0 in message 0.
+        match &messages[0].content[1] {
+            ContentBlock::Html { state, .. } => {
+                assert_eq!(state.as_deref(), Some("AAA"), "ordinal 0 → first Html")
+            }
+            other => panic!("expected Html, got {other:?}"),
+        }
+        // Tool-emitted Html stays None (not counted, not targeted).
+        match &messages[1].content[1] {
+            ContentBlock::ToolResult { content, .. } => match &content[0] {
+                ContentBlock::Html { state, .. } => {
+                    assert_eq!(state.as_deref(), None, "nested Html must be untouched")
+                }
+                other => panic!("expected nested Html, got {other:?}"),
+            },
+            other => panic!("expected ToolResult, got {other:?}"),
+        }
+        // Top-level Html#1 in message 2 gets ordinal 1, not 2.
+        match &messages[2].content[0] {
+            ContentBlock::Html { state, .. } => {
+                assert_eq!(state.as_deref(), Some("BBB"), "ordinal 1 → second Html")
+            }
+            other => panic!("expected Html, got {other:?}"),
+        }
+
+        // Out-of-range ordinals are ignored without panicking.
+        host.set_canvas_states(&[(99, "ZZZ".into())]).await;
+        match &host.messages().await[2].content[0] {
+            ContentBlock::Html { state, .. } => assert_eq!(state.as_deref(), Some("BBB")),
+            other => panic!("expected Html, got {other:?}"),
+        }
     }
 
     /// Schema version mismatch yields a typed error, not a panic.

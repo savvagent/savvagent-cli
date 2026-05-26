@@ -48,6 +48,18 @@ impl<'a> KeybindingRouter<'a> {
             .get(&(KeyScope::Global, chord))
             .map(|(_, action)| action.clone())
     }
+
+    /// Resolve a key event while a canvas holds focus. Looks up the
+    /// [`KeyScope::OnFocusedCanvas`] scope only — built-in canvas keys
+    /// (Tab, Shift-Tab, Esc, Ctrl-J, Ctrl-K, Ctrl-O) are handled by the
+    /// event loop *before* this is consulted, so they always win.
+    pub fn route_canvas(&self, key: &KeyEventPortable) -> Option<BoundAction> {
+        let chord = ChordPortable::new(key.clone());
+        self.indexes
+            .keybindings
+            .get(&(KeyScope::OnFocusedCanvas, chord))
+            .map(|(_, action)| action.clone())
+    }
 }
 
 #[cfg(test)]

@@ -20,6 +20,7 @@
 //! The provider is keyless — no API key is required. The `OLLAMA_HOST` env
 //! var overrides the base URL at runtime (Ollama's own convention).
 
+#![allow(clippy::collapsible_if)] // pre-existing debt; many sites under rustc 1.95 new lint
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 

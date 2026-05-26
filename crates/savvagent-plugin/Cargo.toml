@@ -9,6 +9,7 @@ description = "Plugin trait surface and WIT-portable data types for savvagent"
 
 [dependencies]
 async-trait = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
 savvagent-protocol = { workspace = true }
 # Intentionally NO ratatui, crossterm, tokio runtime, anyhow.

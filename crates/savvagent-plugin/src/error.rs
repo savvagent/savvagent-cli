@@ -19,6 +19,15 @@ pub enum PluginError {
     InvalidArgs(String),
     /// An unexpected condition occurred inside the plugin.
     Internal(String),
+    /// No registered plugin advertises a `ContentRendererSpec` for the
+    /// given block_type. Returned by `Plugin::create_renderer` default impl.
+    ContentRendererNotFound(String),
+    /// `ContentRenderer::restore_state` could not interpret the
+    /// supplied bytes (corrupt, schema-incompatible, or the renderer's
+    /// own decoder returned an error). The host treats this as a
+    /// soft failure: log a warning, drop the bytes, continue rendering
+    /// from defaults.
+    StateRestoreFailed(String),
 }
 
 impl fmt::Display for PluginError {
@@ -28,6 +37,12 @@ impl fmt::Display for PluginError {
             PluginError::SlashNotHandled(name) => write!(f, "slash not handled: /{name}"),
             PluginError::InvalidArgs(msg) => write!(f, "invalid args: {msg}"),
             PluginError::Internal(msg) => write!(f, "internal: {msg}"),
+            Self::ContentRendererNotFound(block_type) => write!(
+                f,
+                "no plugin claims content renderer for block_type '{}'",
+                block_type
+            ),
+            Self::StateRestoreFailed(msg) => write!(f, "state restore failed: {msg}"),
         }
     }
 }
@@ -60,5 +75,14 @@ mod tests {
     fn internal_renders() {
         let e = PluginError::Internal("io: permission denied".to_string());
         assert_eq!(format!("{e}"), "internal: io: permission denied");
+    }
+
+    #[test]
+    fn state_restore_failed_display() {
+        let e = PluginError::StateRestoreFailed("schema v2 not understood".to_string());
+        assert_eq!(
+            format!("{e}"),
+            "state restore failed: schema v2 not understood",
+        );
     }
 }

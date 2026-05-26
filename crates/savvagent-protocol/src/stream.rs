@@ -110,6 +110,14 @@ pub enum BlockDelta {
         /// Provider-opaque signature.
         signature: String,
     },
+    /// Append a fragment of HTML source to a `ContentBlock::Html` block
+    /// during streaming. Hosts concatenate `source` fragments across
+    /// deltas until `ContentBlockStop`, then hand the assembled source
+    /// to the registered renderer.
+    HtmlSourceDelta {
+        /// HTML source fragment.
+        source: String,
+    },
 }
 
 /// Token-count delta on [`StreamEvent::MessageDelta`].
@@ -121,4 +129,23 @@ pub struct UsageDelta {
     /// Additional cached input tokens.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_read_input_tokens: Option<u32>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn html_source_delta_round_trip() {
+        let delta = BlockDelta::HtmlSourceDelta {
+            source: "<!docty".into(),
+        };
+        let v = serde_json::to_value(&delta).unwrap();
+        assert_eq!(
+            v,
+            serde_json::json!({ "type": "html_source_delta", "source": "<!docty" }),
+        );
+        let back: BlockDelta = serde_json::from_value(v).unwrap();
+        assert_eq!(back, delta);
+    }
 }

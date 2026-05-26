@@ -132,3 +132,9 @@ pub mod provider_local;
 /// Runs once on `HostStarting`; opens a multi-select modal when multiple
 /// keyring credentials are detected.
 pub mod migration_picker;
+
+/// `internal:html-canvas` plugin: renders model-authored HTML inline as
+/// a static canvas via savvagent-canvas / Blitz. Contributes the
+/// `html` ContentRendererSpec and the system-prompt segment that
+/// instructs the model to use `html-canvas` fences.
+pub mod html_canvas;

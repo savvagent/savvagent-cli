@@ -63,6 +63,7 @@ impl Plugin for UserAgentsPlugin {
             summary: "Rescan user-defined agents".into(),
             args_hint: None,
             requires_arg: false,
+            suppress_prompt_segments: vec![],
         }];
         contributions.hooks = vec![HookKind::HostStarting];
         Manifest {

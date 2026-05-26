@@ -17,6 +17,7 @@ path = "src/lib.rs"
 [dependencies]
 savvagent-protocol.workspace = true
 savvagent-mcp.workspace = true
+savvagent-fence.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true
 axum.workspace = true

@@ -25,6 +25,7 @@
 
 use bytes::{Bytes, BytesMut};
 use futures::StreamExt;
+use savvagent_fence::{FenceChunk, FenceParser};
 use savvagent_mcp::StreamEmitter;
 use savvagent_protocol::{self as spp, BlockDelta, ContentBlock, StreamEvent, Usage, UsageDelta};
 
@@ -81,12 +82,20 @@ struct Accumulator {
     tool_use_counter: u32,
     /// Buffered final-content blocks for the eventual `CompleteResponse`.
     final_blocks: Vec<ContentBlock>,
+    /// Extracts ``` ```html-canvas ``` fences from streaming Text parts
+    /// (Thinking parts bypass the parser because thinking content doesn't
+    /// include user-visible html-canvas).
+    fence_parser: FenceParser,
 }
 
 #[derive(Debug, Clone)]
 enum BlockState {
     Text {
         buf: String,
+    },
+    /// HTML extracted from a ``` ```html-canvas ``` fence inside a Text part.
+    Html {
+        source: String,
     },
     Thinking {
         buf: String,
@@ -244,26 +253,105 @@ impl Accumulator {
         let is_thinking = matches!(part.thought, Some(true));
         let signature = part.thought_signature;
 
+        if is_thinking {
+            self.emit_thinking_fragment(text, signature, out);
+        } else {
+            // Route through the fence parser so html-canvas blocks
+            // become their own SPP Html block, not text-disguised HTML.
+            let chunks = self.fence_parser.push(&text);
+            for chunk in chunks {
+                match chunk {
+                    FenceChunk::Text(t) => self.emit_text_chunk(t, out),
+                    FenceChunk::Html(t) => self.emit_html_chunk(t, out),
+                }
+            }
+        }
+    }
+
+    /// Append `text` to the currently-open Text block, or open a new
+    /// one if the last block is a different kind (or none is open).
+    fn emit_text_chunk(&mut self, text: String, out: &mut Vec<StreamEvent>) {
         match self.last_open_block_mut() {
-            Some((idx, BlockState::Text { buf })) if !is_thinking => {
+            Some((idx, BlockState::Text { buf })) => {
                 buf.push_str(&text);
                 out.push(StreamEvent::ContentBlockDelta {
                     index: idx as u32,
                     delta: BlockDelta::TextDelta { text },
                 });
             }
+            _ => {
+                self.close_last_open(out);
+                let idx = self.next_block_index();
+                out.push(StreamEvent::ContentBlockStart {
+                    index: idx as u32,
+                    block: ContentBlock::Text {
+                        text: String::new(),
+                    },
+                });
+                if !text.is_empty() {
+                    out.push(StreamEvent::ContentBlockDelta {
+                        index: idx as u32,
+                        delta: BlockDelta::TextDelta { text: text.clone() },
+                    });
+                }
+                self.blocks.push(Some(BlockState::Text { buf: text }));
+            }
+        }
+    }
+
+    /// Append `html` to the currently-open Html block, or open a new
+    /// one if the last block is a different kind (or none is open).
+    fn emit_html_chunk(&mut self, html: String, out: &mut Vec<StreamEvent>) {
+        match self.last_open_block_mut() {
+            Some((idx, BlockState::Html { source })) => {
+                source.push_str(&html);
+                out.push(StreamEvent::ContentBlockDelta {
+                    index: idx as u32,
+                    delta: BlockDelta::HtmlSourceDelta { source: html },
+                });
+            }
+            _ => {
+                self.close_last_open(out);
+                let idx = self.next_block_index();
+                out.push(StreamEvent::ContentBlockStart {
+                    index: idx as u32,
+                    block: ContentBlock::Html {
+                        source: String::new(),
+                        state: None,
+                    },
+                });
+                if !html.is_empty() {
+                    out.push(StreamEvent::ContentBlockDelta {
+                        index: idx as u32,
+                        delta: BlockDelta::HtmlSourceDelta {
+                            source: html.clone(),
+                        },
+                    });
+                }
+                self.blocks.push(Some(BlockState::Html { source: html }));
+            }
+        }
+    }
+
+    /// Append a `thought: true` part to the open Thinking block, or open
+    /// a new one if the last block is a different kind.
+    fn emit_thinking_fragment(
+        &mut self,
+        text: String,
+        signature: Option<String>,
+        out: &mut Vec<StreamEvent>,
+    ) {
+        match self.last_open_block_mut() {
             Some((
                 idx,
                 BlockState::Thinking {
                     buf,
                     signature: sig,
                 },
-            )) if is_thinking => {
+            )) => {
                 buf.push_str(&text);
                 if let Some(new_sig) = signature {
                     *sig = Some(new_sig.clone());
-                    // SPP flushes the signature explicitly so hosts can store
-                    // it before the block closes.
                     out.push(StreamEvent::ContentBlockDelta {
                         index: idx as u32,
                         delta: BlockDelta::SignatureDelta { signature: new_sig },
@@ -275,43 +363,25 @@ impl Accumulator {
                 });
             }
             _ => {
-                // Either nothing open, or the previous open block was a
-                // different kind — close it and start a new one.
                 self.close_last_open(out);
                 let idx = self.next_block_index();
-                if is_thinking {
-                    out.push(StreamEvent::ContentBlockStart {
+                out.push(StreamEvent::ContentBlockStart {
+                    index: idx as u32,
+                    block: ContentBlock::Thinking {
+                        text: String::new(),
+                        signature: signature.clone(),
+                    },
+                });
+                if !text.is_empty() {
+                    out.push(StreamEvent::ContentBlockDelta {
                         index: idx as u32,
-                        block: ContentBlock::Thinking {
-                            text: String::new(),
-                            signature: signature.clone(),
-                        },
+                        delta: BlockDelta::ThinkingDelta { text: text.clone() },
                     });
-                    if !text.is_empty() {
-                        out.push(StreamEvent::ContentBlockDelta {
-                            index: idx as u32,
-                            delta: BlockDelta::ThinkingDelta { text: text.clone() },
-                        });
-                    }
-                    self.blocks.push(Some(BlockState::Thinking {
-                        buf: text,
-                        signature,
-                    }));
-                } else {
-                    out.push(StreamEvent::ContentBlockStart {
-                        index: idx as u32,
-                        block: ContentBlock::Text {
-                            text: String::new(),
-                        },
-                    });
-                    if !text.is_empty() {
-                        out.push(StreamEvent::ContentBlockDelta {
-                            index: idx as u32,
-                            delta: BlockDelta::TextDelta { text: text.clone() },
-                        });
-                    }
-                    self.blocks.push(Some(BlockState::Text { buf: text }));
                 }
+                self.blocks.push(Some(BlockState::Thinking {
+                    buf: text,
+                    signature,
+                }));
             }
         }
     }
@@ -322,7 +392,9 @@ impl Accumulator {
         for (i, slot) in self.blocks.iter_mut().enumerate().rev() {
             if let Some(state) = slot {
                 match state {
-                    BlockState::Text { .. } | BlockState::Thinking { .. } => {
+                    BlockState::Text { .. }
+                    | BlockState::Html { .. }
+                    | BlockState::Thinking { .. } => {
                         return Some((i, state));
                     }
                     BlockState::ToolUse { .. } | BlockState::Image { .. } => return None,
@@ -350,6 +422,10 @@ impl Accumulator {
         }
         let block = match state {
             BlockState::Text { buf } => ContentBlock::Text { text: buf },
+            BlockState::Html { source } => ContentBlock::Html {
+                source,
+                state: None,
+            },
             BlockState::Thinking { buf, signature } => ContentBlock::Thinking {
                 text: buf,
                 signature,
@@ -366,6 +442,21 @@ impl Accumulator {
 
     fn flush(&mut self) -> Vec<StreamEvent> {
         let mut events = Vec::new();
+
+        // Drain any buffered html-canvas fence content first so we
+        // don't leave half-flushed text/html behind the open block.
+        let parser = std::mem::take(&mut self.fence_parser);
+        let finish = parser.finish();
+        for chunk in finish.chunks {
+            match chunk {
+                FenceChunk::Text(t) => self.emit_text_chunk(t, &mut events),
+                FenceChunk::Html(t) => self.emit_html_chunk(t, &mut events),
+            }
+        }
+        if finish.unclosed_fence {
+            tracing::warn!("gemini stream ended with unclosed html-canvas fence");
+        }
+
         let len = self.blocks.len();
         for i in 0..len {
             if self.blocks[i].is_some() {
@@ -680,5 +771,106 @@ mod tests {
             matches!(&out.content[0], ContentBlock::Thinking { text, .. } if text == "let me think")
         );
         assert!(matches!(&out.content[1], ContentBlock::Text { text } if text == "answer is 42"));
+    }
+
+    /// When the model emits text followed by an `html-canvas` fenced HTML
+    /// block, the SPP stream must split into a Text block and a separate
+    /// Html block: ContentBlockStart(Text) + TextDelta + ContentBlockStop
+    /// followed by ContentBlockStart(Html) + HtmlSourceDelta +
+    /// ContentBlockStop. The fenced markers themselves are stripped.
+    #[test]
+    fn stream_emits_html_blocks_for_canvas_fence() {
+        let mut acc = Accumulator::default();
+        let evs = acc.consume_chunk(chunk(json!({
+            "candidates": [{
+                "content": {"role": "model", "parts": [
+                    {"text": "Here:\n```html-canvas\n<p>hi</p>\n```\n"}
+                ]},
+                "finishReason": "STOP",
+                "index": 0
+            }],
+            "responseId": "r-html",
+            "usageMetadata": {"promptTokenCount": 1, "candidatesTokenCount": 5}
+        })));
+        let flush_evs = acc.flush();
+        let stream: Vec<StreamEvent> = evs.into_iter().chain(flush_evs).collect();
+
+        let content_events: Vec<&StreamEvent> = stream
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e,
+                    StreamEvent::ContentBlockStart { .. }
+                        | StreamEvent::ContentBlockDelta { .. }
+                        | StreamEvent::ContentBlockStop { .. }
+                )
+            })
+            .collect();
+
+        assert!(
+            matches!(
+                content_events[0],
+                StreamEvent::ContentBlockStart {
+                    block: ContentBlock::Text { text },
+                    ..
+                } if text.is_empty()
+            ),
+            "expected ContentBlockStart Text(\"\") first, got {:?}",
+            content_events[0]
+        );
+        assert!(
+            matches!(
+                content_events[1],
+                StreamEvent::ContentBlockDelta {
+                    delta: BlockDelta::TextDelta { text },
+                    ..
+                } if text == "Here:\n"
+            ),
+            "expected TextDelta(\"Here:\\n\"), got {:?}",
+            content_events[1]
+        );
+        assert!(
+            matches!(content_events[2], StreamEvent::ContentBlockStop { .. }),
+            "expected ContentBlockStop after text, got {:?}",
+            content_events[2]
+        );
+        assert!(
+            matches!(
+                content_events[3],
+                StreamEvent::ContentBlockStart {
+                    block: ContentBlock::Html { source, .. },
+                    ..
+                } if source.is_empty()
+            ),
+            "expected ContentBlockStart Html(\"\"), got {:?}",
+            content_events[3]
+        );
+        assert!(
+            matches!(
+                content_events[4],
+                StreamEvent::ContentBlockDelta {
+                    delta: BlockDelta::HtmlSourceDelta { source },
+                    ..
+                } if source == "<p>hi</p>\n"
+            ),
+            "expected HtmlSourceDelta(\"<p>hi</p>\\n\"), got {:?}",
+            content_events[4]
+        );
+        assert!(
+            matches!(content_events[5], StreamEvent::ContentBlockStop { .. }),
+            "expected ContentBlockStop after html, got {:?}",
+            content_events[5]
+        );
+
+        let out = acc.finish().unwrap();
+        assert_eq!(out.content.len(), 2);
+        match &out.content[0] {
+            ContentBlock::Text { text } => assert_eq!(text, "Here:\n"),
+            other => panic!("expected Text first, got {other:?}"),
+        }
+        match &out.content[1] {
+            ContentBlock::Html { source, .. } => assert_eq!(source, "<p>hi</p>\n"),
+            other => panic!("expected Html second, got {other:?}"),
+        }
     }
 }

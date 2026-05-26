@@ -54,6 +54,7 @@ impl Plugin for ConnectPlugin {
             summary: rust_i18n::t!("slash.connect-summary").to_string(),
             args_hint: Some("[provider]".into()),
             requires_arg: false,
+            suppress_prompt_segments: vec![],
         }];
         contributions.screens = vec![ScreenSpec {
             id: "connect.picker".into(),

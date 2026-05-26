@@ -140,12 +140,14 @@ impl Plugin for MigrationPickerPlugin {
                 summary: "(internal) Confirm migration picker selection".into(),
                 args_hint: None,
                 requires_arg: false,
+                suppress_prompt_segments: vec![],
             },
             SlashSpec {
                 name: "_internal:migration-dismiss".into(),
                 summary: "(internal) Dismiss migration picker".into(),
                 args_hint: None,
                 requires_arg: false,
+                suppress_prompt_segments: vec![],
             },
         ];
         Manifest {

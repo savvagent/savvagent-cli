@@ -15,6 +15,7 @@
 //! `cross_provider_history` only touches the Anthropic-side helpers.
 //! Without the allow, the latter binary would fail under workspace
 //! `-D warnings`.
+#![allow(clippy::collapsible_if)]
 #![allow(dead_code)]
 
 use std::sync::{Arc, Mutex};

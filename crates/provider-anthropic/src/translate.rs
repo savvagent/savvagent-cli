@@ -73,6 +73,12 @@ fn block_to_anthropic(b: &spp::ContentBlock) -> api::ContentBlock {
             thinking: text.clone(),
             signature: signature.clone(),
         },
+        // Html blocks are a host-side rendering hint; on the wire to
+        // Anthropic we echo the source as plain text so the model can
+        // reference its own prior output.
+        spp::ContentBlock::Html { source, .. } => api::ContentBlock::Text {
+            text: source.clone(),
+        },
     }
 }
 

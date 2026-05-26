@@ -90,6 +90,7 @@ mod tests {
                 summary: "".into(),
                 args_hint: None,
                 requires_arg: false,
+                suppress_prompt_segments: vec![],
             }];
             Manifest {
                 id: PluginId::new(&self.0).expect("valid test id"),

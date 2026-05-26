@@ -124,6 +124,7 @@ provider has a key on file.
 | `/plugins` | Open the plugin manager — toggle optional plugins on/off; core plugins can't be disabled. Persists to `~/.savvagent/plugins.toml`. |
 | `/update` | Re-run the latest-release install. The TUI checks for new releases on launch AND re-checks every 2 hours while the TUI is open, auto-installing any newer release (the banner above the prompt reports progress). `/update` is only needed to retry after a failed install or to force the install before the next 2-hour tick. Replaces every binary in the release archive — `savvagent` plus the six helpers. Opt out with `SAVVAGENT_NO_UPDATE_CHECK=1` or `--no-update-check`. |
 | `/save` | Write the current transcript to `~/.savvagent/transcripts/<unix>.json`. |
+| `/save-canvas [path] [--block N] [--open]` | Write the most recent HTML canvas to a file. Default path is `savvagent-canvas-<id>.html` in the current directory. `--block N` targets a specific canvas by id; `--open` opens the file in the system browser after writing. |
 | `/resume` | Re-open a previously-saved transcript and continue from where it ended. With no args opens a picker; takes an absolute path or a bare basename relative to `~/.savvagent/transcripts/`. |
 | `/clear` | Reset the conversation history (and the visible log). |
 | `/view <path>` | Open a file in the read-only popup editor. `@<path>` in the prompt also works as an inline shortcut. |
@@ -371,6 +372,39 @@ The classifier prefers models on the **active provider** first, then walks the r
 **Caveats.** Coding keyword matching is **substring-based** in v1 — `function` matches `functional`, `error` matches `terror`. If you need stricter matching (whole-word only, custom keyword list, custom thresholds), use explicit `[[rule]]` entries instead; rules run earlier and beat the classifier.
 
 Disable any time by setting `heuristics = false` (or removing the line) and running `/route reload`.
+
+### Inline HTML rendering
+
+Savvagent renders model-emitted HTML inline in the chat transcript when
+your terminal supports an image protocol (Kitty / iTerm2 / WezTerm /
+Ghostty / sixel). Models are prompted to wrap structured documents
+(plans, specs, status updates, design reviews, comparison tables) in
+` ```html-canvas ` fenced blocks; savvagent renders them as static
+images in-transcript for now — Phase 2 will add mouse and keyboard
+interaction.
+
+Every rendered canvas is also auto-exported to
+`~/.savvagent/canvases/<unix>-<turn>-<block>.html` so you can open it
+in a real browser or share it. Use `/save-canvas [path] [--open]` to
+write to an explicit location and optionally open it immediately.
+
+Terminals without a supported image protocol show the HTML source in a
+syntax-highlighted code block with a one-line banner; the content is
+still fully readable.
+
+Disable inline rendering by toggling the `internal:html-canvas` plugin
+off in `~/.savvagent/plugins.toml`:
+
+```toml
+[plugins."internal:html-canvas"]
+enabled = false
+```
+
+Auto-export is on whenever the plugin is enabled; there is no separate
+toggle in v0.17.0. Disabling the plugin also stops auto-export.
+
+See [`docs/canvas-terminal-compat.md`](docs/canvas-terminal-compat.md)
+for the supported-terminal matrix and tmux passthrough setup.
 
 ### Multi-provider pool (Phase 1)
 
@@ -692,6 +726,7 @@ args = []
 | Path | Owner | Contents |
 |---|---|---|
 | `~/.savvagent/transcripts/<unix_secs>.json` | TUI | One pretty-printed `Vec<spp::Message>` per save (auto on `TurnComplete`, manual on `/save`). |
+| `~/.savvagent/canvases/<unix>-<turn>-<block>.html` | `internal:html-canvas` plugin | Auto-exported HTML source for each finalized canvas. Written with `0o600` permissions. Present only when the plugin is enabled. |
 | `~/.savvagent/config.toml` | TUI startup | Startup connection policy (`opt-in` / `all` / `last-used` / `none`), `startup_providers` list, per-provider `connect_timeout_ms`, and one-time migration flag. Created automatically on first launch when multiple keyring entries are found. |
 | `~/.savvagent/models.toml` | `/model` | `{ providers: { id = model } }`. Re-applied at `/connect`. |
 | `~/.savvagent/theme.toml` | `/theme` | Selected theme slug. |

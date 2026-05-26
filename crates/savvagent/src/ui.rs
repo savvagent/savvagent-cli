@@ -9,9 +9,18 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Margin, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, FrameExt, List, ListItem, Padding, Paragraph, Wrap},
+    widgets::{
+        Block, BorderType, Borders, Clear, FrameExt, List, ListItem, Padding, Paragraph, Wrap,
+    },
 };
 use savvagent_host::ToolCallStatus;
+use savvagent_plugin::ContentBlockId;
+
+/// Rows reserved in the conversation paragraph for each `Entry::Canvas`
+/// placeholder. The image (or source-code fallback) is overlaid on top of
+/// these blank rows after the paragraph renders. Phase 1 uses a fixed
+/// height; Phase 2 will measure document height from the renderer.
+const CANVAS_RESERVED_ROWS: u16 = 12;
 
 /// Pre-rendered styled spans for a single `Entry::Tool` row, produced during
 /// `compute_home_frame_data`. Stored on `HomeFrameData` and consumed by the
@@ -223,7 +232,19 @@ pub fn render(app: &mut App, frame: &mut Frame, frame_data: &HomeFrameData) {
         );
     frame.render_widget(header, chunks[0]);
 
-    render_log(app, frame, chunks[1], palette, frame_data);
+    let canvas_overlays = render_log(app, frame, chunks[1], palette, frame_data);
+    // Persist each canvas's on-screen cell rect for the mouse handler in
+    // `main.rs::run_app`, which hit-tests clicks outside the render pass.
+    // Refreshed every frame so stale rects (e.g. after scroll) never route
+    // a click into the wrong block.
+    app.canvas_click_targets = canvas_overlays.iter().map(|o| (o.id, o.area)).collect();
+    // After the conversation log paints, overlay any Entry::Canvas blocks
+    // (image protocol when supported, source-code fallback otherwise).
+    // `canvas_overlays` carries each placeholder's on-screen rect (already
+    // clipped to the conversation block's inner area).
+    if !canvas_overlays.is_empty() {
+        render_canvas_overlays(app, frame, palette, &canvas_overlays);
+    }
 
     // Banner row — one-line update banner, rendered from plugin slot.
     // The slot returns nothing when there is no update available, so the
@@ -595,13 +616,39 @@ fn render_transcript_item(
     ListItem::new(line)
 }
 
+/// One overlay region computed during the conversation-log render pass.
+/// `id` keys into [`crate::app::CanvasRegistry`] for the source/renderer;
+/// `area` is the on-screen rect (already clipped to `inner_area`) where
+/// the image or fallback should paint. `streaming` is `true` when the
+/// canvas is still receiving `HtmlSourceDelta`s — Task 17 turns this into
+/// the live-source preview path; Task 16 reuses the same branch as the
+/// "no image protocol" fallback so the rectangle is never blank.
+#[derive(Debug, Clone)]
+struct CanvasOverlay {
+    id: ContentBlockId,
+    area: Rect,
+    streaming: bool,
+    source: String,
+}
+
 fn render_log(
     app: &App,
     frame: &mut Frame,
     area: Rect,
     palette: Palette,
     frame_data: &HomeFrameData,
-) {
+) -> Vec<CanvasOverlay> {
+    /// Tracks each canvas's first line index in `lines` plus the metadata
+    /// the overlay pass needs to draw it. We resolve the on-screen rect
+    /// at the bottom of this function once `inner_area.width` and the
+    /// scroll offset are known.
+    struct CanvasMark {
+        id: ContentBlockId,
+        line_idx: usize,
+        streaming: bool,
+        source: String,
+    }
+    let mut canvas_marks: Vec<CanvasMark> = Vec::new();
     let mut lines: Vec<Line<'static>> = Vec::with_capacity(app.entries.len() * 2 + 1);
     let mut tool_entry_idx: usize = 0;
     for entry in &app.entries {
@@ -698,6 +745,39 @@ fn render_log(
                         .add_modifier(Modifier::ITALIC),
                 )));
             }
+            // Canvas entries reserve a fixed block of blank rows in the
+            // paragraph so the dedicated overlay pass (see
+            // `render_canvas_overlays`) has space to draw the image or
+            // source-code fallback at the right vertical position. The
+            // first reserved row carries a one-line caption that stays
+            // visible even when overlay rendering is unavailable (e.g.,
+            // mid-frame during a terminal resize).
+            Entry::Canvas {
+                id,
+                source,
+                source_preview,
+            } => {
+                let caption = if source_preview.is_some() {
+                    format!("⬛ canvas:{} — streaming source…", id.0)
+                } else {
+                    format!("⬛ canvas:{}", id.0)
+                };
+                let start_idx = lines.len();
+                lines.push(Line::from(Span::styled(
+                    caption,
+                    palette.base_style().fg(palette.muted),
+                )));
+                // CANVAS_RESERVED_ROWS - 1 blank rows below the caption.
+                for _ in 1..CANVAS_RESERVED_ROWS {
+                    lines.push(Line::from(""));
+                }
+                canvas_marks.push(CanvasMark {
+                    id: *id,
+                    line_idx: start_idx,
+                    streaming: source_preview.is_some(),
+                    source: source_preview.clone().unwrap_or_else(|| source.clone()),
+                });
+            }
         }
     }
 
@@ -722,6 +802,24 @@ fn render_log(
     // `area.height` agree on the same coordinate space.
     let inner_area = block.inner(area);
 
+    // Pre-compute the canvas overlay positions BEFORE moving `lines` into
+    // `Paragraph::new`. We need each placeholder's wrapped-row offset from
+    // the top of the paragraph, and the simple way to get that is to walk
+    // the line vector once at the same `inner_area.width` the paragraph
+    // will wrap at.
+    let inner_width = inner_area.width as usize;
+    let line_rows: Vec<usize> = lines
+        .iter()
+        .map(|line| wrapped_row_count(line.width(), inner_width))
+        .collect();
+    let mut cum: Vec<usize> = Vec::with_capacity(line_rows.len());
+    let mut running = 0usize;
+    for n in &line_rows {
+        cum.push(running);
+        running += *n;
+    }
+    let total_wrapped_rows = running;
+
     let para = Paragraph::new(lines)
         .wrap(Wrap { trim: false })
         .style(palette.base_style());
@@ -730,13 +828,287 @@ fn render_log(
     // bottom row of `inner_area`. Ratatui's Paragraph renders top-down, so
     // without a scroll offset newly-streamed text falls off the bottom and
     // becomes invisible. See `log_scroll_y` for the cascade.
+    //
+    // We use our own `total_wrapped_rows` rather than
+    // `para.line_count(inner_area.width)` so the auto-tail and the canvas
+    // overlay placement below agree on the same row coordinate system.
+    // Ratatui's `Wrap { trim: false }` word-wraps at whitespace; our
+    // `wrapped_row_count` divides by cell width. The two can disagree by
+    // a few rows when very long Assistant lines word-wrap. Keeping both
+    // sides on the same approximation avoids a visual mismatch between
+    // where the canvas placeholder paints and where the overlay draws —
+    // at the cost of slightly imprecise auto-tail for pathologically
+    // long unwrapped lines.
     let scroll_y = log_scroll_y(
-        para.line_count(inner_area.width),
+        total_wrapped_rows,
         inner_area.height as usize,
         app.log_scroll_offset_from_bottom,
     );
 
     frame.render_widget(para.scroll((scroll_y, 0)).block(block), area);
+
+    // Resolve each canvas placeholder's on-screen rect using the cumulative
+    // wrapped-row offsets computed above. Emit a `CanvasOverlay` for every
+    // placeholder whose top row lands in the visible band
+    // `[scroll_y, scroll_y + inner_area.height)`. Rects are clipped to
+    // `inner_area` so the overlay never bleeds into the bordered block's
+    // chrome.
+    if canvas_marks.is_empty() || inner_area.width == 0 || inner_area.height == 0 {
+        return Vec::new();
+    }
+
+    let viewport_top = scroll_y as usize;
+    let viewport_bottom = viewport_top.saturating_add(inner_area.height as usize);
+
+    let mut overlays: Vec<CanvasOverlay> = Vec::with_capacity(canvas_marks.len());
+    for mark in canvas_marks {
+        let placeholder_top = cum.get(mark.line_idx).copied().unwrap_or(0);
+        // Each placeholder occupies CANVAS_RESERVED_ROWS contiguous blank
+        // rows (1-row caption + N-1 blank rows), each of which wraps to
+        // exactly one screen row because `Line::from("")` has width 0.
+        let placeholder_bottom = placeholder_top + CANVAS_RESERVED_ROWS as usize;
+
+        // Skip canvases entirely outside the viewport.
+        if placeholder_bottom <= viewport_top || placeholder_top >= viewport_bottom {
+            continue;
+        }
+
+        // Clip the placeholder rect to the visible band.
+        let visible_top = placeholder_top.max(viewport_top);
+        let visible_bottom = placeholder_bottom.min(viewport_bottom);
+        let on_screen_y = (visible_top - viewport_top) as u16;
+        let height = (visible_bottom - visible_top) as u16;
+        if height == 0 {
+            continue;
+        }
+
+        let rect = Rect {
+            x: inner_area.x,
+            y: inner_area.y + on_screen_y,
+            width: inner_area.width,
+            height,
+        };
+
+        overlays.push(CanvasOverlay {
+            id: mark.id,
+            area: rect,
+            streaming: mark.streaming,
+            source: mark.source,
+        });
+    }
+    overlays
+}
+
+/// Wrapped-row count for a single logical line of visual width `w` at
+/// `wrap_width`. Empty lines and 0-width wrap_widths collapse to 1 row.
+fn wrapped_row_count(w: usize, wrap_width: usize) -> usize {
+    if wrap_width == 0 {
+        return 1;
+    }
+    if w == 0 {
+        return 1;
+    }
+    w.div_ceil(wrap_width)
+}
+
+/// Paint each `Entry::Canvas` overlay over the conversation log. Three
+/// branches:
+///
+/// 1. **Streaming.** `overlay.streaming` is `true` — the host is still
+///    accumulating `HtmlSourceDelta`s. Render the partial source as a
+///    code block with a "rendering…" hint. Phase 1 reuses the same path
+///    as the no-image-protocol fallback so something always paints.
+/// 2. **Image protocol available, complete source.** Drive the renderer,
+///    convert the resulting `Frame` to a `StatefulProtocol`, and hand
+///    `StatefulImage` to `render_stateful_widget`. The protocol is cached
+///    on `CanvasRegistry::image_states`; the stateful widget re-encodes
+///    internally when the area changes.
+/// 3. **No image protocol.** Same code-block fallback as (1), with a
+///    one-line yellow banner explaining the situation.
+///
+/// `overlay.area` is already clipped to the conversation block's inner
+/// area, so any of the above paint inside the bordered "Conversation" box
+/// without bleeding into the chrome.
+fn render_canvas_overlays(
+    app: &mut App,
+    frame: &mut Frame,
+    palette: Palette,
+    overlays: &[CanvasOverlay],
+) {
+    for overlay in overlays {
+        if overlay.area.width == 0 || overlay.area.height == 0 {
+            continue;
+        }
+        // Focus chrome: when this canvas is the focused element, paint a
+        // 1-cell accent border around the overlay and render the content
+        // into the block's inner area. Unfocused canvases render as before.
+        let focused = app.is_canvas_focused(overlay.id);
+        let content_area = canvas_content_area(overlay.area, focused);
+        if focused {
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Plain)
+                .border_style(palette.base_style().fg(palette.accent));
+            frame.render_widget(block, overlay.area);
+        }
+        // A 1-cell shrink on a thin overlay can collapse the inner area to
+        // zero — skip content rendering then (matches Phase 1's small-area
+        // behavior), leaving just the border.
+        if content_area.width == 0 || content_area.height == 0 {
+            continue;
+        }
+        if overlay.streaming {
+            render_source_preview(frame, content_area, &overlay.source, palette);
+            continue;
+        }
+        if app.canvas_registry.image_protocol_available() {
+            render_canvas_image(
+                frame,
+                content_area,
+                app,
+                overlay.id,
+                palette,
+                &overlay.source,
+            );
+        } else {
+            render_canvas_source_fallback(frame, content_area, &overlay.source, palette);
+        }
+    }
+}
+
+/// Inner area available for canvas content given the overlay rect and focus
+/// state. A focused canvas reserves 1 cell on every side for its accent
+/// border (via `Block::inner`); an unfocused canvas uses the full rect. The
+/// shrink is saturating, so a tiny focused overlay collapses to a zero-size
+/// area rather than panicking — callers must guard against that.
+fn canvas_content_area(area: Rect, focused: bool) -> Rect {
+    if !focused {
+        return area;
+    }
+    Block::default().borders(Borders::ALL).inner(area)
+}
+
+/// Drive the canvas renderer at `area`'s pixel width and overlay the
+/// resulting image. Falls back to the source-code path on any failure
+/// (no renderer registered, malformed frame, etc.) so the user still
+/// sees the HTML they asked the model for.
+fn render_canvas_image(
+    frame: &mut Frame,
+    area: Rect,
+    app: &mut App,
+    id: ContentBlockId,
+    palette: Palette,
+    source: &str,
+) {
+    // Pixel width = cell width * picker-reported font width.
+    let cell_w = match app.canvas_registry.image_cell_size() {
+        Some((w, _h)) => w,
+        None => {
+            // Defensive: image_protocol_available() returned true above,
+            // but threads-of-control change could in theory flip it.
+            render_canvas_source_fallback(frame, area, source, palette);
+            return;
+        }
+    };
+    let pixel_width = (area.width as u32).saturating_mul(cell_w as u32);
+    if pixel_width == 0 {
+        render_canvas_source_fallback(frame, area, source, palette);
+        return;
+    }
+
+    // Clear the overlay rect so any stale text (placeholder caption or
+    // adjacent paragraph) doesn't bleed through the rendered image.
+    frame.render_widget(Clear, area);
+    frame.buffer_mut().set_style(area, palette.base_style());
+
+    let protocol = app.canvas_registry.image_protocol_mut(id, pixel_width);
+    match protocol {
+        Some(state) => {
+            let widget =
+                ratatui_image::StatefulImage::<ratatui_image::protocol::StatefulProtocol>::default(
+                );
+            frame.render_stateful_widget(widget, area, state);
+        }
+        None => {
+            // Renderer missing or frame empty/mis-sized — show the source
+            // so the user still sees what the model emitted.
+            render_canvas_source_fallback(frame, area, source, palette);
+        }
+    }
+}
+
+/// Source-code fallback used when the terminal lacks an image protocol.
+/// Top row is a yellow banner naming the supported terminals; the rest of
+/// the area renders the HTML source inside a left-bar "code block".
+fn render_canvas_source_fallback(frame: &mut Frame, area: Rect, source: &str, palette: Palette) {
+    if area.height == 0 || area.width == 0 {
+        return;
+    }
+    frame.render_widget(Clear, area);
+    frame.buffer_mut().set_style(area, palette.base_style());
+
+    let banner = Paragraph::new(
+        "Inline HTML rendering requires kitty / WezTerm / Ghostty / iTerm2 / Sixel.",
+    )
+    .style(palette.base_style().fg(palette.warning))
+    .wrap(Wrap { trim: false });
+    let (banner_area, body_area) = split_top_one_line(area);
+    frame.render_widget(banner, banner_area);
+    if body_area.height > 0 {
+        render_code_block(frame, body_area, source, palette);
+    }
+}
+
+/// Streaming preview: same code-block helper plus a muted "rendering…"
+/// header. Task 17 will swap this for a syntax-highlighted variant; the
+/// header keeps the user-facing affordance stable.
+fn render_source_preview(frame: &mut Frame, area: Rect, preview: &str, palette: Palette) {
+    if area.height == 0 || area.width == 0 {
+        return;
+    }
+    frame.render_widget(Clear, area);
+    frame.buffer_mut().set_style(area, palette.base_style());
+
+    let header =
+        Paragraph::new("Rendering HTML canvas…").style(palette.base_style().fg(palette.muted));
+    let (header_area, body_area) = split_top_one_line(area);
+    frame.render_widget(header, header_area);
+    if body_area.height > 0 {
+        render_code_block(frame, body_area, preview, palette);
+    }
+}
+
+/// Minimal "code block" widget: muted text inside a left-border bar.
+/// Phase 2 will plumb syntect-driven syntax highlighting through; Phase 1
+/// keeps the surface flat to avoid dragging in another renderer dep.
+fn render_code_block(frame: &mut Frame, area: Rect, source: &str, palette: Palette) {
+    let widget = Paragraph::new(source.to_string())
+        .wrap(Wrap { trim: false })
+        .style(palette.base_style().fg(palette.fg))
+        .block(
+            Block::default()
+                .borders(Borders::LEFT)
+                .border_style(palette.base_style().fg(palette.border)),
+        );
+    frame.render_widget(widget, area);
+}
+
+/// Split `area` into a 1-row top strip and the remainder. When `area` is
+/// 1 row tall the top strip takes the whole rect and the body has height 0.
+fn split_top_one_line(area: Rect) -> (Rect, Rect) {
+    if area.height == 0 {
+        return (area, area);
+    }
+    let top = Rect {
+        height: 1.min(area.height),
+        ..area
+    };
+    let body = Rect {
+        y: area.y + 1,
+        height: area.height.saturating_sub(1),
+        ..area
+    };
+    (top, body)
 }
 
 fn line_block(prefix: &str, text: &str, color: Color, palette: Palette) -> Line<'static> {
@@ -1033,6 +1405,76 @@ mod tests {
     }
 
     #[test]
+    fn canvas_content_area_unfocused_is_unchanged() {
+        let area = Rect {
+            x: 3,
+            y: 4,
+            width: 20,
+            height: 8,
+        };
+        assert_eq!(canvas_content_area(area, false), area);
+    }
+
+    #[test]
+    fn canvas_content_area_focused_shrinks_by_one_cell_each_side() {
+        let area = Rect {
+            x: 3,
+            y: 4,
+            width: 20,
+            height: 8,
+        };
+        let inner = canvas_content_area(area, true);
+        assert_eq!(
+            inner,
+            Rect {
+                x: 4,
+                y: 5,
+                width: 18,
+                height: 6,
+            }
+        );
+    }
+
+    #[test]
+    fn canvas_content_area_focused_tiny_area_collapses_without_panic() {
+        // 1x1 overlay: the 1-cell border consumes the whole rect, leaving a
+        // zero-size inner area (callers must guard against this).
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 1,
+            height: 1,
+        };
+        let inner = canvas_content_area(area, true);
+        assert_eq!(inner.width, 0);
+        assert_eq!(inner.height, 0);
+    }
+
+    #[test]
+    fn focused_canvas_block_draws_a_border() {
+        use ratatui::buffer::Buffer;
+        use ratatui::widgets::Widget;
+
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 10,
+            height: 4,
+        };
+        let mut buf = Buffer::empty(area);
+        // Mirror the focus-chrome block the overlay path renders.
+        Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Plain)
+            .render(area, &mut buf);
+        let has_border = buf
+            .content()
+            .iter()
+            .any(|c| matches!(c.symbol(), "┌" | "┐" | "└" | "┘" | "│" | "─"));
+        assert!(has_border, "focused canvas should draw a border");
+    }
+
+    #[test]
     fn compose_footer_all_three_groups_populated() {
         let l = vec![one_span_line("Anthropic")];
         let c = vec![one_span_line("idle")];
@@ -1111,5 +1553,64 @@ mod tests {
         let empty: Vec<StyledLine> = vec![];
         let out = compose_footer_line([&empty, &empty, &r], &sep());
         assert_eq!(joined(&out), "cwd · ~22 ctx · $0.00");
+    }
+
+    // Canvas overlay row math --------------------------------------------
+
+    #[test]
+    fn wrapped_row_count_empty_line_is_one_row() {
+        assert_eq!(wrapped_row_count(0, 80), 1);
+    }
+
+    #[test]
+    fn wrapped_row_count_short_line_is_one_row() {
+        assert_eq!(wrapped_row_count(10, 80), 1);
+    }
+
+    #[test]
+    fn wrapped_row_count_exact_width_is_one_row() {
+        assert_eq!(wrapped_row_count(80, 80), 1);
+    }
+
+    #[test]
+    fn wrapped_row_count_overflow_by_one_yields_two_rows() {
+        assert_eq!(wrapped_row_count(81, 80), 2);
+    }
+
+    #[test]
+    fn wrapped_row_count_two_full_widths_plus_one_yields_three() {
+        assert_eq!(wrapped_row_count(161, 80), 3);
+    }
+
+    #[test]
+    fn wrapped_row_count_zero_wrap_width_collapses_to_one_row() {
+        // Defensive: a 0-width inner area happens during terminal resize
+        // edge cases. Returning 1 keeps the cumulative sum monotonic and
+        // avoids divide-by-zero downstream.
+        assert_eq!(wrapped_row_count(100, 0), 1);
+    }
+
+    #[test]
+    fn split_top_one_line_splits_a_tall_rect() {
+        let r = Rect::new(2, 3, 80, 10);
+        let (top, body) = split_top_one_line(r);
+        assert_eq!(top, Rect::new(2, 3, 80, 1));
+        assert_eq!(body, Rect::new(2, 4, 80, 9));
+    }
+
+    #[test]
+    fn split_top_one_line_with_one_row_leaves_no_body() {
+        let r = Rect::new(0, 0, 40, 1);
+        let (top, body) = split_top_one_line(r);
+        assert_eq!(top.height, 1);
+        assert_eq!(body.height, 0);
+    }
+
+    #[test]
+    fn split_top_one_line_with_zero_rows_returns_unchanged() {
+        let r = Rect::new(0, 0, 40, 0);
+        let (top, body) = split_top_one_line(r);
+        assert_eq!(top, r);
+        assert_eq!(body, r);
     }
 }

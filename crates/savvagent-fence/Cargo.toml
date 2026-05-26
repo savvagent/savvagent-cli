@@ -1,0 +1,13 @@
+[package]
+name = "savvagent-fence"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Streaming parser that extracts savvagent-canvas HTML fences from model text"
+
+[dependencies]
+# none — pure std
+
+[dev-dependencies]

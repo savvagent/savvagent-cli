@@ -42,6 +42,7 @@ list-models-fell-back         = "%{name}: live model catalog unavailable (%{err}
 list-models-empty             = "%{name}: provider returned an empty model list; showing the built-in fallback list."
 not-connected-tools           = "Not connected — no tools to list."
 no-tools-registered           = "No tools registered."
+open-url-failed               = "Failed to open URL: %{url}"
 provider-api-key-missing      = "%{name} API key not found in keyring. Run `/connect` from the home view to enter one."
 provider-endpoint-unreachable = "%{name} endpoint not reachable. Start `ollama serve` and try again."
 provider-invalid-id           = "Invalid provider id from plugin: %{id}"

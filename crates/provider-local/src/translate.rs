@@ -178,6 +178,8 @@ fn push_messages_for_spp(m: &spp::Message, out: &mut Vec<api::Message>, has_tool
                         // Ollama's vision support is model-dependent; skip
                         // images rather than crashing.
                     }
+                    // Html source is echoed back as plain text; see provider-{anthropic,openai,gemini} translators.
+                    spp::ContentBlock::Html { source, .. } => text_buf.push(source.as_str()),
                     _ => {}
                 }
             }
@@ -207,6 +209,13 @@ fn push_messages_for_spp(m: &spp::Message, out: &mut Vec<api::Message>, has_tool
                                 arguments: input.clone(),
                             },
                         });
+                    }
+                    // Html source is echoed back as plain text; see provider-{anthropic,openai,gemini} translators.
+                    spp::ContentBlock::Html { source, .. } => {
+                        if !text_buf.is_empty() {
+                            text_buf.push('\n');
+                        }
+                        text_buf.push_str(source.as_str());
                     }
                     _ => {}
                 }
@@ -666,5 +675,71 @@ mod tests {
         let opts = body.options.unwrap();
         assert_eq!(opts.num_predict, Some(256));
         assert_eq!(opts.temperature, Some(0.7));
+    }
+
+    #[test]
+    fn html_block_in_assistant_turn_is_included_as_text() {
+        // An assistant message containing a ContentBlock::Html must not be
+        // silently dropped — multi-turn canvas conversations against Ollama
+        // depend on this content being echoed back.
+        let req = spp::CompleteRequest {
+            model: "llama3.2".into(),
+            messages: vec![spp::Message {
+                role: spp::Role::Assistant,
+                content: vec![spp::ContentBlock::Html {
+                    source: "<p>x</p>".into(),
+                    state: None,
+                }],
+            }],
+            system: None,
+            tools: vec![],
+            temperature: None,
+            top_p: None,
+            max_tokens: 32,
+            stop_sequences: vec![],
+            stream: false,
+            thinking: None,
+            metadata: None,
+        };
+        let body = request_to_ollama(&req, false);
+        assert_eq!(body.messages.len(), 1);
+        assert_eq!(body.messages[0].role, "assistant");
+        let content = body.messages[0].content.as_ref().expect("content missing");
+        assert!(
+            content.as_str().unwrap_or("").contains("<p>x</p>"),
+            "expected html source in content, got: {content:?}",
+        );
+    }
+
+    #[test]
+    fn html_block_in_user_turn_is_included_as_text() {
+        // Same guarantee for the User role: Html source must not be dropped.
+        let req = spp::CompleteRequest {
+            model: "llama3.2".into(),
+            messages: vec![spp::Message {
+                role: spp::Role::User,
+                content: vec![spp::ContentBlock::Html {
+                    source: "<p>hello</p>".into(),
+                    state: None,
+                }],
+            }],
+            system: None,
+            tools: vec![],
+            temperature: None,
+            top_p: None,
+            max_tokens: 32,
+            stop_sequences: vec![],
+            stream: false,
+            thinking: None,
+            metadata: None,
+        };
+        let body = request_to_ollama(&req, false);
+        assert_eq!(body.messages.len(), 1);
+        assert_eq!(body.messages[0].role, "user");
+        let content = body.messages[0].content.as_ref().expect("content missing");
+        assert!(
+            content.as_str().unwrap_or("").contains("<p>hello</p>"),
+            "expected html source in content, got: {content:?}",
+        );
     }
 }

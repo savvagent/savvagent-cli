@@ -37,6 +37,8 @@
 //! captured-body inspector already proves cross-provider history flowed
 //! through end-to-end.
 
+#![allow(clippy::collapsible_if)]
+
 mod support;
 
 use std::sync::Arc;

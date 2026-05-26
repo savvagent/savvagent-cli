@@ -36,6 +36,7 @@ impl Plugin for RoutePlugin {
             summary: rust_i18n::t!("slash.route-summary").to_string(),
             args_hint: Some("[reload | show]".into()),
             requires_arg: false,
+            suppress_prompt_segments: vec![],
         }];
         Manifest {
             id: PluginId::new("internal:route").expect("valid built-in id"),

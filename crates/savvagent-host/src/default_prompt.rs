@@ -21,6 +21,7 @@
 
 use std::path::Path;
 
+use savvagent_plugin::SystemPromptSegment;
 use savvagent_protocol::ToolDef;
 
 /// App-version label source. See [`crate::HostConfig::with_app_version`].
@@ -241,6 +242,41 @@ fn render_environment(out: &mut String, env: &PromptEnv<'_>) {
     out.push_str(&version_line);
 }
 
+/// Append `segments` to a base prompt, dropping any segment whose `id`
+/// appears in `suppressed_ids`. Survivors are concatenated in input
+/// order, joined to the base by a blank line, and joined to each other
+/// by blank lines.
+///
+/// The host uses this after composing the default prompt + project
+/// context (`SAVVAGENT.md`) and before sending the `system` field on a
+/// `CompleteRequest`. Per-slash suppression lists come from the
+/// invoked `SlashSpec::suppress_prompt_segments`.
+pub fn append_prompt_segments(
+    base: &str,
+    segments: &[SystemPromptSegment],
+    suppressed_ids: &[&str],
+) -> String {
+    let mut out = String::with_capacity(
+        base.len() + segments.iter().map(|s| s.text.len() + 2).sum::<usize>(),
+    );
+    out.push_str(base);
+
+    for seg in segments {
+        if suppressed_ids.iter().any(|s| *s == seg.id) {
+            continue;
+        }
+        if !out.ends_with("\n\n") {
+            if out.ends_with('\n') {
+                out.push('\n');
+            } else {
+                out.push_str("\n\n");
+            }
+        }
+        out.push_str(&seg.text);
+    }
+    out
+}
+
 /// Render the default prompt. Pure over `(env, tools)`. The builder
 /// reads `tool.name` only — descriptions are NOT included verbatim.
 pub fn build(env: &PromptEnv<'_>, tools: &[ToolDef]) -> String {
@@ -422,6 +458,50 @@ mod tests {
             !s.contains("A shell tool is wired"),
             "shell paragraph leaked when bash_available=false: {s}"
         );
+    }
+
+    #[test]
+    fn append_prompt_segments_concatenates_in_order() {
+        let base = "Default prompt body.\n";
+        let segments = vec![
+            SystemPromptSegment {
+                id: "internal:a:default".into(),
+                text: "A segment.".into(),
+            },
+            SystemPromptSegment {
+                id: "internal:b:default".into(),
+                text: "B segment.".into(),
+            },
+        ];
+        let suppressed: &[&str] = &[];
+        let out = append_prompt_segments(base, &segments, suppressed);
+        let lines: Vec<&str> = out.split("\n\n").collect();
+        assert!(out.starts_with(base), "base must be the prefix");
+        assert!(lines.iter().any(|l| l.trim() == "A segment."));
+        assert!(lines.iter().any(|l| l.trim() == "B segment."));
+        // Order must match input order.
+        let a_pos = out.find("A segment.").unwrap();
+        let b_pos = out.find("B segment.").unwrap();
+        assert!(a_pos < b_pos);
+    }
+
+    #[test]
+    fn append_prompt_segments_honors_suppression() {
+        let base = "Default.\n";
+        let segments = vec![
+            SystemPromptSegment {
+                id: "internal:keep:s".into(),
+                text: "KEEP".into(),
+            },
+            SystemPromptSegment {
+                id: "internal:drop:s".into(),
+                text: "DROP".into(),
+            },
+        ];
+        let suppressed = &["internal:drop:s"];
+        let out = append_prompt_segments(base, &segments, suppressed);
+        assert!(out.contains("KEEP"));
+        assert!(!out.contains("DROP"), "suppressed segment must not appear");
     }
 
     use tempfile::tempdir;

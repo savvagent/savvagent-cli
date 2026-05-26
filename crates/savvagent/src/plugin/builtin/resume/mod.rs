@@ -43,6 +43,7 @@ impl Plugin for ResumePlugin {
             summary: rust_i18n::t!("slash.resume-summary").to_string(),
             args_hint: None,
             requires_arg: false,
+            suppress_prompt_segments: vec![],
         }];
         contributions.screens = vec![ScreenSpec {
             id: "resume.picker".into(),

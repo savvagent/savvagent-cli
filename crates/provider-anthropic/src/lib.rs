@@ -14,6 +14,7 @@
 //! The eventual binary wraps an `AnthropicProvider` in an `rmcp` Streamable
 //! HTTP server (see `src/main.rs`).
 
+#![allow(clippy::collapsible_if)] // pre-existing debt; many sites under rustc 1.95 new lint
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 

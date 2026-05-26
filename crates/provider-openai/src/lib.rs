@@ -12,6 +12,7 @@
 //! - [`OpenAiProvider`] — [`ProviderHandler`] impl that wires the pieces
 //!   together over an HTTP client.
 
+#![allow(clippy::collapsible_if)] // pre-existing debt; many sites under rustc 1.95 new lint
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 

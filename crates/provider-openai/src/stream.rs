@@ -18,6 +18,7 @@
 
 use bytes::{Bytes, BytesMut};
 use futures::StreamExt;
+use savvagent_fence::{FenceChunk, FenceParser};
 use savvagent_mcp::{EmitError, StreamEmitter};
 use savvagent_protocol::{self as spp, BlockDelta, ContentBlock, StreamEvent, Usage, UsageDelta};
 
@@ -76,10 +77,14 @@ struct Accumulator {
     blocks: Vec<BlockState>,
     /// Next SPP block index to assign.
     next_block: u32,
-    /// Whether the text block has been opened.
-    text_block_open: bool,
+    /// The currently-open streaming Text or Html block, if any. We close
+    /// and reopen across kind switches so each html-canvas fence becomes
+    /// its own SPP block.
+    current_stream_block: Option<CurrentStreamBlock>,
     /// Per-OpenAI-tool-call-index → SPP block index mapping.
     tool_block_map: Vec<Option<u32>>,
+    /// Extracts ``` ```html-canvas ``` fences from `delta.content`.
+    fence_parser: FenceParser,
 }
 
 #[derive(Debug)]
@@ -87,11 +92,27 @@ enum BlockState {
     Text {
         buf: String,
     },
+    Html {
+        source: String,
+    },
     ToolUse {
         id: String,
         name: String,
         json_buf: String,
     },
+}
+
+/// Pointer to the streaming block accumulator currently open.
+#[derive(Debug)]
+struct CurrentStreamBlock {
+    index: u32,
+    kind: StreamBlockKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StreamBlockKind {
+    Text,
+    Html,
 }
 
 impl Accumulator {
@@ -127,32 +148,13 @@ impl Accumulator {
 
         let delta = choice.delta;
 
-        // Text delta.
+        // Text delta — route through the fence parser so html-canvas
+        // fenced HTML is extracted into its own ContentBlock::Html block.
         if let Some(text) = delta.content {
             if !text.is_empty() {
-                if !self.text_block_open {
-                    self.text_block_open = true;
-                    let idx = self.alloc_block(BlockState::Text { buf: String::new() });
-                    events.push(StreamEvent::ContentBlockStart {
-                        index: idx,
-                        block: ContentBlock::Text {
-                            text: String::new(),
-                        },
-                    });
-                }
-                // Append to the text block (always index 0 unless tool blocks
-                // precede it, which OpenAI doesn't do in practice).
-                let idx = self.find_text_block_index();
-                if let Some(BlockState::Text { buf }) =
-                    idx.and_then(|i| self.blocks.get_mut(i as usize))
-                {
-                    buf.push_str(&text);
-                }
-                if let Some(idx) = idx {
-                    events.push(StreamEvent::ContentBlockDelta {
-                        index: idx,
-                        delta: BlockDelta::TextDelta { text },
-                    });
+                let fence_chunks = self.fence_parser.push(&text);
+                for chunk in fence_chunks {
+                    self.emit_fence_chunk(chunk, &mut events);
                 }
             }
         }
@@ -215,9 +217,35 @@ impl Accumulator {
     fn flush(&mut self) -> Vec<StreamEvent> {
         let mut events = Vec::new();
 
-        // Close open blocks.
-        for i in 0..self.blocks.len() {
-            events.push(StreamEvent::ContentBlockStop { index: i as u32 });
+        // Drain any buffered text/html from the fence parser before
+        // closing the currently-open streaming block.
+        let parser = std::mem::take(&mut self.fence_parser);
+        let finish = parser.finish();
+        for chunk in finish.chunks {
+            self.emit_fence_chunk(chunk, &mut events);
+        }
+        if finish.unclosed_fence {
+            tracing::warn!("openai stream ended with unclosed html-canvas fence");
+        }
+
+        // Track which block index (if any) the current stream block had
+        // *before* we close it, so we don't emit a duplicate Stop for it.
+        let stream_idx = self.current_stream_block.as_ref().map(|c| c.index);
+        // Close the currently-open streaming block, if any.
+        self.close_stream_block(&mut events);
+
+        // Close every tool-use block. (Tool-use blocks don't carry their
+        // own Stop event mid-stream — OpenAI streams them as a series of
+        // arguments fragments and we emit the Stop only at end-of-stream.
+        // Streaming text/html blocks are already closed above.)
+        for (i, block) in self.blocks.iter().enumerate() {
+            let idx = i as u32;
+            if Some(idx) == stream_idx {
+                continue;
+            }
+            if matches!(block, BlockState::ToolUse { .. }) {
+                events.push(StreamEvent::ContentBlockStop { index: idx });
+            }
         }
 
         if self.stop_reason.is_none() {
@@ -245,6 +273,12 @@ impl Accumulator {
                 BlockState::Text { buf } => {
                     content.push(ContentBlock::Text { text: buf });
                 }
+                BlockState::Html { source } => {
+                    content.push(ContentBlock::Html {
+                        source,
+                        state: None,
+                    });
+                }
                 BlockState::ToolUse { id, name, json_buf } => {
                     let input = parse_tool_arguments(&json_buf);
                     content.push(ContentBlock::ToolUse { id, name, input });
@@ -268,13 +302,76 @@ impl Accumulator {
         idx
     }
 
-    fn find_text_block_index(&self) -> Option<u32> {
-        for (i, b) in self.blocks.iter().enumerate() {
-            if matches!(b, BlockState::Text { .. }) {
-                return Some(i as u32);
+    /// Dispatch a single fence-parsed chunk: open or extend the matching
+    /// streaming block, closing-and-reopening when the chunk kind differs
+    /// from the currently-open block.
+    fn emit_fence_chunk(&mut self, chunk: FenceChunk, out: &mut Vec<StreamEvent>) {
+        match chunk {
+            FenceChunk::Text(text) => self.emit_stream_chunk(StreamBlockKind::Text, text, out),
+            FenceChunk::Html(source) => self.emit_stream_chunk(StreamBlockKind::Html, source, out),
+        }
+    }
+
+    fn emit_stream_chunk(
+        &mut self,
+        kind: StreamBlockKind,
+        text: String,
+        out: &mut Vec<StreamEvent>,
+    ) {
+        // If a streaming block of a different kind is open, close it.
+        if let Some(cur) = &self.current_stream_block {
+            if cur.kind != kind {
+                self.close_stream_block(out);
             }
         }
-        None
+
+        // Lazy-open the streaming block if none is currently open.
+        if self.current_stream_block.is_none() {
+            let block_state = match kind {
+                StreamBlockKind::Text => BlockState::Text { buf: String::new() },
+                StreamBlockKind::Html => BlockState::Html {
+                    source: String::new(),
+                },
+            };
+            let idx = self.alloc_block(block_state);
+            let start_block = match kind {
+                StreamBlockKind::Text => ContentBlock::Text {
+                    text: String::new(),
+                },
+                StreamBlockKind::Html => ContentBlock::Html {
+                    source: String::new(),
+                    state: None,
+                },
+            };
+            out.push(StreamEvent::ContentBlockStart {
+                index: idx,
+                block: start_block,
+            });
+            self.current_stream_block = Some(CurrentStreamBlock { index: idx, kind });
+        }
+
+        let cur = self
+            .current_stream_block
+            .as_ref()
+            .expect("just opened above");
+        let idx = cur.index;
+        // Append to the persistent block state.
+        match (kind, self.blocks.get_mut(idx as usize)) {
+            (StreamBlockKind::Text, Some(BlockState::Text { buf })) => buf.push_str(&text),
+            (StreamBlockKind::Html, Some(BlockState::Html { source })) => source.push_str(&text),
+            _ => {}
+        }
+        let delta = match kind {
+            StreamBlockKind::Text => BlockDelta::TextDelta { text },
+            StreamBlockKind::Html => BlockDelta::HtmlSourceDelta { source: text },
+        };
+        out.push(StreamEvent::ContentBlockDelta { index: idx, delta });
+    }
+
+    fn close_stream_block(&mut self, out: &mut Vec<StreamEvent>) {
+        if let Some(cur) = self.current_stream_block.take() {
+            out.push(StreamEvent::ContentBlockStop { index: cur.index });
+        }
     }
 }
 
@@ -511,6 +608,113 @@ mod tests {
         let acc = Accumulator::default();
         let result = acc.finish();
         assert!(result.is_err(), "empty stream must return an error");
+    }
+
+    /// When the model emits text followed by an `html-canvas` fenced HTML
+    /// block, the SPP stream must split into a Text block and a separate
+    /// Html block: ContentBlockStart(Text) + TextDelta + ContentBlockStop
+    /// followed by ContentBlockStart(Html) + HtmlSourceDelta +
+    /// ContentBlockStop. The fenced markers themselves are stripped.
+    #[test]
+    fn stream_emits_html_blocks_for_canvas_fence() {
+        let mut acc = Accumulator::default();
+        let evs = acc.consume_chunk(chunk(json!({
+            "id": "c-html",
+            "model": "gpt-4o-mini",
+            "choices": [{
+                "delta": {
+                    "content": "Here:\n```html-canvas\n<p>hi</p>\n```\n"
+                },
+                "finish_reason": null
+            }]
+        })));
+        let _ = acc.consume_chunk(chunk(json!({
+            "id": "c-html",
+            "model": "gpt-4o-mini",
+            "choices": [{"delta": {}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+        })));
+        let flush_evs = acc.flush();
+
+        let stream: Vec<StreamEvent> = evs.into_iter().chain(flush_evs).collect();
+
+        let content_events: Vec<&StreamEvent> = stream
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e,
+                    StreamEvent::ContentBlockStart { .. }
+                        | StreamEvent::ContentBlockDelta { .. }
+                        | StreamEvent::ContentBlockStop { .. }
+                )
+            })
+            .collect();
+
+        assert!(
+            matches!(
+                content_events[0],
+                StreamEvent::ContentBlockStart {
+                    block: ContentBlock::Text { text },
+                    ..
+                } if text.is_empty()
+            ),
+            "expected ContentBlockStart Text(\"\") first, got {:?}",
+            content_events[0]
+        );
+        assert!(
+            matches!(
+                content_events[1],
+                StreamEvent::ContentBlockDelta {
+                    delta: BlockDelta::TextDelta { text },
+                    ..
+                } if text == "Here:\n"
+            ),
+            "expected TextDelta(\"Here:\\n\"), got {:?}",
+            content_events[1]
+        );
+        assert!(
+            matches!(content_events[2], StreamEvent::ContentBlockStop { .. }),
+            "expected ContentBlockStop after text, got {:?}",
+            content_events[2]
+        );
+        assert!(
+            matches!(
+                content_events[3],
+                StreamEvent::ContentBlockStart {
+                    block: ContentBlock::Html { source, .. },
+                    ..
+                } if source.is_empty()
+            ),
+            "expected ContentBlockStart Html(\"\"), got {:?}",
+            content_events[3]
+        );
+        assert!(
+            matches!(
+                content_events[4],
+                StreamEvent::ContentBlockDelta {
+                    delta: BlockDelta::HtmlSourceDelta { source },
+                    ..
+                } if source == "<p>hi</p>\n"
+            ),
+            "expected HtmlSourceDelta(\"<p>hi</p>\\n\"), got {:?}",
+            content_events[4]
+        );
+        assert!(
+            matches!(content_events[5], StreamEvent::ContentBlockStop { .. }),
+            "expected ContentBlockStop after html, got {:?}",
+            content_events[5]
+        );
+
+        let out = acc.finish().unwrap();
+        assert_eq!(out.content.len(), 2);
+        match &out.content[0] {
+            ContentBlock::Text { text } => assert_eq!(text, "Here:\n"),
+            other => panic!("expected Text first, got {other:?}"),
+        }
+        match &out.content[1] {
+            ContentBlock::Html { source, .. } => assert_eq!(source, "<p>hi</p>\n"),
+            other => panic!("expected Html second, got {other:?}"),
+        }
     }
 
     /// SSE byte streams that end without a terminating `\n\n` for the final

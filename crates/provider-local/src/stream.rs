@@ -20,6 +20,7 @@
 
 use bytes::Bytes;
 use futures::StreamExt;
+use savvagent_fence::{FenceChunk, FenceParser};
 use savvagent_mcp::StreamEmitter;
 use savvagent_protocol::{self as spp, BlockDelta, ContentBlock, StreamEvent, Usage, UsageDelta};
 
@@ -54,17 +55,34 @@ struct Accumulator {
     model: Option<String>,
     usage: Usage,
     stop_reason: Option<spp::StopReason>,
-    /// Index of the currently-open text block, if any. The text block is not
-    /// always at `0` — a `tool_call` chunk arriving before any text chunk
-    /// advances `next_index`, so we must remember which index the text block
-    /// actually opened on and reuse it for every subsequent delta and the
-    /// final stop event.
-    text_index: Option<u32>,
-    text_buf: String,
+    /// Currently-open streaming block (Text or Html), if any. The block is
+    /// not always at index `0` — a `tool_call` chunk arriving before any
+    /// text chunk advances `next_index`, so we must remember which index
+    /// the block actually opened on and reuse it for every subsequent
+    /// delta and the final stop event.
+    current_block: Option<CurrentBlock>,
     /// Completed content blocks to put in the final response.
     final_blocks: Vec<ContentBlock>,
     /// Running index for the next block to open.
     next_index: u32,
+    /// Extracts ``` ```html-canvas ``` fences from streaming text.
+    fence_parser: FenceParser,
+}
+
+/// Tracks the SPP index and buffered content of the currently-open
+/// streaming block so we can append deltas, close it on a kind switch,
+/// and finalize it on stream end.
+#[derive(Debug)]
+struct CurrentBlock {
+    index: u32,
+    kind: BlockKind,
+    buf: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BlockKind {
+    Text,
+    Html,
 }
 
 impl Accumulator {
@@ -83,45 +101,22 @@ impl Accumulator {
 
         let msg = chunk.message.as_ref();
 
-        // Text delta.
+        // Text delta — route through the fence parser so html-canvas
+        // fenced HTML is extracted into its own ContentBlock::Html block.
         if let Some(text) = msg.and_then(message_text) {
             if !text.is_empty() {
-                let idx = match self.text_index {
-                    Some(i) => i,
-                    None => {
-                        // Open the text block on first delta at the current
-                        // next_index (which may be > 0 if tool_calls have
-                        // already advanced it).
-                        let i = self.next_index;
-                        events.push(StreamEvent::ContentBlockStart {
-                            index: i,
-                            block: ContentBlock::Text {
-                                text: String::new(),
-                            },
-                        });
-                        self.text_index = Some(i);
-                        i
-                    }
-                };
-                self.text_buf.push_str(&text);
-                events.push(StreamEvent::ContentBlockDelta {
-                    index: idx,
-                    delta: BlockDelta::TextDelta { text },
-                });
+                let fence_chunks = self.fence_parser.push(&text);
+                for chunk in fence_chunks {
+                    self.emit_fence_chunk(chunk, &mut events);
+                }
             }
         }
 
         // Tool calls arrive atomically.
         if let Some(m) = msg {
             for (idx, tc) in m.tool_calls.iter().enumerate() {
-                // Close text block first if open.
-                if let Some(text_idx) = self.text_index.take() {
-                    events.push(StreamEvent::ContentBlockStop { index: text_idx });
-                    self.final_blocks.push(ContentBlock::Text {
-                        text: std::mem::take(&mut self.text_buf),
-                    });
-                    self.next_index += 1;
-                }
+                // Close the open text/html block first.
+                self.close_current_block(&mut events);
 
                 let block_idx = self.next_index + idx as u32;
                 let id = tc
@@ -157,13 +152,19 @@ impl Accumulator {
     fn flush(&mut self) -> Vec<StreamEvent> {
         let mut events = Vec::new();
 
-        // Close text block if open, using the index it actually opened on.
-        if let Some(text_idx) = self.text_index.take() {
-            events.push(StreamEvent::ContentBlockStop { index: text_idx });
-            self.final_blocks.push(ContentBlock::Text {
-                text: std::mem::take(&mut self.text_buf),
-            });
+        // Drain any buffered text/html still inside the fence parser
+        // before closing the currently-open block.
+        let parser = std::mem::take(&mut self.fence_parser);
+        let finish = parser.finish();
+        for chunk in finish.chunks {
+            self.emit_fence_chunk(chunk, &mut events);
         }
+        if finish.unclosed_fence {
+            tracing::warn!("ollama stream ended with unclosed html-canvas fence");
+        }
+
+        // Close the currently-open text/html block, if any.
+        self.close_current_block(&mut events);
 
         let stop_reason = self.stop_reason.get_or_insert(spp::StopReason::EndTurn);
         events.push(StreamEvent::MessageDelta {
@@ -176,6 +177,77 @@ impl Accumulator {
         });
         events.push(StreamEvent::MessageStop);
         events
+    }
+
+    /// Dispatch a single fence-parsed chunk: open or extend the
+    /// matching text/html block, switching block kinds (with a
+    /// ContentBlockStop + ContentBlockStart) when the chunk kind
+    /// differs from the currently-open block.
+    fn emit_fence_chunk(&mut self, chunk: FenceChunk, out: &mut Vec<StreamEvent>) {
+        match chunk {
+            FenceChunk::Text(text) => self.emit_block_chunk(BlockKind::Text, text, out),
+            FenceChunk::Html(html) => self.emit_block_chunk(BlockKind::Html, html, out),
+        }
+    }
+
+    fn emit_block_chunk(&mut self, kind: BlockKind, text: String, out: &mut Vec<StreamEvent>) {
+        // Close the currently-open block if it's a different kind.
+        if let Some(cur) = &self.current_block {
+            if cur.kind != kind {
+                self.close_current_block(out);
+            }
+        }
+
+        // Open a new block if none is open.
+        if self.current_block.is_none() {
+            let index = self.next_index;
+            let block = match kind {
+                BlockKind::Text => ContentBlock::Text {
+                    text: String::new(),
+                },
+                BlockKind::Html => ContentBlock::Html {
+                    source: String::new(),
+                    state: None,
+                },
+            };
+            out.push(StreamEvent::ContentBlockStart { index, block });
+            self.current_block = Some(CurrentBlock {
+                index,
+                kind,
+                buf: String::new(),
+            });
+        }
+
+        let cur = self
+            .current_block
+            .as_mut()
+            .expect("current_block opened above");
+        let delta = match kind {
+            BlockKind::Text => BlockDelta::TextDelta { text: text.clone() },
+            BlockKind::Html => BlockDelta::HtmlSourceDelta {
+                source: text.clone(),
+            },
+        };
+        cur.buf.push_str(&text);
+        out.push(StreamEvent::ContentBlockDelta {
+            index: cur.index,
+            delta,
+        });
+    }
+
+    fn close_current_block(&mut self, out: &mut Vec<StreamEvent>) {
+        if let Some(cur) = self.current_block.take() {
+            out.push(StreamEvent::ContentBlockStop { index: cur.index });
+            let block = match cur.kind {
+                BlockKind::Text => ContentBlock::Text { text: cur.buf },
+                BlockKind::Html => ContentBlock::Html {
+                    source: cur.buf,
+                    state: None,
+                },
+            };
+            self.final_blocks.push(block);
+            self.next_index += 1;
+        }
     }
 
     fn finish(self) -> Result<spp::CompleteResponse, spp::ProviderError> {
@@ -389,6 +461,119 @@ mod tests {
     fn empty_stream_returns_error() {
         let acc = Accumulator::default();
         assert!(acc.finish().is_err());
+    }
+
+    /// When the model emits text followed by an `html-canvas` fenced HTML
+    /// block, the SPP stream must split into a Text block and a separate
+    /// Html block: ContentBlockStart(Text) + TextDelta + ContentBlockStop
+    /// followed by ContentBlockStart(Html) + HtmlSourceDelta +
+    /// ContentBlockStop. The fenced markers themselves are stripped.
+    #[test]
+    fn stream_emits_html_blocks_for_canvas_fence() {
+        let mut acc = Accumulator::default();
+        // Single Ollama chunk carrying the full text+fence+HTML+close in
+        // one shot. The fence parser handles per-chunk fragmentation; we
+        // pick the single-chunk case here to keep the assertion simple.
+        let evs = acc.consume_chunk(make_chunk(json!({
+            "model": "llama3.2",
+            "message": {
+                "role": "assistant",
+                "content": "Here:\n```html-canvas\n<p>hi</p>\n```\n"
+            },
+            "done": false
+        })));
+        let _ = acc.consume_chunk(make_chunk(json!({
+            "model": "llama3.2",
+            "message": { "role": "assistant", "content": "" },
+            "done": true,
+            "done_reason": "stop",
+            "prompt_eval_count": 1,
+            "eval_count": 5
+        })));
+        let final_evs = acc.flush();
+
+        let stream: Vec<StreamEvent> = evs.into_iter().chain(final_evs).collect();
+
+        // Filter out the framing events (MessageStart/Delta/Stop) and only
+        // assert on the content-block shape.
+        let content_events: Vec<&StreamEvent> = stream
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e,
+                    StreamEvent::ContentBlockStart { .. }
+                        | StreamEvent::ContentBlockDelta { .. }
+                        | StreamEvent::ContentBlockStop { .. }
+                )
+            })
+            .collect();
+
+        assert!(
+            matches!(
+                content_events[0],
+                StreamEvent::ContentBlockStart {
+                    block: ContentBlock::Text { text },
+                    ..
+                } if text.is_empty()
+            ),
+            "expected ContentBlockStart Text(\"\") first, got {:?}",
+            content_events[0]
+        );
+        assert!(
+            matches!(
+                content_events[1],
+                StreamEvent::ContentBlockDelta {
+                    delta: BlockDelta::TextDelta { text },
+                    ..
+                } if text == "Here:\n"
+            ),
+            "expected TextDelta(\"Here:\\n\"), got {:?}",
+            content_events[1]
+        );
+        assert!(
+            matches!(content_events[2], StreamEvent::ContentBlockStop { .. }),
+            "expected ContentBlockStop after text, got {:?}",
+            content_events[2]
+        );
+        assert!(
+            matches!(
+                content_events[3],
+                StreamEvent::ContentBlockStart {
+                    block: ContentBlock::Html { source, .. },
+                    ..
+                } if source.is_empty()
+            ),
+            "expected ContentBlockStart Html(\"\"), got {:?}",
+            content_events[3]
+        );
+        assert!(
+            matches!(
+                content_events[4],
+                StreamEvent::ContentBlockDelta {
+                    delta: BlockDelta::HtmlSourceDelta { source },
+                    ..
+                } if source == "<p>hi</p>\n"
+            ),
+            "expected HtmlSourceDelta(\"<p>hi</p>\\n\"), got {:?}",
+            content_events[4]
+        );
+        assert!(
+            matches!(content_events[5], StreamEvent::ContentBlockStop { .. }),
+            "expected ContentBlockStop after html, got {:?}",
+            content_events[5]
+        );
+
+        // Final assembled response should carry separate Text and Html blocks.
+        let out = acc.finish().unwrap();
+        assert_eq!(out.content.len(), 2);
+        match &out.content[0] {
+            ContentBlock::Text { text } => assert_eq!(text, "Here:\n"),
+            other => panic!("expected Text first, got {other:?}"),
+        }
+        match &out.content[1] {
+            ContentBlock::Html { source, .. } => assert_eq!(source, "<p>hi</p>\n"),
+            other => panic!("expected Html second, got {other:?}"),
+        }
     }
 
     #[test]

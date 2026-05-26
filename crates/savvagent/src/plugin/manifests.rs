@@ -5,13 +5,13 @@
 use std::collections::HashMap;
 
 use savvagent_plugin::{
-    BoundAction, ChordPortable, HookKind, KeyScope, KeybindingSpec, PluginId, ScreenSpec,
-    SlashSpec, SlotSpec, ToolSummarySpec,
+    BoundAction, ChordPortable, ContentRendererSpec, HookKind, KeyScope, KeybindingSpec, PluginId,
+    ScreenSpec, SlashSpec, SlotSpec, ToolSummarySpec,
 };
 
 use crate::plugin::registry::PluginRegistry;
 
-/// All five runtime indexes derived from the manifests of currently-enabled
+/// All six runtime indexes derived from the manifests of currently-enabled
 /// plugins. Built once at startup and rebuilt whenever a plugin is
 /// enabled or disabled.
 #[derive(Debug, Default)]
@@ -29,11 +29,15 @@ pub struct Indexes {
     /// Maps tool name to the plugin that renders summaries for it.
     /// First-registered wins on duplicate; conflicts log a `warn!`.
     pub tool_summaries: HashMap<String, PluginId>,
+    /// Maps SPP content block type to the plugin that owns the canonical
+    /// renderer for it. Two enabled plugins both claiming `canonical = true`
+    /// for the same block type is a hard error at index-build time.
+    pub content_renderers: HashMap<String, PluginId>,
 }
 
 /// Returned when two enabled plugins register the same slash command, screen
-/// id, or keybinding chord+scope combination, which would be unresolvable at
-/// dispatch time.
+/// id, keybinding chord+scope combination, or canonical content renderer for
+/// the same block type — all of which would be unresolvable at dispatch time.
 #[derive(Debug)]
 #[allow(clippy::enum_variant_names)] // all variants describe conflicts; the postfix is load-bearing
 pub enum IndexBuildError {
@@ -55,6 +59,13 @@ pub enum IndexBuildError {
         scope: KeyScope,
         a: PluginId,
         b: PluginId,
+    },
+    /// Two enabled plugins both claim `canonical = true` for the same
+    /// SPP content block type.
+    DuplicateCanonicalRenderer {
+        block_type: String,
+        existing: PluginId,
+        duplicate: PluginId,
     },
 }
 
@@ -87,6 +98,18 @@ impl std::fmt::Display for IndexBuildError {
                     b.as_str()
                 )
             }
+            IndexBuildError::DuplicateCanonicalRenderer {
+                block_type,
+                existing,
+                duplicate,
+            } => {
+                write!(
+                    f,
+                    "two enabled plugins both claim canonical renderer for block type \"{block_type}\": {} and {}",
+                    existing.as_str(),
+                    duplicate.as_str()
+                )
+            }
         }
     }
 }
@@ -94,9 +117,16 @@ impl std::fmt::Display for IndexBuildError {
 impl std::error::Error for IndexBuildError {}
 
 impl Indexes {
-    /// Build all five indexes from the currently-enabled plugins. Theme
+    /// Look up the plugin id that owns the canonical content renderer for
+    /// `block_type`. Returns `None` if no enabled plugin claims that type.
+    #[allow(dead_code)] // used by Task 15+ (TUI canvas dispatch)
+    pub fn content_renderer_for(&self, block_type: &str) -> Option<&PluginId> {
+        self.content_renderers.get(block_type)
+    }
+
+    /// Build all six indexes from the currently-enabled plugins. Theme
     /// catalog conflicts emit a warning but do not fail. Slash/screen/
-    /// keybinding conflicts are hard errors per the spec.
+    /// keybinding/canonical-renderer conflicts are hard errors per the spec.
     pub async fn build(reg: &PluginRegistry) -> Result<Self, IndexBuildError> {
         let mut idx = Indexes::default();
 
@@ -131,6 +161,9 @@ impl Indexes {
             }
             for s in manifest.contributions.tool_summaries {
                 Self::insert_tool_summary(&mut idx, s, &pid);
+            }
+            for s in manifest.contributions.content_renderers {
+                Self::insert_content_renderer(&mut idx, s, &pid)?;
             }
         }
 
@@ -211,6 +244,26 @@ impl Indexes {
             return;
         }
         idx.tool_summaries.insert(tool_name, pid.clone());
+    }
+
+    fn insert_content_renderer(
+        idx: &mut Indexes,
+        spec: ContentRendererSpec,
+        pid: &PluginId,
+    ) -> Result<(), IndexBuildError> {
+        if !spec.canonical {
+            // Non-canonical contributions are not indexed (no dispatch role yet).
+            return Ok(());
+        }
+        if let Some(existing) = idx.content_renderers.get(&spec.block_type) {
+            return Err(IndexBuildError::DuplicateCanonicalRenderer {
+                block_type: spec.block_type,
+                existing: existing.clone(),
+                duplicate: pid.clone(),
+            });
+        }
+        idx.content_renderers.insert(spec.block_type, pid.clone());
+        Ok(())
     }
 
     /// Re-read `plugin_id`'s manifest and rebuild every derived index entry it
@@ -315,6 +368,7 @@ mod tests {
                 summary: "".into(),
                 args_hint: None,
                 requires_arg: false,
+                suppress_prompt_segments: vec![],
             }];
             Manifest {
                 id: PluginId::new(&self.0).expect("valid test id"),
@@ -568,6 +622,93 @@ mod tool_summary_index_tests {
         assert!(
             winner == "test:first" || winner == "test:second",
             "winner must be one of the two registered plugins; got {winner}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod content_renderer_index_tests {
+    use super::*;
+    use crate::plugin::registry::PluginRegistry;
+    use async_trait::async_trait;
+    use savvagent_plugin::{ContentRendererSpec, Contributions, Manifest, Plugin, PluginKind};
+
+    /// Helper: build a PluginRegistry + Indexes with `internal:html-canvas` enabled.
+    ///
+    /// Uses the real `HtmlCanvasPlugin` so the test exercises the actual
+    /// manifest rather than a hand-rolled stub.
+    async fn build_indexes_with_html_canvas() -> Indexes {
+        use crate::plugin::builtin::html_canvas::HtmlCanvasPlugin;
+        let reg = PluginRegistry::from_plugins(vec![Box::new(HtmlCanvasPlugin::new())]);
+        Indexes::build(&reg)
+            .await
+            .expect("indexes build must succeed")
+    }
+
+    #[tokio::test]
+    async fn content_renderers_index_routes_block_type_to_plugin() {
+        let idx = build_indexes_with_html_canvas().await;
+        let plugin_id = idx.content_renderer_for("html");
+        assert_eq!(plugin_id.map(|p| p.as_str()), Some("internal:html-canvas"),);
+    }
+
+    #[tokio::test]
+    async fn unknown_block_type_returns_none() {
+        let idx = build_indexes_with_html_canvas().await;
+        assert!(idx.content_renderer_for("xml").is_none());
+    }
+
+    #[tokio::test]
+    async fn active_prompt_segments_concatenates_enabled_plugins() {
+        use crate::plugin::builtin::html_canvas::HtmlCanvasPlugin;
+        let reg = PluginRegistry::from_plugins(vec![Box::new(HtmlCanvasPlugin::new())]);
+        let segments = reg.active_prompt_segments();
+        assert!(
+            segments
+                .iter()
+                .any(|s| s.id == "internal:html-canvas:default"),
+            "expected segment 'internal:html-canvas:default'; got: {:?}",
+            segments.iter().map(|s| &s.id).collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
+    async fn duplicate_canonical_renderer_is_hard_error() {
+        /// A second plugin that also claims canonical for "html".
+        struct DupHtml;
+        #[async_trait]
+        impl Plugin for DupHtml {
+            fn manifest(&self) -> Manifest {
+                let mut contributions = Contributions::default();
+                contributions.content_renderers = vec![ContentRendererSpec {
+                    block_type: "html".to_string(),
+                    canonical: true,
+                }];
+                Manifest {
+                    id: PluginId::new("test:dup-html").expect("valid test id"),
+                    name: "dup-html".into(),
+                    version: "0".into(),
+                    description: "t".into(),
+                    kind: PluginKind::Optional,
+                    contributions,
+                }
+            }
+        }
+
+        use crate::plugin::builtin::html_canvas::HtmlCanvasPlugin;
+        let reg = PluginRegistry::from_plugins(vec![
+            Box::new(HtmlCanvasPlugin::new()),
+            Box::new(DupHtml),
+        ]);
+        let err = Indexes::build(&reg).await.unwrap_err();
+        assert!(
+            matches!(
+                err,
+                IndexBuildError::DuplicateCanonicalRenderer { ref block_type, .. }
+                if block_type == "html"
+            ),
+            "expected DuplicateCanonicalRenderer for 'html'; got: {:?}",
+            err
         );
     }
 }

@@ -99,6 +99,7 @@ impl Plugin for UserSlashCommandsPlugin {
             summary: "Rescan user-defined slash command directories".into(),
             args_hint: None,
             requires_arg: false,
+            suppress_prompt_segments: vec![],
         });
         let idx = self.index_snapshot();
         for d in idx.commands.values() {
@@ -112,6 +113,7 @@ impl Plugin for UserSlashCommandsPlugin {
                 summary,
                 args_hint: d.frontmatter.argument_hint.clone(),
                 requires_arg: false,
+                suppress_prompt_segments: vec![],
             });
         }
         contributions.screens = vec![ScreenSpec {

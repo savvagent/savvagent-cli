@@ -1,4 +1,4 @@
-# Savvagent Provider Protocol (SPP) — v0.1.0
+# Savvagent Provider Protocol (SPP) — v0.3.0
 
 A small layering on top of the [Model Context Protocol] for exposing LLM
 providers as MCP servers. Savvagent (the host) talks to provider servers over
@@ -76,6 +76,13 @@ block types:
   `{ "type": "base64", "media_type": "image/png", "data": "..." }` or
   `{ "type": "url", "url": "https://..." }`
 - `thinking` — `{ "type": "thinking", "text": "...", "signature": "..." }`
+- `html` — `{ "type": "html", "source": "<complete HTML document>" }`. Used
+  by hosts that have an HTML renderer registered (e.g. inline rendering in
+  a terminal that supports an image protocol). Hosts without a renderer
+  render the source as a code block. The source is parsed fresh on each
+  render; providers may emit it via [`StreamEvent::ContentBlockStart`] +
+  zero or more [`StreamEvent::ContentBlockDelta`] with `html_source_delta`
+  before [`StreamEvent::ContentBlockStop`].
 
 ## CompleteResponse
 
@@ -116,6 +123,13 @@ message_start
   content_block_delta { index: 1, delta: input_json_delta("{\"pa") }
   content_block_delta { index: 1, delta: input_json_delta("th\":\"/tmp\"}") }
   content_block_stop  { index: 1 }
+  content_block_start { index: 2, block: thinking("") }
+  content_block_delta { index: 2, delta: thinking_delta("step 1…") }
+  content_block_stop  { index: 2 }
+  content_block_start { index: 3, block: html("") }
+  content_block_delta { index: 3, delta: html_source_delta("<!docty") }
+  content_block_delta { index: 3, delta: html_source_delta("pe html><body>...") }
+  content_block_stop  { index: 3 }
 message_delta { stop_reason: "tool_use", usage_delta: { output_tokens: 27 } }
 message_stop
 ```
@@ -153,7 +167,24 @@ wire changes bump the major component. Provider servers SHOULD advertise the
 version they implement via MCP server `instructions` or a future
 `provider://info` resource.
 
-## Open questions (deferred to v0.2)
+### v0.3.0 changes (additive)
+
+- `ContentBlock::Html` gained an optional `state` field (base64 opaque
+  interactive-state blob). Omitted when absent (`skip_serializing_if`).
+  Providers emitting v0.2.0 `html` blocks (no `state`) remain conformant;
+  the field is host-internal (set by the TUI when persisting transcripts,
+  not by providers).
+
+### v0.2.0 changes (additive)
+
+- Added `ContentBlock::Html` variant.
+- Added `BlockDelta::HtmlSourceDelta` variant.
+
+Providers emitting only v0.1.0 block types remain conformant; the new
+types are additive. Hosts that do not handle `Html` blocks SHOULD render
+the source as a code block to avoid silently dropping output.
+
+## Open questions (deferred to v0.3)
 
 - Resource catalog (`provider://info`, `provider://models`).
 - Cancellation: SPP relies on MCP cancellation today; we may add an

@@ -29,10 +29,12 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       # `keyring`'s sync-secret-service backend pulls libdbus-sys, whose
-      # build.rs needs the system libdbus headers. Not installed by default
-      # on the GH ubuntu runner image.
+      # build.rs needs the system libdbus headers. Blitz (savvagent-canvas)
+      # transitively pulls yeslogic-fontconfig-sys, which needs system
+      # fontconfig headers. Neither is installed by default on the GH
+      # ubuntu runner image.
       - name: Install system deps
-        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev libfontconfig1-dev pkg-config
       - name: rustfmt
         run: cargo fmt --all --check
       - name: clippy
@@ -54,14 +56,28 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       # libdbus-1-dev is required for keyring's secret-service backend on
-      # Linux. The ubuntu GH runner image doesn't ship it preinstalled.
+      # Linux. libfontconfig1-dev is required by Blitz (savvagent-canvas)
+      # via yeslogic-fontconfig-sys. Neither is preinstalled on the GH
+      # ubuntu runner image.
       - name: Install Linux system deps
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev libfontconfig1-dev pkg-config
       - name: build
         run: cargo build --workspace --all-targets
-      - name: test
+      - name: test (non-Windows)
+        if: runner.os != 'Windows'
         run: cargo test --workspace --no-fail-fast
+      # `savvagent-canvas` (and `savvagent`, which links it via the
+      # `internal:html-canvas` built-in plugin) pull in Blitz. Blitz's font
+      # discovery on the GitHub-hosted windows-latest runner hangs the test
+      # binary at process start — even `#[ignore]` on the one render-invoking
+      # test doesn't help because the hang is in static init, not in any
+      # specific test body. Linux + macOS still exercise the full pipeline;
+      # Windows coverage for these crates resumes once Blitz ships a runner
+      # workaround. Track in Phase 2 spike notes.
+      - name: test (Windows, exclude Blitz-linking crates)
+        if: runner.os == 'Windows'
+        run: cargo test --workspace --exclude savvagent-canvas --exclude savvagent --no-fail-fast
 
   # Cross-vendor `tool_use_id` compatibility gate. Each (sender, receiver)
   # pair across the three shipping vendors gets its own #[tokio::test] in
@@ -83,7 +99,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Install Linux system deps
-        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev libfontconfig1-dev pkg-config
       - name: cross-vendor matrix
         run: cargo test -p savvagent-host --test cross_vendor_history --no-fail-fast
 

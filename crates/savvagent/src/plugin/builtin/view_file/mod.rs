@@ -37,6 +37,7 @@ impl Plugin for ViewFilePlugin {
             summary: rust_i18n::t!("slash.view-summary").to_string(),
             args_hint: Some("<path>".into()),
             requires_arg: true,
+            suppress_prompt_segments: vec![],
         }];
         contributions.screens = vec![ScreenSpec {
             id: "view-file".into(),

@@ -49,6 +49,7 @@ impl Plugin for ModelPlugin {
             summary: rust_i18n::t!("slash.model-summary").to_string(),
             args_hint: Some("[<id>]".into()),
             requires_arg: false,
+            suppress_prompt_segments: vec![],
         }];
         contributions.screens = vec![ScreenSpec {
             id: "model.picker".into(),

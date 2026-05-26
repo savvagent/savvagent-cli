@@ -68,6 +68,7 @@ pub(crate) use registry::BuiltinSet;
 /// PR 6 adds: themes + 4 providers (anthropic / openai / gemini / local).
 /// PR 8 adds: plugins-manager.
 /// Task 9 adds: migration-picker.
+/// Task 13 adds: html-canvas.
 ///
 /// Provider plugins are stored exactly once per plugin in
 /// [`crate::plugin::builtin::provider_common::ProviderEntry`], which exposes
@@ -126,6 +127,7 @@ pub(crate) fn register_builtins(
         Box::new(builtin::tool_grep_summary::ToolGrepSummaryPlugin::new()),
         Box::new(builtin::tool_task_summary::ToolTaskSummaryPlugin::new()),
         Box::new(builtin::view_file::ViewFilePlugin::new()),
+        Box::new(builtin::html_canvas::HtmlCanvasPlugin::new()),
     ];
 
     // Hook plugins live in a parallel Vec so the registry can index them
@@ -154,6 +156,45 @@ mod tests {
     use super::*;
     use crate::plugin::registry::PluginRegistry;
     use savvagent_plugin::PluginId;
+
+    /// Reproduce the exact runtime canvas-renderer resolution path:
+    /// full builtin set → registry → indexes → `content_renderer_for("html")`
+    /// → `registry.get(id).create_renderer("html")`. This guards against the
+    /// `ContentRendererNotFound("html")` runtime failure seen in the field by
+    /// proving the index entry and the registered plugin instance agree.
+    #[tokio::test]
+    async fn html_renderer_resolves_through_registry_and_indexes() {
+        use crate::plugin::manifests::Indexes;
+        use crate::plugin::registry::PluginRegistry;
+        use std::collections::BTreeMap;
+        use std::sync::Arc;
+        let set = register_builtins(
+            Arc::new(tokio::sync::RwLock::new(BTreeMap::new())),
+            Arc::new(tokio::sync::RwLock::new(
+                crate::plugin::builtin::user_hooks::discovery::HooksIndex::default(),
+            )),
+            "test-session".into(),
+            std::path::PathBuf::from("/tmp"),
+            Arc::new(tokio::sync::RwLock::new(std::path::PathBuf::from(
+                "/t.json",
+            ))),
+        );
+        let registry = PluginRegistry::new(set);
+        let indexes = Indexes::build(&registry).await.expect("indexes build");
+        let pid = indexes
+            .content_renderer_for("html")
+            .expect("html renderer must be indexed")
+            .clone();
+        assert_eq!(pid.as_str(), "internal:html-canvas");
+        let handle = registry.get(&pid).expect("plugin must be in registry");
+        let guard = handle.lock().await;
+        let r = guard.create_renderer("html", savvagent_plugin::ContentBlockId(0), "<p>x</p>");
+        assert!(
+            r.is_ok(),
+            "registry-resolved plugin must create an html renderer, got {:?}",
+            r.err()
+        );
+    }
 
     #[tokio::test]
     async fn register_builtins_pr8_complete() {
@@ -206,13 +247,14 @@ mod tests {
             "internal:user-agents",
             "internal:user-slash-commands",
             "internal:view-file",
+            "internal:html-canvas",
         ] {
             assert!(
                 plugin_ids.contains(&expected.to_string()),
                 "missing non-provider plugin id: {expected}"
             );
         }
-        assert_eq!(set.plugins.len(), 28);
+        assert_eq!(set.plugins.len(), 29);
 
         // `internal:user-hooks` lives in `hook_entries`, not the `plugins`
         // Vec. The dual-Arc HookEntry pattern means it still appears in
@@ -258,18 +300,18 @@ mod tests {
         // Task 11 adds tool-bash/fs/grep-summary, bringing non-provider count to 24;
         // v0.16.0 adds lsp-installer, bringing non-provider count to 25;
         // user-slash-commands adds 1 more, bringing non-provider count to 26;
-        // sub-project C (user-agents) adds 1 more, bringing non-provider
-        // count to 27;
-        // Task 22 adds tool-task-summary, bringing non-provider count to 28;
+        // html-canvas adds 1 more, bringing non-provider count to 27;
+        // sub-project C (user-agents) adds 1 more, bringing non-provider count to 28;
+        // tool-task-summary adds 1 more, bringing non-provider count to 29;
         // sub-project B (user-hooks) moves to `hook_entries` (not counted
         // in the plugins Vec) but still surfaces in the registry's plugins
         // map via the dual-Arc HookEntry, contributing 1 more registry
-        // entry; total registry size is 28 + 4 + 1 = 33.
+        // entry; total registry size is 29 + 4 + 1 = 34.
         let reg = PluginRegistry::new(set);
         assert_eq!(
             reg.len(),
-            33,
-            "registry should have 28 non-provider + 4 provider + 1 hook plugin"
+            34,
+            "registry should have 29 non-provider + 4 provider + 1 hook plugin"
         );
         assert_eq!(
             reg.provider_count(),

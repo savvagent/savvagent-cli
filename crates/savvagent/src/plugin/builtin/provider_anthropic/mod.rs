@@ -232,6 +232,7 @@ impl Plugin for ProviderAnthropicPlugin {
             summary: format!("Connect to {DISPLAY_NAME}"),
             args_hint: None,
             requires_arg: false,
+            suppress_prompt_segments: vec![],
         }];
         contributions.slots = vec![SlotSpec {
             slot_id: "home.footer.left".into(),

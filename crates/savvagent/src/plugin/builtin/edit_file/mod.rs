@@ -37,6 +37,7 @@ impl Plugin for EditFilePlugin {
             summary: rust_i18n::t!("slash.edit-summary").to_string(),
             args_hint: Some("<path>".into()),
             requires_arg: true,
+            suppress_prompt_segments: vec![],
         }];
         contributions.screens = vec![ScreenSpec {
             id: "edit-file".into(),

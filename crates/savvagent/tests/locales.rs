@@ -4,6 +4,8 @@
 //! as `en`, and that each value's `%{var}` placeholder *set* matches
 //! between locales. Does NOT verify translation quality.
 
+#![allow(clippy::collapsible_if)]
+
 use std::collections::BTreeSet;
 
 const EN: &str = include_str!("../locales/en.toml");

@@ -38,6 +38,7 @@ list-models-fell-back         = "%{name}: live model catalog unavailable (%{err}
 list-models-empty             = "%{name}: provider returned an empty model list; showing the built-in fallback list."
 not-connected-tools           = "कनेक्ट नहीं — सूचीबद्ध करने के लिए कोई टूल नहीं।"
 no-tools-registered           = "कोई टूल पंजीकृत नहीं।"
+open-url-failed               = "URL खोलने में विफल: %{url}"
 provider-api-key-missing      = "%{name} API कुंजी keyring में नहीं मिली। दर्ज करने के लिए होम दृश्य से `/connect` चलाएं।"
 provider-endpoint-unreachable = "%{name} एंडपॉइंट अनुपलब्ध। `ollama serve` शुरू करें और पुनः प्रयास करें।"
 provider-invalid-id           = "प्लगइन से अमान्य प्रदाता id: %{id}"

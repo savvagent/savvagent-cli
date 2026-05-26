@@ -46,6 +46,7 @@ impl Plugin for ThemesPlugin {
             summary: rust_i18n::t!("slash.theme-summary").to_string(),
             args_hint: Some("[list | <slug>]".into()),
             requires_arg: false,
+            suppress_prompt_segments: vec![],
         }];
         contributions.screens = vec![ScreenSpec {
             id: "themes.picker".into(),

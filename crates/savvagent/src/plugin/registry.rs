@@ -217,6 +217,51 @@ impl PluginRegistry {
         }
     }
 
+    /// All enabled plugins' system-prompt segments in registration order.
+    ///
+    /// Iterates `enabled_ids` (unordered hash-set iteration), then within
+    /// each plugin appends its `contributions.prompt_segments` slices in
+    /// the order the plugin declares them. The caller (the TUI startup and
+    /// `TogglePlugin` handler) feeds the result into
+    /// `Host::set_prompt_segments`.
+    ///
+    /// This is a synchronous, non-async method because it only reads the
+    /// already-resolved `plugins` map — it does **not** hold any plugin
+    /// mutex across an `.await`.
+    ///
+    /// Because `PluginRegistry::get` returns an `Arc<Mutex<dyn Plugin>>`
+    /// and we cannot `.await` inside a non-async function, this method
+    /// calls `try_lock()` on each plugin. All plugin instances in the
+    /// registry are created at startup and never held across awaits
+    /// outside of dispatch calls; `try_lock()` is always uncontended in
+    /// this context.
+    #[allow(dead_code)] // used by Task 20 (wire set_prompt_segments at startup)
+    pub fn active_prompt_segments(&self) -> Vec<savvagent_plugin::SystemPromptSegment> {
+        let mut out = Vec::new();
+        for id in self.enabled_ids() {
+            let Some(handle) = self.get(id) else {
+                continue;
+            };
+            // Synchronous access: the plugin is only locked across dispatch
+            // calls (handle_slash / on_event) and those hold the lock only
+            // for the duration of the async fn body. At startup and between
+            // turns this is always uncontended.
+            match handle.try_lock() {
+                Ok(guard) => {
+                    let m = guard.manifest();
+                    out.extend(m.contributions.prompt_segments);
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        plugin_id = %id.as_str(),
+                        "active_prompt_segments: plugin mutex contended; skipping plugin"
+                    );
+                }
+            }
+        }
+        out
+    }
+
     /// Take the constructed provider client out of the provider plugin
     /// associated with `id`, leaving the plugin's slot empty. Returns
     /// `None` if `id` is unknown or the plugin doesn't currently hold a
@@ -309,6 +354,15 @@ impl Plugin for BoxedPlugin {
 
     fn themes(&self) -> Vec<savvagent_plugin::ThemeEntry> {
         self.0.themes()
+    }
+
+    fn create_renderer(
+        &self,
+        block_type: &str,
+        id: savvagent_plugin::ContentBlockId,
+        source: &str,
+    ) -> Result<Box<dyn savvagent_plugin::ContentRenderer>, savvagent_plugin::PluginError> {
+        self.0.create_renderer(block_type, id, source)
     }
 }
 

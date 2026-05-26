@@ -1,8 +1,189 @@
 //! TUI state. The app holds a shared [`Host`] and a render-friendly
 //! conversation log built incrementally from streaming [`TurnEvent`]s.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Instant;
+
+use savvagent_plugin::{ContentBlockId, ContentRenderer, PixelFormat, PixelSize};
+
+/// Lives inside [`App`]. Owns one renderer per live canvas block.
+///
+/// The image picker (`ratatui_image::Picker`) is constructed once at
+/// startup via a stdio terminal query. Subsequent frames reuse the
+/// picker to produce [`ratatui_image::protocol::StatefulProtocol`]
+/// instances for each canvas, which the render path passes to
+/// `ratatui_image::StatefulImage`.
+pub(crate) struct CanvasRegistry {
+    next_id: u32,
+    renderers: HashMap<ContentBlockId, Box<dyn ContentRenderer>>,
+    image_picker: Option<ratatui_image::picker::Picker>,
+    image_states: HashMap<ContentBlockId, ratatui_image::protocol::StatefulProtocol>,
+}
+
+impl CanvasRegistry {
+    pub fn new() -> Self {
+        Self {
+            next_id: 0,
+            renderers: HashMap::new(),
+            image_picker: ratatui_image::picker::Picker::from_query_stdio().ok(),
+            image_states: HashMap::new(),
+        }
+    }
+
+    /// Allocate a fresh [`ContentBlockId`] for a newly-arrived canvas.
+    pub fn allocate_id(&mut self) -> ContentBlockId {
+        let id = ContentBlockId(self.next_id);
+        self.next_id += 1;
+        id
+    }
+
+    /// Insert a renderer instance for `id`.
+    pub fn insert(&mut self, id: ContentBlockId, renderer: Box<dyn ContentRenderer>) {
+        self.renderers.insert(id, renderer);
+    }
+
+    /// Drop every renderer + cached image protocol and reset the id
+    /// counter to 0. Called at the top of [`App::replay_transcript`] so a
+    /// `/resume` rebuilds the registry from scratch.
+    ///
+    /// Resetting `next_id` to 0 is load-bearing: replay re-allocates ids in
+    /// stream order, and those ids must match the ordinals Task 26 saved
+    /// each canvas's interactive-state blob under (the n-th top-level `Html`
+    /// block was saved as ordinal n). The image picker is preserved — it's a
+    /// terminal capability, not per-conversation state.
+    pub fn clear(&mut self) {
+        self.next_id = 0;
+        self.renderers.clear();
+        self.image_states.clear();
+    }
+
+    /// Look up the renderer for `id`.
+    #[allow(dead_code)]
+    pub fn get_mut(&mut self, id: ContentBlockId) -> Option<&mut Box<dyn ContentRenderer>> {
+        self.renderers.get_mut(&id)
+    }
+
+    /// Iterate over `(id, renderer)` pairs for every live canvas. Used by
+    /// the transcript-save bridge to collect `snapshot_state()` blobs
+    /// keyed by each canvas's [`ContentBlockId`] (whose `.0` equals the
+    /// canvas's stream ordinal among top-level `Html` blocks).
+    pub fn iter_renderers(&self) -> impl Iterator<Item = (ContentBlockId, &dyn ContentRenderer)> {
+        self.renderers.iter().map(|(id, r)| (*id, r.as_ref()))
+    }
+
+    /// Freeze the renderer for `id` (no-op if no such renderer). Used by
+    /// the focus state machine when focus leaves a canvas.
+    pub fn freeze(&mut self, id: ContentBlockId) {
+        if let Some(r) = self.renderers.get_mut(&id) {
+            r.freeze();
+        }
+    }
+
+    /// Thaw the renderer for `id` (no-op if no such renderer). Used by the
+    /// focus state machine when focus enters a canvas.
+    pub fn thaw(&mut self, id: ContentBlockId) {
+        if let Some(r) = self.renderers.get_mut(&id) {
+            r.thaw();
+        }
+    }
+
+    /// Expose the image picker for rendering (Task 16 uses this to produce
+    /// `StatefulProtocol` instances from rendered `Frame`s).
+    #[allow(dead_code)]
+    pub fn image_picker_mut(&mut self) -> Option<&mut ratatui_image::picker::Picker> {
+        self.image_picker.as_mut()
+    }
+
+    /// Expose the image states map for rendering (Task 16).
+    #[allow(dead_code)]
+    pub fn image_states_mut(
+        &mut self,
+    ) -> &mut HashMap<ContentBlockId, ratatui_image::protocol::StatefulProtocol> {
+        &mut self.image_states
+    }
+
+    /// `true` iff this terminal supports an image protocol.
+    pub fn image_protocol_available(&self) -> bool {
+        self.image_picker.is_some()
+    }
+
+    /// Terminal cell dimensions in pixels — `(width, height)` — as
+    /// reported by the picker. Returns `None` when there's no image
+    /// protocol. Used by the renderer to size the requested `Frame` so
+    /// the image scales sensibly into the available cell rect.
+    pub fn image_cell_size(&self) -> Option<(u16, u16)> {
+        let picker = self.image_picker.as_ref()?;
+        let fs = picker.font_size();
+        Some((fs.width, fs.height))
+    }
+
+    /// Look up — and lazily build — the `StatefulProtocol` for canvas `id`.
+    ///
+    /// The first call drives the renderer at `pixel_width`, converts the
+    /// returned `Frame` into a `DynamicImage`, and asks the picker for a
+    /// `StatefulProtocol`. Subsequent calls reuse the cached protocol; the
+    /// stateful widget re-encodes internally when the render area changes.
+    ///
+    /// Returns `None` when:
+    /// * the terminal has no image protocol (`image_picker` is `None`), or
+    /// * no renderer is registered for `id`, or
+    /// * the produced `Frame` is empty / mis-sized.
+    pub fn image_protocol_mut(
+        &mut self,
+        id: ContentBlockId,
+        pixel_width: u32,
+    ) -> Option<&mut ratatui_image::protocol::StatefulProtocol> {
+        let picker = self.image_picker.as_ref()?;
+        if !self.image_states.contains_key(&id) {
+            let renderer = self.renderers.get_mut(&id)?;
+            let frame = renderer.render(PixelSize {
+                width: pixel_width,
+                height: 0,
+            });
+            let image = frame_to_dynamic_image(&frame)?;
+            let protocol = picker.new_resize_protocol(image);
+            self.image_states.insert(id, protocol);
+        }
+        self.image_states.get_mut(&id)
+    }
+}
+
+/// Build an `image::DynamicImage` from a plugin-emitted [`savvagent_plugin::Frame`].
+///
+/// Frames are RGBA8 by contract (see `crates/savvagent-canvas/src/canvas.rs`),
+/// but we accept BGRA8 by swapping byte channels rather than rejecting the
+/// frame outright. Returns `None` for empty frames or when the byte buffer's
+/// length doesn't match `width * height * 4`.
+fn frame_to_dynamic_image(frame: &savvagent_plugin::Frame) -> Option<image::DynamicImage> {
+    if frame.width == 0 || frame.height == 0 {
+        return None;
+    }
+    let expected = (frame.width as usize)
+        .checked_mul(frame.height as usize)?
+        .checked_mul(4)?;
+    if frame.bytes.len() != expected {
+        return None;
+    }
+    let mut bytes = frame.bytes.clone();
+    if matches!(frame.format, PixelFormat::Bgra8) {
+        for px in bytes.chunks_exact_mut(4) {
+            px.swap(0, 2);
+        }
+    }
+    let buf = image::RgbaImage::from_raw(frame.width, frame.height, bytes)?;
+    Some(image::DynamicImage::ImageRgba8(buf))
+}
+
+impl std::fmt::Debug for CanvasRegistry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CanvasRegistry")
+            .field("next_id", &self.next_id)
+            .field("renderer_count", &self.renderers.len())
+            .field("image_protocol", &self.image_protocol_available())
+            .finish_non_exhaustive()
+    }
+}
 
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::widgets::{Block, BorderType, Borders};
@@ -128,6 +309,21 @@ pub enum InputMode {
     },
     /// Transcript picker open — selecting a file for `/resume`.
     SelectingTranscript,
+    /// Focus is inside an inline HTML canvas. Key/mouse events route to
+    /// the canvas's renderer (Tasks 21-25). `element_idx` is the index
+    /// into the canvas's `focusable_elements()` list (None = focused the
+    /// canvas but no specific element yet).
+    Canvas {
+        /// Which canvas holds focus (key into `App::canvas_registry`).
+        id: savvagent_plugin::ContentBlockId,
+        /// Currently focused element index within the canvas, if any.
+        ///
+        /// `#[allow(dead_code)]`: stored now, read by the key/mouse
+        /// routing in Tasks 22-25; `-D warnings` flags the unused field
+        /// until then.
+        #[allow(dead_code)]
+        element_idx: Option<u32>,
+    },
 }
 
 /// Queued model-change request emitted by the model picker. The `run_app`
@@ -235,6 +431,23 @@ pub enum Entry {
     RouteBadge(String),
     /// Local notice — file ops, errors, transcript notifications.
     Note(String),
+    /// A model-emitted HTML block to be rendered inline as a canvas.
+    ///
+    /// `source_preview` is `Some(...)` while the block is still
+    /// streaming (each `HtmlSourceDelta` appends to it); on
+    /// `ContentBlockStop` the preview is moved into `source` and
+    /// `source_preview` is set back to `None`. The renderer instance
+    /// lives in `App::canvas_registry`.
+    Canvas {
+        /// Host-assigned id, matching the renderer key in the
+        /// canvas registry.
+        id: savvagent_plugin::ContentBlockId,
+        /// Final HTML source (after streaming completes).
+        source: String,
+        /// In-flight source buffer during streaming, swapped to
+        /// `source` and reset to `None` on completion.
+        source_preview: Option<String>,
+    },
 }
 
 /// Slash command shown in the palette.
@@ -535,6 +748,24 @@ pub struct App {
     /// prompt. Driven by `PageUp`/`PageDown`/`Home`/`End` on the home screen.
     pub log_scroll_offset_from_bottom: Option<u16>,
 
+    /// Live renderer instances keyed by [`ContentBlockId`], plus the
+    /// terminal image protocol picker. Populated when an
+    /// `Entry::Canvas` is created; Task 16 reads this during the render
+    /// pass to produce ratatui-image frames.
+    pub(crate) canvas_registry: CanvasRegistry,
+
+    /// On-screen cell rects of canvases from the most recent render, for
+    /// mouse hit-testing. Refreshed every frame by `ui::render`; keyed by
+    /// canvas id. The mouse handler in `main.rs::run_app` runs outside the
+    /// render pass, so it reads these persisted rects rather than the
+    /// transient overlays produced during `render_log`.
+    pub(crate) canvas_click_targets: Vec<(savvagent_plugin::ContentBlockId, ratatui::layout::Rect)>,
+
+    /// Maps streaming block index → [`ContentBlockId`] for in-flight
+    /// HTML blocks. Populated on `TurnEvent::HtmlBlockStart`, consumed
+    /// on `TurnEvent::HtmlBlockStop`.
+    pub(crate) html_block_index_to_id: HashMap<u32, savvagent_plugin::ContentBlockId>,
+
     /// One-turn model override populated by
     /// [`savvagent_plugin::Effect::SetNextTurnModelOverride`] and consumed
     /// by the worker spawn at the start of the next turn. `None`
@@ -631,6 +862,33 @@ pub(crate) fn log_scroll_offset_after_wheel(
     }
 }
 
+/// Hit-test a terminal-cell mouse coordinate against the canvases' on-screen
+/// rects (from [`App::canvas_click_targets`]) and translate it to a
+/// frame-relative pixel offset within the hit canvas.
+///
+/// Returns `(canvas id, x_pixel, y_pixel)` for the first matching rect, or
+/// `None` if the cell is outside every canvas. Pure so the routing logic in
+/// `main.rs::run_app` (which can't easily be unit-tested) is exercised here.
+pub(crate) fn canvas_hit(
+    targets: &[(savvagent_plugin::ContentBlockId, ratatui::layout::Rect)],
+    col: u16,
+    row: u16,
+    cell: savvagent_canvas::CellPixelSize,
+) -> Option<(savvagent_plugin::ContentBlockId, u32, u32)> {
+    for (id, rect) in targets {
+        let cell_rect = savvagent_canvas::CellRect {
+            col: rect.x,
+            row: rect.y,
+            width: rect.width,
+            height: rect.height,
+        };
+        if let Some((px, py)) = savvagent_canvas::cell_to_pixel(cell_rect, cell, col, row) {
+            return Some((*id, px, py));
+        }
+    }
+    None
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum WheelDirection {
     Up,
@@ -638,6 +896,55 @@ pub(crate) enum WheelDirection {
 }
 
 impl App {
+    /// True iff input focus is on the given canvas.
+    ///
+    /// `#[allow(dead_code)]`: only exercised by tests until the focus
+    /// routing lands in Tasks 21-25, but `-D warnings` treats unused
+    /// non-test items in this binary crate as errors.
+    #[allow(dead_code)]
+    pub(crate) fn is_canvas_focused(&self, id: savvagent_plugin::ContentBlockId) -> bool {
+        matches!(self.input_mode, InputMode::Canvas { id: x, .. } if x == id)
+    }
+
+    /// Move focus into a canvas. Freezes any previously-focused (different)
+    /// canvas and thaws the incoming one.
+    #[allow(dead_code)]
+    pub(crate) fn focus_canvas(
+        &mut self,
+        id: savvagent_plugin::ContentBlockId,
+        element_idx: Option<u32>,
+    ) {
+        if let InputMode::Canvas { id: prev, .. } = self.input_mode {
+            if prev != id {
+                self.canvas_registry.freeze(prev);
+            }
+        }
+        self.canvas_registry.thaw(id);
+        self.input_mode = InputMode::Canvas { id, element_idx };
+    }
+
+    /// Leave canvas focus, returning to the prompt editor. Freezes the canvas.
+    #[allow(dead_code)]
+    pub(crate) fn unfocus_canvas(&mut self) {
+        if let InputMode::Canvas { id, .. } = self.input_mode {
+            self.canvas_registry.freeze(id);
+        }
+        self.input_mode = InputMode::Editing;
+    }
+
+    /// Update the focused element index without a freeze/thaw cycle. No-op
+    /// unless a canvas currently holds focus. Used by Tab/Shift-Tab
+    /// traversal, which moves within the already-focused canvas.
+    #[allow(dead_code)]
+    pub(crate) fn set_canvas_element(&mut self, idx: Option<u32>) {
+        if let InputMode::Canvas { id, .. } = self.input_mode {
+            self.input_mode = InputMode::Canvas {
+                id,
+                element_idx: idx,
+            };
+        }
+    }
+
     /// Build TUI state. The host runs out-of-band; the app only carries the
     /// model name (for the header), the directory transcripts get written
     /// into, and the conversation log it builds from streaming events.
@@ -728,6 +1035,9 @@ impl App {
             pending_turn_cancellation: None,
             prompt_history: PromptHistory::default(),
             log_scroll_offset_from_bottom: None,
+            canvas_registry: CanvasRegistry::new(),
+            canvas_click_targets: Vec::new(),
+            html_block_index_to_id: HashMap::new(),
             next_turn_model_override: None,
             pending_slash_after_trust: None,
             trust_levels: {
@@ -923,6 +1233,21 @@ impl App {
                 self.entries
                     .push(Entry::Note(format!("resource updated: {uri} — {summary}")));
             }
+            TurnEvent::HtmlBlockStart { index } => {
+                let id = self.handle_html_block_start();
+                self.html_block_index_to_id.insert(index, id);
+            }
+            TurnEvent::HtmlBlockDelta { index, source } => {
+                if let Some(&id) = self.html_block_index_to_id.get(&index) {
+                    self.handle_html_block_delta(id, &source);
+                }
+            }
+            TurnEvent::HtmlBlockStop { index } => {
+                if let Some(&id) = self.html_block_index_to_id.get(&index) {
+                    self.handle_html_block_stop(id);
+                    self.html_block_index_to_id.remove(&index);
+                }
+            }
             TurnEvent::SubagentStop { .. } => {
                 // Translated to HostEvent::SubagentStop by
                 // translate_turn_event_to_host_event so the user_hooks
@@ -939,6 +1264,95 @@ impl App {
         }
         let text = std::mem::take(&mut self.live_text);
         self.entries.push(Entry::Assistant(text));
+    }
+
+    // ── HTML canvas streaming handlers ───────────────────────────────────────
+
+    /// Called when a `TurnEvent::HtmlBlockStart` arrives.
+    ///
+    /// Flushes any buffered live text, allocates a fresh
+    /// [`savvagent_plugin::ContentBlockId`], and pushes an `Entry::Canvas`
+    /// with an empty `source_preview` (the streaming accumulator). Returns
+    /// the allocated id so the caller can record the `index → id` mapping.
+    pub fn handle_html_block_start(&mut self) -> savvagent_plugin::ContentBlockId {
+        self.flush_live_text();
+        let id = self.canvas_registry.allocate_id();
+        self.entries.push(Entry::Canvas {
+            id,
+            source: String::new(),
+            source_preview: Some(String::new()),
+        });
+        id
+    }
+
+    /// Called when a `TurnEvent::HtmlBlockDelta` arrives.
+    ///
+    /// Appends `fragment` to the `source_preview` buffer of the
+    /// `Entry::Canvas` that was created for `id`. No-op if the entry
+    /// is not found or has already been finalized (`source_preview` is `None`).
+    pub fn handle_html_block_delta(
+        &mut self,
+        id: savvagent_plugin::ContentBlockId,
+        fragment: &str,
+    ) {
+        if let Some(Entry::Canvas {
+            source_preview,
+            id: entry_id,
+            ..
+        }) = self
+            .entries
+            .iter_mut()
+            .rfind(|e| matches!(e, Entry::Canvas { id: eid, .. } if *eid == id))
+        {
+            if let Some(buf) = source_preview {
+                buf.push_str(fragment);
+            }
+            let _ = entry_id;
+        }
+    }
+
+    /// Called when a `TurnEvent::HtmlBlockStop` arrives (sync half).
+    ///
+    /// Moves `source_preview` into `source` and sets `source_preview` to
+    /// `None`, marking the entry as fully received. Renderer creation is
+    /// async and handled separately in `main.rs` via
+    /// [`App::try_create_canvas_renderer`].
+    pub fn handle_html_block_stop(&mut self, id: savvagent_plugin::ContentBlockId) {
+        if let Some(Entry::Canvas {
+            source,
+            source_preview,
+            ..
+        }) = self
+            .entries
+            .iter_mut()
+            .rfind(|e| matches!(e, Entry::Canvas { id: eid, .. } if *eid == id))
+            && let Some(preview) = source_preview.take()
+        {
+            *source = preview;
+        }
+    }
+
+    /// Return all finalized canvases (not in-flight previews) in
+    /// transcript order. Used by /save-canvas.
+    pub fn canvas_sources_in_order(&self) -> Vec<(savvagent_plugin::ContentBlockId, String)> {
+        self.entries
+            .iter()
+            .filter_map(|e| match e {
+                Entry::Canvas {
+                    id,
+                    source,
+                    source_preview,
+                    ..
+                } if source_preview.is_none() => Some((*id, source.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Helper for tests — return the last `Entry` in the conversation log.
+    #[cfg(test)]
+    pub(crate) fn last_entry(&self) -> Option<&Entry> {
+        self.entries.last()
     }
 
     /// Convenience: append a user-visible note (file ops, errors, system messages).
@@ -969,6 +1383,11 @@ impl App {
                     let args_len = serde_json::to_string(args).map(|s| s.len()).unwrap_or(0);
                     args_len + result_text.as_deref().map(str::len).unwrap_or(0)
                 }
+                Entry::Canvas {
+                    source,
+                    source_preview,
+                    ..
+                } => source.len() + source_preview.as_deref().map(str::len).unwrap_or(0),
             })
             .sum::<usize>()
             + self.live_text.len();
@@ -1299,6 +1718,11 @@ impl App {
 
         self.entries.clear();
         self.live_text.clear();
+        // Reset the canvas registry so a re-resume doesn't leak old
+        // renderers and so replayed ids start at 0 — matching the ordinals
+        // Task 26 saved each canvas's `state` blob under.
+        self.canvas_registry.clear();
+        self.html_block_index_to_id.clear();
 
         for msg in &record.messages {
             match msg.role {
@@ -1340,6 +1764,51 @@ impl App {
                                 // dumping the raw chain-of-thought into the
                                 // visible log. Rendered dimmed via Note.
                                 self.entries.push(Entry::Note("[thinking]".into()));
+                            }
+                            ContentBlock::Html { source, state } => {
+                                // Recreate the canvas renderer (mirrors the
+                                // streaming path's plugin `create_renderer`,
+                                // which is exactly `HtmlCanvas::new(id, source)`).
+                                //
+                                // The id is allocated in stream order as we
+                                // iterate top-level `Html` blocks, so the n-th
+                                // canvas gets `ContentBlockId(n)` — matching the
+                                // ordinal Task 26 saved its `state` blob under.
+                                // Nested tool-emitted Html lives in
+                                // `ToolResult.content`, never as a top-level
+                                // assistant block, so it's naturally excluded.
+                                let id = self.canvas_registry.allocate_id();
+                                let mut renderer: Box<dyn ContentRenderer> =
+                                    Box::new(savvagent_canvas::HtmlCanvas::new(id, source));
+                                // Restore interactive state if present
+                                // (base64 STANDARD → bytes). Decode/restore
+                                // failures are soft: log and fall back to
+                                // rendering from defaults — never abort resume.
+                                if let Some(b64) = state {
+                                    use base64::Engine as _;
+                                    match base64::engine::general_purpose::STANDARD.decode(b64) {
+                                        Ok(bytes) => {
+                                            if let Err(e) = renderer.restore_state(&bytes) {
+                                                tracing::warn!(
+                                                    canvas_id = id.0,
+                                                    error = ?e,
+                                                    "resume: canvas state restore failed; rendering from defaults"
+                                                );
+                                            }
+                                        }
+                                        Err(e) => tracing::warn!(
+                                            canvas_id = id.0,
+                                            error = ?e,
+                                            "resume: canvas state base64 decode failed; rendering from defaults"
+                                        ),
+                                    }
+                                }
+                                self.canvas_registry.insert(id, renderer);
+                                self.entries.push(Entry::Canvas {
+                                    id,
+                                    source: source.clone(),
+                                    source_preview: None,
+                                });
                             }
                             _ => {}
                         }
@@ -1696,6 +2165,9 @@ impl App {
                 }
                 Entry::RouteBadge(t) => format!("route: {t}"),
                 Entry::Note(t) => format!("note: {t}"),
+                Entry::Canvas { id, source, .. } => {
+                    format!("canvas: id={} source_len={}", id.0, source.len())
+                }
             })
             .collect();
         let json = serde_json::to_string_pretty(&lines).map_err(std::io::Error::other)?;
@@ -1883,6 +2355,40 @@ mod tests {
 
     fn fresh_app() -> App {
         App::new("test-model".into(), PathBuf::from("/tmp"), "en".to_string())
+    }
+
+    /// Verify that `PluginRegistry::active_prompt_segments` — the value that
+    /// `main` pushes into `Host::set_prompt_segments` at startup — includes
+    /// the html-canvas segment when the full builtin set is registered.
+    ///
+    /// This is the unit-side of the startup wiring: the production code does
+    /// `host.set_prompt_segments(registry.active_prompt_segments())` right
+    /// after `app.install_plugin_runtime(registry, indexes)`. The host's
+    /// `set_prompt_segments` / `active_prompt_segments` round-trip is covered
+    /// in `savvagent-host`; this test pins the "what gets pushed" side.
+    #[tokio::test]
+    async fn startup_pushes_html_canvas_segment_to_host() {
+        let _lock = crate::test_helpers::HOME_LOCK.lock().unwrap();
+        let set = crate::plugin::register_builtins(
+            std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::BTreeMap::new())),
+            std::sync::Arc::new(tokio::sync::RwLock::new(
+                crate::plugin::builtin::user_hooks::discovery::HooksIndex::default(),
+            )),
+            "test-session".into(),
+            std::path::PathBuf::from("/tmp"),
+            std::sync::Arc::new(tokio::sync::RwLock::new(std::path::PathBuf::from(
+                "/t.json",
+            ))),
+        );
+        let registry = crate::plugin::registry::PluginRegistry::new(set);
+        let segments = registry.active_prompt_segments();
+        assert!(
+            segments
+                .iter()
+                .any(|s| s.id == "internal:html-canvas:default"),
+            "expected internal:html-canvas:default in active segments, got: {:?}",
+            segments.iter().map(|s| &s.id).collect::<Vec<_>>()
+        );
     }
 
     /// `App::new` seeds `transcript_path` to a real path inside the
@@ -2264,6 +2770,7 @@ mod tests {
             InputMode::PermissionPrompt => "PermissionPrompt",
             InputMode::BashNetworkPrompt { .. } => "BashNetworkPrompt",
             InputMode::SelectingTranscript => "SelectingTranscript",
+            InputMode::Canvas { .. } => "Canvas",
         }
     }
 
@@ -2402,6 +2909,174 @@ mod tests {
     }
 
     #[test]
+    fn entry_carries_canvas_variant() {
+        let e = Entry::Canvas {
+            id: savvagent_plugin::ContentBlockId(7),
+            source: "<p>hi</p>".into(),
+            source_preview: None,
+        };
+        match e {
+            Entry::Canvas {
+                id,
+                source,
+                source_preview,
+            } => {
+                assert_eq!(id, savvagent_plugin::ContentBlockId(7));
+                assert_eq!(source, "<p>hi</p>");
+                assert!(source_preview.is_none());
+            }
+            _ => panic!("expected Canvas"),
+        }
+    }
+
+    /// Verify that `save_transcript_to` round-trips a Canvas entry into
+    /// the plain-text JSON transcript. The serialized form is a string
+    /// starting with `"canvas: id=3"`.
+    #[test]
+    fn canvas_entry_persists_to_transcript() {
+        use std::path::PathBuf;
+        use tempfile::NamedTempFile;
+
+        let mut app = App::new("model".into(), PathBuf::from("/tmp"), "en".to_string());
+        app.entries.push(Entry::Canvas {
+            id: savvagent_plugin::ContentBlockId(3),
+            source: "<p>x</p>".into(),
+            source_preview: None,
+        });
+
+        let tmp = NamedTempFile::new().expect("tempfile");
+        let path = tmp.path().to_str().unwrap().to_string();
+        app.save_transcript_to(path.clone())
+            .expect("save should succeed");
+
+        let written = std::fs::read_to_string(&path).expect("read back");
+        assert!(
+            written.contains("canvas: id=3"),
+            "expected canvas entry in transcript, got: {written}"
+        );
+        assert!(
+            written.contains("source_len=8"),
+            "expected source_len in transcript, got: {written}"
+        );
+    }
+
+    #[test]
+    fn focus_canvas_sets_input_mode_and_is_focused() {
+        let mut app = fresh_app();
+        let id = savvagent_plugin::ContentBlockId(7);
+        // No renderer registered for `id`; freeze/thaw must no-op gracefully.
+        app.focus_canvas(id, Some(2));
+        assert!(app.is_canvas_focused(id));
+        if let InputMode::Canvas { id: x, element_idx } = app.input_mode {
+            assert_eq!(x, id);
+            assert_eq!(element_idx, Some(2));
+        } else {
+            panic!("expected Canvas input mode");
+        }
+    }
+
+    #[test]
+    fn unfocus_canvas_returns_to_editing() {
+        let mut app = fresh_app();
+        let id = savvagent_plugin::ContentBlockId(8);
+        app.focus_canvas(id, None);
+        app.unfocus_canvas();
+        assert!(matches!(app.input_mode, InputMode::Editing));
+        assert!(!app.is_canvas_focused(id));
+    }
+
+    #[test]
+    fn canvas_hit_maps_cell_to_pixel_offset_in_matching_canvas() {
+        let id = savvagent_plugin::ContentBlockId(3);
+        let rect = ratatui::layout::Rect {
+            x: 10,
+            y: 5,
+            width: 40,
+            height: 12,
+        };
+        let cell = savvagent_canvas::CellPixelSize {
+            width: 8,
+            height: 16,
+        };
+        let targets = vec![(id, rect)];
+        // Top-left cell → (0, 0).
+        assert_eq!(canvas_hit(&targets, 10, 5, cell), Some((id, 0, 0)));
+        // Two cells right, one cell down → (16, 16).
+        assert_eq!(canvas_hit(&targets, 12, 6, cell), Some((id, 16, 16)));
+    }
+
+    #[test]
+    fn canvas_hit_returns_none_outside_every_rect() {
+        let id = savvagent_plugin::ContentBlockId(3);
+        let rect = ratatui::layout::Rect {
+            x: 10,
+            y: 5,
+            width: 40,
+            height: 12,
+        };
+        let cell = savvagent_canvas::CellPixelSize {
+            width: 8,
+            height: 16,
+        };
+        let targets = vec![(id, rect)];
+        assert_eq!(canvas_hit(&targets, 9, 5, cell), None); // left of
+        assert_eq!(canvas_hit(&targets, 50, 5, cell), None); // right of (col 10+40)
+        assert_eq!(canvas_hit(&targets, 10, 4, cell), None); // above
+        assert_eq!(canvas_hit(&targets, 10, 17, cell), None); // below (row 5+12)
+        assert_eq!(canvas_hit(&[], 10, 5, cell), None); // no targets
+    }
+
+    #[test]
+    fn canvas_hit_picks_first_matching_canvas() {
+        let cell = savvagent_canvas::CellPixelSize {
+            width: 10,
+            height: 20,
+        };
+        let a = savvagent_plugin::ContentBlockId(1);
+        let b = savvagent_plugin::ContentBlockId(2);
+        let targets = vec![
+            (
+                a,
+                ratatui::layout::Rect {
+                    x: 0,
+                    y: 0,
+                    width: 10,
+                    height: 5,
+                },
+            ),
+            (
+                b,
+                ratatui::layout::Rect {
+                    x: 20,
+                    y: 0,
+                    width: 10,
+                    height: 5,
+                },
+            ),
+        ];
+        assert_eq!(canvas_hit(&targets, 5, 2, cell), Some((a, 50, 40)));
+        assert_eq!(canvas_hit(&targets, 22, 1, cell), Some((b, 20, 20)));
+    }
+
+    #[test]
+    fn canvas_registry_allocates_unique_ids() {
+        let mut reg = CanvasRegistry::new();
+        let id0 = reg.allocate_id();
+        let id1 = reg.allocate_id();
+        assert_eq!(id0, ContentBlockId(0));
+        assert_eq!(id1, ContentBlockId(1));
+        assert_ne!(id0, id1);
+    }
+
+    #[test]
+    fn app_has_canvas_registry_field() {
+        let app = fresh_app();
+        // Just confirm the field is accessible; the bool value depends on the
+        // host terminal and is not meaningful in a unit test.
+        let _ = app.canvas_registry.image_protocol_available();
+    }
+
+    #[test]
     fn entry_tool_carries_raw_value_and_result_text() {
         // Construct an Entry::Tool with the new field shape and assert the
         // fields are accessible at their new names and types.
@@ -2424,6 +3099,210 @@ mod tests {
         assert_eq!(args.get("path").unwrap(), &serde_json::json!("src/main.rs"));
         assert_eq!(status, Some(ToolCallStatus::Ok));
         assert_eq!(result_text.as_deref(), Some(r#"{"bytes": 1234}"#));
+    }
+
+    // Frame -> DynamicImage conversion ----------------------------------
+
+    #[test]
+    fn frame_to_dynamic_image_accepts_well_formed_rgba8() {
+        // 2x2 image, 4 bytes/pixel = 16 bytes total.
+        let frame = savvagent_plugin::Frame {
+            width: 2,
+            height: 2,
+            format: PixelFormat::Rgba8,
+            bytes: vec![
+                255, 0, 0, 255, // red
+                0, 255, 0, 255, // green
+                0, 0, 255, 255, // blue
+                255, 255, 255, 255, // white
+            ],
+        };
+        let img = frame_to_dynamic_image(&frame).expect("conversion should succeed");
+        assert_eq!(img.width(), 2);
+        assert_eq!(img.height(), 2);
+    }
+
+    #[test]
+    fn frame_to_dynamic_image_swaps_bgra_channels() {
+        // BGRA input: (0,0,255,255) is red in BGRA but must read as red
+        // (255,0,0,255) in the resulting RGBA image.
+        let frame = savvagent_plugin::Frame {
+            width: 1,
+            height: 1,
+            format: PixelFormat::Bgra8,
+            bytes: vec![0, 0, 255, 255], // BGRA = pure red
+        };
+        let img = frame_to_dynamic_image(&frame).expect("conversion should succeed");
+        let rgba = img.to_rgba8();
+        let px = rgba.get_pixel(0, 0);
+        assert_eq!(
+            px.0,
+            [255, 0, 0, 255],
+            "BGRA byte order must be swapped to RGBA"
+        );
+    }
+
+    #[test]
+    fn frame_to_dynamic_image_rejects_zero_dimensions() {
+        let frame = savvagent_plugin::Frame {
+            width: 0,
+            height: 10,
+            format: PixelFormat::Rgba8,
+            bytes: vec![],
+        };
+        assert!(frame_to_dynamic_image(&frame).is_none());
+    }
+
+    #[test]
+    fn frame_to_dynamic_image_rejects_mismatched_byte_length() {
+        // 2x2 should be 16 bytes; pass 8 and confirm we don't panic.
+        let frame = savvagent_plugin::Frame {
+            width: 2,
+            height: 2,
+            format: PixelFormat::Rgba8,
+            bytes: vec![0; 8],
+        };
+        assert!(frame_to_dynamic_image(&frame).is_none());
+    }
+
+    /// Streaming HTML block: source_preview accumulates during streaming,
+    /// then moves to source on ContentBlockStop.
+    ///
+    /// Renderer creation (the async half) is NOT tested here because it
+    /// requires a live plugin registry with `HtmlCanvasPlugin` installed.
+    /// That integration path is exercised in `main.rs`'s `create_canvas_renderer`
+    /// call after `TurnEvent::HtmlBlockStop` is processed.
+    #[test]
+    fn streaming_html_block_transitions_to_canvas_on_stop() {
+        let mut app = fresh_app();
+
+        // Start: a fresh canvas entry with empty source_preview is pushed.
+        let block_id = app.handle_html_block_start();
+
+        // Delta: fragments are appended to source_preview.
+        app.handle_html_block_delta(block_id, "<!doctype");
+        app.handle_html_block_delta(block_id, " html><body>hi</body>");
+
+        // While streaming, the entry has source_preview = Some(...).
+        let entry = app.last_entry().expect("entry pushed");
+        match entry {
+            Entry::Canvas {
+                source_preview,
+                source,
+                ..
+            } => {
+                assert_eq!(
+                    source_preview.as_deref(),
+                    Some("<!doctype html><body>hi</body>"),
+                    "source_preview accumulates fragments during streaming"
+                );
+                assert!(source.is_empty(), "source must stay empty while streaming");
+            }
+            _ => panic!("expected Canvas entry, got {entry:?}"),
+        }
+
+        // Stop: preview is swapped into source and set to None.
+        app.handle_html_block_stop(block_id);
+
+        let entry = app.last_entry().expect("entry");
+        match entry {
+            Entry::Canvas {
+                id,
+                source,
+                source_preview,
+            } => {
+                assert!(
+                    source_preview.is_none(),
+                    "source_preview must be None after block stop"
+                );
+                assert_eq!(
+                    source, "<!doctype html><body>hi</body>",
+                    "source must hold the assembled HTML after block stop"
+                );
+                // Renderer creation happens asynchronously in main.rs after
+                // TurnEvent::HtmlBlockStop; not testable in sync unit tests.
+                // We only verify the id is stable.
+                assert_eq!(*id, block_id);
+            }
+            _ => panic!("expected Canvas entry, got {entry:?}"),
+        }
+    }
+
+    /// Auto-export writes a canvas file to `~/.savvagent/canvases/` after
+    /// `handle_html_block_stop` finalizes the source, simulating the call
+    /// sequence used by `main.rs::auto_export_canvas`.
+    #[test]
+    fn auto_export_writes_file_on_block_stop() {
+        use crate::plugin::builtin::html_canvas::auto_export::{
+            auto_export_path, canvases_dir, write_canvas,
+        };
+        use crate::test_helpers::{HOME_LOCK, HomeGuard};
+
+        let _lock = HOME_LOCK.lock().unwrap();
+        let _home = HomeGuard::new();
+
+        let mut app = fresh_app();
+        let id = app.handle_html_block_start();
+        app.handle_html_block_delta(id, "<p>hi</p>");
+        app.handle_html_block_stop(id);
+
+        // Retrieve the finalized source (mirrors auto_export_canvas in main.rs).
+        let source = match app.last_entry().expect("canvas entry") {
+            Entry::Canvas { source, .. } => source.clone(),
+            other => panic!("expected Canvas, got {other:?}"),
+        };
+
+        let base = canvases_dir().expect("HOME set by HomeGuard");
+        let path = auto_export_path(&base, 1_716_300_000, 1, id);
+        write_canvas(&path, &source).expect("write_canvas");
+
+        assert!(path.exists(), "canvas file must be created");
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(content, "<p>hi</p>");
+    }
+
+    /// `apply_turn_event` routes `HtmlBlockStart/Delta/Stop` through the
+    /// handler methods and keeps the `html_block_index_to_id` map in sync.
+    #[test]
+    fn apply_turn_event_html_block_roundtrip() {
+        use savvagent_host::TurnEvent;
+
+        let mut app = fresh_app();
+
+        app.apply_turn_event(TurnEvent::HtmlBlockStart { index: 2 });
+        // After start: one canvas entry with empty preview; index mapped.
+        assert_eq!(app.html_block_index_to_id.len(), 1);
+        let &id = app.html_block_index_to_id.get(&2).expect("index 2 mapped");
+
+        app.apply_turn_event(TurnEvent::HtmlBlockDelta {
+            index: 2,
+            source: "<p>hello</p>".to_string(),
+        });
+        // After delta: source_preview has the fragment.
+        if let Some(Entry::Canvas { source_preview, .. }) = app.last_entry() {
+            assert_eq!(source_preview.as_deref(), Some("<p>hello</p>"));
+        } else {
+            panic!("expected Canvas entry");
+        }
+
+        app.apply_turn_event(TurnEvent::HtmlBlockStop { index: 2 });
+        // After stop: preview is None, source is set, index removed from map.
+        assert!(
+            app.html_block_index_to_id.is_empty(),
+            "index must be removed on stop"
+        );
+        if let Some(Entry::Canvas {
+            id: entry_id,
+            source,
+            source_preview,
+        }) = app.last_entry()
+        {
+            assert_eq!(*entry_id, id);
+            assert_eq!(source, "<p>hello</p>");
+            assert!(source_preview.is_none());
+        } else {
+            panic!("expected Canvas entry");
+        }
     }
 
     /// `consume_model_override` returns the stored id and clears the field.
@@ -2449,5 +3328,132 @@ mod tests {
 
         // Second call is idempotent — no panic, returns None.
         assert!(app.consume_model_override().is_none());
+    }
+
+    /// Build a `TranscriptFile` with a single assistant message whose
+    /// `content` is the given blocks.
+    fn transcript_with_assistant_blocks(
+        blocks: Vec<savvagent_protocol::ContentBlock>,
+    ) -> TranscriptFile {
+        use savvagent_protocol::{Message, Role};
+        TranscriptFile {
+            schema_version: 1,
+            model: "test-model".into(),
+            saved_at: 1_716_300_000,
+            messages: vec![Message {
+                role: Role::Assistant,
+                content: blocks,
+            }],
+            subagent_transcripts: Default::default(),
+        }
+    }
+
+    /// Phase 1 bug fix: `/resume` must recreate canvases from `Html`
+    /// blocks (previously they fell into `_ => {}` and were dropped).
+    /// Even a `state: None` canvas must reappear as an `Entry::Canvas`
+    /// with a working renderer in the registry.
+    #[test]
+    fn replay_recreates_canvas_from_html_block() {
+        use savvagent_protocol::ContentBlock;
+
+        let source = "<!doctype html><body><p>hello</p></body>".to_string();
+        let record = transcript_with_assistant_blocks(vec![ContentBlock::Html {
+            source: source.clone(),
+            state: None,
+        }]);
+
+        let mut app = fresh_app();
+        app.replay_transcript(&record);
+
+        // An Entry::Canvas with the source must exist.
+        let canvas = app
+            .entries
+            .iter()
+            .find_map(|e| match e {
+                Entry::Canvas { id, source: s, .. } => Some((*id, s.clone())),
+                _ => None,
+            })
+            .expect("replay must push an Entry::Canvas for an Html block");
+        assert_eq!(canvas.1, source, "canvas source must round-trip");
+
+        // The registry must hold a renderer keyed by the same id.
+        assert!(
+            app.canvas_registry.get_mut(canvas.0).is_some(),
+            "registry must have a renderer for the replayed canvas id"
+        );
+    }
+
+    /// Interactive state embedded in an `Html` block (base64 STANDARD of a
+    /// `CanvasState`) must be restored onto the recreated renderer.
+    #[test]
+    fn replay_restores_canvas_state_from_html_block() {
+        use base64::Engine as _;
+        use savvagent_protocol::ContentBlock;
+
+        // Deterministic state: a CanvasState with one open <details>.
+        let mut state = savvagent_canvas::CanvasState {
+            schema_version: 1,
+            ..Default::default()
+        };
+        state.open_details.insert("88".into());
+        let b64 = base64::engine::general_purpose::STANDARD.encode(state.to_bytes());
+
+        let source = "<!doctype html><body><details><summary>s</summary><p>y</p></details></body>"
+            .to_string();
+        let record = transcript_with_assistant_blocks(vec![ContentBlock::Html {
+            source,
+            state: Some(b64),
+        }]);
+
+        let mut app = fresh_app();
+        app.replay_transcript(&record);
+
+        // Snapshot the recreated renderer; restored open_details must survive.
+        let renderer = app
+            .canvas_registry
+            .get_mut(savvagent_plugin::ContentBlockId(0))
+            .expect("renderer for id 0");
+        let snap = renderer
+            .snapshot_state()
+            .expect("snapshot non-empty after restore");
+        let restored = savvagent_canvas::CanvasState::from_bytes(&snap).unwrap();
+        assert!(
+            !restored.open_details.is_empty(),
+            "open_details must be restored from the Html block's state"
+        );
+    }
+
+    /// Two top-level `Html` blocks must get `ContentBlockId(0)` and `(1)`,
+    /// proving the replayed ids align with the ordinals Task 26 saved
+    /// each canvas's state blob under.
+    #[test]
+    fn replay_two_canvases_get_ids_zero_and_one_matching_save_ordinals() {
+        use savvagent_protocol::ContentBlock;
+
+        let record = transcript_with_assistant_blocks(vec![
+            ContentBlock::Html {
+                source: "<!doctype html><body><p>a</p></body>".into(),
+                state: None,
+            },
+            ContentBlock::Html {
+                source: "<!doctype html><body><p>b</p></body>".into(),
+                state: None,
+            },
+        ]);
+
+        let mut app = fresh_app();
+        app.replay_transcript(&record);
+
+        let ids: Vec<u32> = app
+            .entries
+            .iter()
+            .filter_map(|e| match e {
+                Entry::Canvas { id, .. } => Some(id.0),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(ids, vec![0, 1], "ids must be allocated in stream order");
+        assert!(app.canvas_registry.get_mut(ContentBlockId(0)).is_some());
+        assert!(app.canvas_registry.get_mut(ContentBlockId(1)).is_some());
     }
 }

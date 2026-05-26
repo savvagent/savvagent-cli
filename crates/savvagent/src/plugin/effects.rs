@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 
-use savvagent_plugin::{Effect, HostEvent, PluginId, PluginKind, ScreenArgs};
+use savvagent_plugin::{Effect, HostEvent, PluginId, PluginKind, ScreenArgs, UrlTarget};
 
 use crate::app::{App, PendingModelChange, PendingRoutingAction};
 use crate::plugin::builtin::command_palette::screen::{PaletteCommand, PaletteScreen};
@@ -273,6 +273,9 @@ async fn apply_one(app: &mut App, eff: Effect, depth: u8) -> Result<(), String> 
         Effect::Stack(children) => {
             // Recurse via Box::pin so the future has a known size.
             Box::pin(apply_effects_with_depth(app, children, depth)).await?;
+        }
+        Effect::OpenUrl { url, target } => {
+            apply_open_url(app, url, target);
         }
         Effect::StashPendingSlash { name, args } => {
             app.pending_slash_after_trust = Some((name, args));
@@ -1020,6 +1023,37 @@ async fn run_slash(
     args: Vec<String>,
     depth: u8,
 ) -> Result<(), String> {
+    // Special-case: /save-canvas needs access to App-owned canvas state, so it
+    // bypasses the plugin trait and is dispatched here directly.
+    if name == "save-canvas" {
+        use crate::plugin::builtin::html_canvas::slash::{dispatch, parse_args};
+        use savvagent_plugin::StyledLine;
+        let parsed = match parse_args(&args) {
+            Ok(p) => p,
+            Err(e) => {
+                let effs = vec![Effect::PushNote {
+                    line: StyledLine::plain(format!("/save-canvas: {e}")),
+                }];
+                return Box::pin(apply_effects_with_depth(app, effs, depth)).await;
+            }
+        };
+        let canvases = app.canvas_sources_in_order();
+        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let effs = match dispatch(parsed, &canvases, &cwd) {
+            Ok(result) => {
+                let mut v = vec![Effect::PushNote {
+                    line: StyledLine::plain(format!("Canvas saved to {}", result.path.display())),
+                }];
+                v.extend(result.effects);
+                v
+            }
+            Err(e) => vec![Effect::PushNote {
+                line: StyledLine::plain(format!("/save-canvas: {e}")),
+            }],
+        };
+        return Box::pin(apply_effects_with_depth(app, effs, depth)).await;
+    }
+
     let (reg, idx) = match (&app.plugin_registry, &app.plugin_indexes) {
         (Some(r), Some(i)) => (r.clone(), i.clone()),
         _ => return Err("plugin runtime not installed".into()),
@@ -1034,6 +1068,38 @@ async fn run_slash(
             .map_err(|e| e.to_string())?
     };
     Box::pin(apply_effects_with_depth(app, effs, depth)).await
+}
+
+/// Apply [`Effect::OpenUrl`]: launch the URL in the system browser or
+/// submit it as a follow-up user prompt, depending on `target`.
+///
+/// Browser launch is fire-and-forget via `std::process::Command::new(…).spawn()`.
+/// Spawn errors are logged at `warn` level and surface as a styled note so
+/// the user knows something went wrong without crashing the TUI. There is
+/// no `submit_prompt` guard here — if the URL is malformed that is the
+/// plugin author's responsibility (the `Effect` doc says plugins MUST validate
+/// URLs before emitting).
+fn apply_open_url(app: &mut App, url: String, target: UrlTarget) {
+    match target {
+        UrlTarget::SystemBrowser => {
+            let cmd = if cfg!(target_os = "macos") {
+                "open"
+            } else if cfg!(target_os = "windows") {
+                "start"
+            } else {
+                "xdg-open"
+            };
+            if let Err(err) = std::process::Command::new(cmd).arg(&url).spawn() {
+                tracing::warn!(?err, %url, "apply_open_url: failed to open URL in system browser");
+                app.push_styled_note(savvagent_plugin::StyledLine::plain(
+                    rust_i18n::t!("notes.open-url-failed", url = url).to_string(),
+                ));
+            }
+        }
+        UrlTarget::ContinueConversation => {
+            app.submit_prompt(url);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1797,6 +1863,7 @@ mod tests {
                     summary: "".into(),
                     args_hint: None,
                     requires_arg: false,
+                    suppress_prompt_segments: vec![],
                 }];
                 Manifest {
                     id: PluginId::new(&self.id).expect("valid id"),
@@ -2357,6 +2424,7 @@ mod tests {
                     summary: "".into(),
                     args_hint: None,
                     requires_arg: false,
+                    suppress_prompt_segments: vec![],
                 }];
                 Manifest {
                     id: PluginId::new("internal:test-record-slash").expect("valid"),

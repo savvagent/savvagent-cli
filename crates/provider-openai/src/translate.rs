@@ -115,6 +115,10 @@ fn flatten_message(m: &spp::Message, out: &mut Vec<api::RequestMessage>) {
             for b in &m.content {
                 match b {
                     spp::ContentBlock::Text { text } => text_parts.push(text.clone()),
+                    // Html source is echoed back to the model as plain text so
+                    // it can reference its own prior canvas output. The host is
+                    // responsible for rendering; the wire is plain text.
+                    spp::ContentBlock::Html { source, .. } => text_parts.push(source.clone()),
                     spp::ContentBlock::ToolUse { id, name, input } => {
                         tool_calls.push(api::RequestToolCall {
                             id: id.clone(),
@@ -157,6 +161,12 @@ fn flatten_message(m: &spp::Message, out: &mut Vec<api::RequestMessage>) {
                 match b {
                     spp::ContentBlock::Text { text } => {
                         user_parts.push(api::ContentPart::Text { text: text.clone() });
+                    }
+                    // Html source is echoed back as plain text; see assistant arm above.
+                    spp::ContentBlock::Html { source, .. } => {
+                        user_parts.push(api::ContentPart::Text {
+                            text: source.clone(),
+                        });
                     }
                     spp::ContentBlock::Image { source } => {
                         if let Some(part) = image_to_openai(source) {

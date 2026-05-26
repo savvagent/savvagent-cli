@@ -8,11 +8,13 @@
 
 use bytes::{Bytes, BytesMut};
 use futures::StreamExt;
+use savvagent_fence::{FenceChunk, FenceParser};
 use savvagent_mcp::StreamEmitter;
 use savvagent_protocol::{
     self as spp, BlockDelta, ContentBlock, StopReason, StreamEvent, Usage, UsageDelta,
 };
 use serde::Deserialize;
+use std::collections::HashMap;
 
 use crate::translate::stop_reason_from_str;
 
@@ -58,11 +60,30 @@ pub async fn consume_sse(
 struct Accumulator {
     id: Option<String>,
     model: Option<String>,
-    /// Block partial state, keyed by index.
+    /// Block partial state, keyed by upstream Anthropic block index.
     blocks: Vec<BlockState>,
     stop_reason: Option<StopReason>,
     stop_sequence: Option<String>,
     usage: Usage,
+    /// Monotonic SPP-output block-index allocator. Independent from the
+    /// upstream Anthropic index space because a single upstream text block
+    /// may fan out into multiple SPP Text/Html blocks (one per
+    /// `html-canvas` fence transition).
+    local_next_index: u32,
+    /// First local SPP index assigned to each upstream block. Used to
+    /// route non-text deltas (`input_json_delta`, `thinking_delta`,
+    /// `signature_delta`) back to the right SPP block.
+    upstream_to_local: HashMap<u32, u32>,
+    /// The SPP block currently open in the output stream (one at a time).
+    current_local_block: Option<LocalBlock>,
+    /// Final assembled content blocks for `CompleteResponse`, in the
+    /// order they were streamed (i.e., reflecting any fence-driven
+    /// Text/Html splits).
+    final_blocks: Vec<ContentBlock>,
+    /// Extracts ``` ```html-canvas ``` fences from streaming TextDelta
+    /// fragments. Reset between upstream text blocks so an unclosed
+    /// fence at one block boundary doesn't leak into the next.
+    fence_parser: FenceParser,
 }
 
 #[derive(Debug)]
@@ -77,6 +98,24 @@ enum BlockState {
         text: String,
         signature: Option<String>,
     },
+    Image,
+}
+
+/// Tracks the SPP block currently open in the output stream so we can
+/// close-and-reopen across fence transitions and emit the right `Stop`
+/// when the upstream's enclosing block ends.
+#[derive(Debug)]
+struct LocalBlock {
+    index: u32,
+    kind: LocalBlockKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LocalBlockKind {
+    Text,
+    Html,
+    ToolUse,
+    Thinking,
     Image,
 }
 
@@ -106,55 +145,100 @@ impl Accumulator {
                 index,
                 content_block,
             } => {
-                let (state, emitted) = match content_block {
+                // Allocate the upstream-block-state slot first; the SPP
+                // emission below depends only on the block *kind*, not on
+                // whether the slot existed.
+                let mut events = Vec::new();
+                match content_block {
                     SseContentBlock::Text { text } => {
-                        (BlockState::Text(text.clone()), ContentBlock::Text { text })
+                        // Defer emission of ContentBlockStart for Text
+                        // blocks: the first TextDelta might split into a
+                        // Text or Html chunk, and we'd like to emit the
+                        // right SPP block kind on first sight rather than
+                        // emit Text then immediately close it.
+                        self.ensure_block(index as usize, BlockState::Text(text));
                     }
-                    SseContentBlock::ToolUse { id, name, input } => (
-                        BlockState::ToolUse {
-                            id: id.clone(),
-                            name: name.clone(),
-                            partial_json: String::new(),
-                        },
-                        ContentBlock::ToolUse {
-                            id,
-                            name,
-                            input: input.unwrap_or(serde_json::json!({})),
-                        },
-                    ),
+                    SseContentBlock::ToolUse { id, name, input } => {
+                        self.close_current_streaming_block(&mut events);
+                        let local_idx = self.alloc_local(index);
+                        events.push(StreamEvent::ContentBlockStart {
+                            index: local_idx,
+                            block: ContentBlock::ToolUse {
+                                id: id.clone(),
+                                name: name.clone(),
+                                input: input.unwrap_or(serde_json::json!({})),
+                            },
+                        });
+                        self.current_local_block = Some(LocalBlock {
+                            index: local_idx,
+                            kind: LocalBlockKind::ToolUse,
+                        });
+                        self.ensure_block(
+                            index as usize,
+                            BlockState::ToolUse {
+                                id,
+                                name,
+                                partial_json: String::new(),
+                            },
+                        );
+                    }
                     SseContentBlock::Thinking {
                         thinking,
                         signature,
-                    } => (
-                        BlockState::Thinking {
-                            text: thinking.clone(),
-                            signature: signature.clone(),
-                        },
-                        ContentBlock::Thinking {
-                            text: thinking,
-                            signature,
-                        },
-                    ),
-                    SseContentBlock::Image => (
-                        BlockState::Image,
-                        ContentBlock::Text {
-                            text: String::new(),
-                        },
-                    ),
+                    } => {
+                        self.close_current_streaming_block(&mut events);
+                        let local_idx = self.alloc_local(index);
+                        events.push(StreamEvent::ContentBlockStart {
+                            index: local_idx,
+                            block: ContentBlock::Thinking {
+                                text: thinking.clone(),
+                                signature: signature.clone(),
+                            },
+                        });
+                        self.current_local_block = Some(LocalBlock {
+                            index: local_idx,
+                            kind: LocalBlockKind::Thinking,
+                        });
+                        self.ensure_block(
+                            index as usize,
+                            BlockState::Thinking {
+                                text: thinking,
+                                signature,
+                            },
+                        );
+                    }
+                    SseContentBlock::Image => {
+                        self.close_current_streaming_block(&mut events);
+                        let local_idx = self.alloc_local(index);
+                        events.push(StreamEvent::ContentBlockStart {
+                            index: local_idx,
+                            block: ContentBlock::Text {
+                                text: String::new(),
+                            },
+                        });
+                        self.current_local_block = Some(LocalBlock {
+                            index: local_idx,
+                            kind: LocalBlockKind::Image,
+                        });
+                        self.ensure_block(index as usize, BlockState::Image);
+                    }
                 };
-                self.ensure_block(index as usize, state);
-                vec![StreamEvent::ContentBlockStart {
-                    index,
-                    block: emitted,
-                }]
+                events
             }
             AnthropicEvent::ContentBlockDelta { index, delta } => {
-                let (delta_event, _) = match delta {
+                let mut events = Vec::new();
+                match delta {
                     SseDelta::TextDelta { text } => {
+                        // Accumulate the raw upstream text for any
+                        // downstream consumer that inspects state, then
+                        // feed it through the fence parser.
                         if let Some(BlockState::Text(buf)) = self.blocks.get_mut(index as usize) {
                             buf.push_str(&text);
                         }
-                        (BlockDelta::TextDelta { text }, ())
+                        let chunks = self.fence_parser.push(&text);
+                        for chunk in chunks {
+                            self.emit_fence_chunk(chunk, &mut events);
+                        }
                     }
                     SseDelta::InputJsonDelta { partial_json } => {
                         if let Some(BlockState::ToolUse {
@@ -163,7 +247,12 @@ impl Accumulator {
                         {
                             buf.push_str(&partial_json);
                         }
-                        (BlockDelta::InputJsonDelta { partial_json }, ())
+                        let local_idx =
+                            self.upstream_to_local.get(&index).copied().unwrap_or(index);
+                        events.push(StreamEvent::ContentBlockDelta {
+                            index: local_idx,
+                            delta: BlockDelta::InputJsonDelta { partial_json },
+                        });
                     }
                     SseDelta::ThinkingDelta { thinking } => {
                         if let Some(BlockState::Thinking { text, .. }) =
@@ -171,7 +260,12 @@ impl Accumulator {
                         {
                             text.push_str(&thinking);
                         }
-                        (BlockDelta::ThinkingDelta { text: thinking }, ())
+                        let local_idx =
+                            self.upstream_to_local.get(&index).copied().unwrap_or(index);
+                        events.push(StreamEvent::ContentBlockDelta {
+                            index: local_idx,
+                            delta: BlockDelta::ThinkingDelta { text: thinking },
+                        });
                     }
                     SseDelta::SignatureDelta { signature } => {
                         if let Some(BlockState::Thinking { signature: sig, .. }) =
@@ -179,16 +273,37 @@ impl Accumulator {
                         {
                             *sig = Some(signature.clone());
                         }
-                        (BlockDelta::SignatureDelta { signature }, ())
+                        let local_idx =
+                            self.upstream_to_local.get(&index).copied().unwrap_or(index);
+                        events.push(StreamEvent::ContentBlockDelta {
+                            index: local_idx,
+                            delta: BlockDelta::SignatureDelta { signature },
+                        });
                     }
                 };
-                vec![StreamEvent::ContentBlockDelta {
-                    index,
-                    delta: delta_event,
-                }]
+                events
             }
             AnthropicEvent::ContentBlockStop { index } => {
-                vec![StreamEvent::ContentBlockStop { index }]
+                let mut events = Vec::new();
+                // If this upstream block was a Text block, drain the
+                // fence parser first so any buffered trailing content
+                // is emitted before we close.
+                let is_text = matches!(self.blocks.get(index as usize), Some(BlockState::Text(_)));
+                if is_text {
+                    let parser = std::mem::take(&mut self.fence_parser);
+                    let finish = parser.finish();
+                    for chunk in finish.chunks {
+                        self.emit_fence_chunk(chunk, &mut events);
+                    }
+                    if finish.unclosed_fence {
+                        tracing::warn!(
+                            upstream_block = index,
+                            "anthropic text block ended with unclosed html-canvas fence"
+                        );
+                    }
+                }
+                self.close_current_streaming_block(&mut events);
+                events
             }
             AnthropicEvent::MessageDelta { delta, usage } => {
                 if let Some(reason) = delta.stop_reason.as_deref() {
@@ -222,28 +337,44 @@ impl Accumulator {
             .id
             .ok_or_else(|| stream_decode_error("missing message_start"))?;
         let model = self.model.unwrap_or_default();
-        let mut content = Vec::with_capacity(self.blocks.len());
-        for b in self.blocks {
-            match b {
-                BlockState::Text(text) => content.push(ContentBlock::Text { text }),
-                BlockState::ToolUse {
-                    id,
-                    name,
-                    partial_json,
-                } => {
-                    let input = if partial_json.is_empty() {
-                        serde_json::json!({})
-                    } else {
-                        serde_json::from_str(&partial_json).map_err(|e| {
-                            stream_decode_error(&format!("tool_use partial_json invalid: {e}"))
-                        })?
-                    };
-                    content.push(ContentBlock::ToolUse { id, name, input });
+        // The streamed output may have reshuffled the upstream's single
+        // text block into a sequence of Text/Html blocks driven by
+        // html-canvas fences. `final_blocks` records that streamed
+        // structure verbatim; mid-stream tool_use/thinking blocks were
+        // appended at the moment their upstream ContentBlockStop arrived
+        // (via `close_current_streaming_block`). To assemble the final
+        // response we also need to handle the case where no streaming
+        // happened (e.g., tool_use upstream blocks that were closed but
+        // also had partial_json deltas — these are already accounted for).
+        //
+        // The fallback path (`self.final_blocks` empty + `self.blocks`
+        // populated) preserves the prior behavior for the rare case that
+        // a stream ended without any ContentBlockStop events: we walk
+        // self.blocks and synthesize content from BlockState.
+        let mut content = self.final_blocks;
+        if content.is_empty() {
+            for b in self.blocks {
+                match b {
+                    BlockState::Text(text) => content.push(ContentBlock::Text { text }),
+                    BlockState::ToolUse {
+                        id,
+                        name,
+                        partial_json,
+                    } => {
+                        let input = if partial_json.is_empty() {
+                            serde_json::json!({})
+                        } else {
+                            serde_json::from_str(&partial_json).map_err(|e| {
+                                stream_decode_error(&format!("tool_use partial_json invalid: {e}"))
+                            })?
+                        };
+                        content.push(ContentBlock::ToolUse { id, name, input });
+                    }
+                    BlockState::Thinking { text, signature } => {
+                        content.push(ContentBlock::Thinking { text, signature });
+                    }
+                    BlockState::Image => {}
                 }
-                BlockState::Thinking { text, signature } => {
-                    content.push(ContentBlock::Thinking { text, signature });
-                }
-                BlockState::Image => {}
             }
         }
         Ok(spp::CompleteResponse {
@@ -254,6 +385,186 @@ impl Accumulator {
             stop_sequence: self.stop_sequence,
             usage: self.usage,
         })
+    }
+
+    /// Allocate a fresh SPP block index and record the upstream→local
+    /// mapping. Returns the allocated local index.
+    fn alloc_local(&mut self, upstream_idx: u32) -> u32 {
+        let local = self.local_next_index;
+        self.local_next_index += 1;
+        self.upstream_to_local.entry(upstream_idx).or_insert(local);
+        local
+    }
+
+    /// Allocate a local index without recording an upstream mapping
+    /// (used for synthesized Html blocks that don't correspond to a
+    /// distinct upstream block).
+    fn alloc_local_unmapped(&mut self) -> u32 {
+        let local = self.local_next_index;
+        self.local_next_index += 1;
+        local
+    }
+
+    /// Dispatch a fence-parser-produced chunk: open or extend the matching
+    /// streaming block, closing-and-reopening across kind switches.
+    fn emit_fence_chunk(&mut self, chunk: FenceChunk, out: &mut Vec<StreamEvent>) {
+        match chunk {
+            FenceChunk::Text(text) => self.emit_text_chunk(text, out),
+            FenceChunk::Html(html) => self.emit_html_chunk(html, out),
+        }
+    }
+
+    fn emit_text_chunk(&mut self, text: String, out: &mut Vec<StreamEvent>) {
+        // If a non-text streaming block is open, close it first.
+        if let Some(cur) = &self.current_local_block {
+            if cur.kind != LocalBlockKind::Text {
+                self.close_current_streaming_block(out);
+            }
+        }
+        let idx = match &self.current_local_block {
+            Some(LocalBlock {
+                index,
+                kind: LocalBlockKind::Text,
+            }) => *index,
+            _ => {
+                let idx = self.alloc_local_unmapped();
+                out.push(StreamEvent::ContentBlockStart {
+                    index: idx,
+                    block: ContentBlock::Text {
+                        text: String::new(),
+                    },
+                });
+                self.current_local_block = Some(LocalBlock {
+                    index: idx,
+                    kind: LocalBlockKind::Text,
+                });
+                idx
+            }
+        };
+        out.push(StreamEvent::ContentBlockDelta {
+            index: idx,
+            delta: BlockDelta::TextDelta { text: text.clone() },
+        });
+        // Maintain a parallel record of the streamed structure for the
+        // eventual CompleteResponse.
+        match self.final_blocks.last_mut() {
+            Some(ContentBlock::Text { text: buf }) => buf.push_str(&text),
+            _ => self.final_blocks.push(ContentBlock::Text { text }),
+        }
+    }
+
+    fn emit_html_chunk(&mut self, html: String, out: &mut Vec<StreamEvent>) {
+        if let Some(cur) = &self.current_local_block {
+            if cur.kind != LocalBlockKind::Html {
+                self.close_current_streaming_block(out);
+            }
+        }
+        let idx = match &self.current_local_block {
+            Some(LocalBlock {
+                index,
+                kind: LocalBlockKind::Html,
+            }) => *index,
+            _ => {
+                let idx = self.alloc_local_unmapped();
+                out.push(StreamEvent::ContentBlockStart {
+                    index: idx,
+                    block: ContentBlock::Html {
+                        source: String::new(),
+                        state: None,
+                    },
+                });
+                self.current_local_block = Some(LocalBlock {
+                    index: idx,
+                    kind: LocalBlockKind::Html,
+                });
+                idx
+            }
+        };
+        out.push(StreamEvent::ContentBlockDelta {
+            index: idx,
+            delta: BlockDelta::HtmlSourceDelta {
+                source: html.clone(),
+            },
+        });
+        match self.final_blocks.last_mut() {
+            Some(ContentBlock::Html { source: buf, .. }) => buf.push_str(&html),
+            _ => self.final_blocks.push(ContentBlock::Html {
+                source: html,
+                state: None,
+            }),
+        }
+    }
+
+    /// Close whichever local block is currently open (Text/Html
+    /// streaming, ToolUse/Thinking/Image atomic), emitting the SPP
+    /// `ContentBlockStop` and appending the assembled block to
+    /// `final_blocks` so it lands in the eventual `CompleteResponse`.
+    fn close_current_streaming_block(&mut self, out: &mut Vec<StreamEvent>) {
+        let Some(cur) = self.current_local_block.take() else {
+            return;
+        };
+        out.push(StreamEvent::ContentBlockStop { index: cur.index });
+
+        // For non-streaming-text blocks, append the finished block now.
+        // Streaming Text/Html blocks already pushed themselves to
+        // `final_blocks` as deltas arrived; their `last_mut()` slot is
+        // the current contents, so we just leave it in place.
+        match cur.kind {
+            LocalBlockKind::Text | LocalBlockKind::Html => {
+                // Already in final_blocks; nothing to do.
+            }
+            LocalBlockKind::ToolUse => {
+                // Find the upstream block by reverse-lookup of
+                // upstream_to_local. There should be exactly one
+                // mapping pointing at `cur.index` for the ToolUse case.
+                let upstream = self
+                    .upstream_to_local
+                    .iter()
+                    .find(|(_, v)| **v == cur.index)
+                    .map(|(k, _)| *k);
+                if let Some(u) = upstream {
+                    if let Some(BlockState::ToolUse {
+                        id,
+                        name,
+                        partial_json,
+                    }) = self.blocks.get(u as usize)
+                    {
+                        let input = if partial_json.is_empty() {
+                            serde_json::json!({})
+                        } else {
+                            serde_json::from_str(partial_json).unwrap_or(serde_json::json!({}))
+                        };
+                        self.final_blocks.push(ContentBlock::ToolUse {
+                            id: id.clone(),
+                            name: name.clone(),
+                            input,
+                        });
+                    }
+                }
+            }
+            LocalBlockKind::Thinking => {
+                let upstream = self
+                    .upstream_to_local
+                    .iter()
+                    .find(|(_, v)| **v == cur.index)
+                    .map(|(k, _)| *k);
+                if let Some(u) = upstream {
+                    if let Some(BlockState::Thinking { text, signature }) =
+                        self.blocks.get(u as usize)
+                    {
+                        self.final_blocks.push(ContentBlock::Thinking {
+                            text: text.clone(),
+                            signature: signature.clone(),
+                        });
+                    }
+                }
+            }
+            LocalBlockKind::Image => {
+                // Anthropic doesn't actually send Image blocks downstream;
+                // we treat them as no-ops in the final response (matching
+                // the prior behavior in the original `finish` path).
+            }
+        }
     }
 }
 
@@ -568,6 +879,130 @@ mod tests {
                 assert_eq!(input["path"], "/tmp");
             }
             _ => panic!("expected tool_use"),
+        }
+    }
+
+    /// When the model emits text containing a `html-canvas` fenced HTML
+    /// block, the SPP stream must split the upstream's single text block
+    /// into a Text block plus a separate Html block (each with its own
+    /// SPP block index), with fenced markers stripped:
+    ///   ContentBlockStart(Text) + TextDelta + ContentBlockStop
+    ///   ContentBlockStart(Html) + HtmlSourceDelta + ContentBlockStop
+    #[test]
+    fn stream_emits_html_blocks_for_canvas_fence() {
+        let mut acc = Accumulator::default();
+        acc.consume(AnthropicEvent::MessageStart {
+            message: SseMessage {
+                id: "m-html".into(),
+                model: "claude-x".into(),
+                usage: SseInitialUsage::default(),
+            },
+        });
+        // The upstream sends ONE text block whose deltas contain text +
+        // fenced HTML + closer + trailing text. We assert the SPP output
+        // splits this into separate Text / Html blocks.
+        acc.consume(AnthropicEvent::ContentBlockStart {
+            index: 0,
+            content_block: SseContentBlock::Text {
+                text: String::new(),
+            },
+        });
+        let mut events = Vec::new();
+        events.extend(acc.consume(AnthropicEvent::ContentBlockDelta {
+            index: 0,
+            delta: SseDelta::TextDelta {
+                text: "Here:\n```html-canvas\n<p>hi</p>\n```\n".into(),
+            },
+        }));
+        events.extend(acc.consume(AnthropicEvent::ContentBlockStop { index: 0 }));
+        events.extend(acc.consume(AnthropicEvent::MessageDelta {
+            delta: SseMessageDelta {
+                stop_reason: Some("end_turn".into()),
+                stop_sequence: None,
+            },
+            usage: SseUsageDelta {
+                output_tokens: Some(5),
+                ..Default::default()
+            },
+        }));
+        events.extend(acc.consume(AnthropicEvent::MessageStop));
+
+        let content_events: Vec<&StreamEvent> = events
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e,
+                    StreamEvent::ContentBlockStart { .. }
+                        | StreamEvent::ContentBlockDelta { .. }
+                        | StreamEvent::ContentBlockStop { .. }
+                )
+            })
+            .collect();
+
+        assert!(
+            matches!(
+                content_events[0],
+                StreamEvent::ContentBlockStart {
+                    block: ContentBlock::Text { text },
+                    ..
+                } if text.is_empty()
+            ),
+            "expected ContentBlockStart Text(\"\") first, got {:?}",
+            content_events[0]
+        );
+        assert!(
+            matches!(
+                content_events[1],
+                StreamEvent::ContentBlockDelta {
+                    delta: BlockDelta::TextDelta { text },
+                    ..
+                } if text == "Here:\n"
+            ),
+            "expected TextDelta(\"Here:\\n\"), got {:?}",
+            content_events[1]
+        );
+        assert!(
+            matches!(content_events[2], StreamEvent::ContentBlockStop { .. }),
+            "expected ContentBlockStop after text, got {:?}",
+            content_events[2]
+        );
+        assert!(
+            matches!(
+                content_events[3],
+                StreamEvent::ContentBlockStart {
+                    block: ContentBlock::Html { source, .. },
+                    ..
+                } if source.is_empty()
+            ),
+            "expected ContentBlockStart Html(\"\"), got {:?}",
+            content_events[3]
+        );
+        assert!(
+            matches!(
+                content_events[4],
+                StreamEvent::ContentBlockDelta {
+                    delta: BlockDelta::HtmlSourceDelta { source },
+                    ..
+                } if source == "<p>hi</p>\n"
+            ),
+            "expected HtmlSourceDelta(\"<p>hi</p>\\n\"), got {:?}",
+            content_events[4]
+        );
+        assert!(
+            matches!(content_events[5], StreamEvent::ContentBlockStop { .. }),
+            "expected ContentBlockStop after html, got {:?}",
+            content_events[5]
+        );
+
+        let out = acc.finish().unwrap();
+        assert_eq!(out.content.len(), 2);
+        match &out.content[0] {
+            ContentBlock::Text { text } => assert_eq!(text, "Here:\n"),
+            other => panic!("expected Text first, got {other:?}"),
+        }
+        match &out.content[1] {
+            ContentBlock::Html { source, .. } => assert_eq!(source, "<p>hi</p>\n"),
+            other => panic!("expected Html second, got {other:?}"),
         }
     }
 }

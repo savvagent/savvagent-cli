@@ -21,6 +21,8 @@
 //! - `SAVVAGENT_TOOL_GREP_BIN`  (default `savvagent-tool-grep` on $PATH)
 //! - `SAVVAGENT_TOOL_LSP_BIN`   (default `savvagent-tool-lsp` on $PATH)
 
+#![allow(clippy::collapsible_if)] // pre-existing debt; many sites under rustc 1.95 new lint
+
 rust_i18n::i18n!("locales", fallback = "en");
 
 #[cfg(test)]
@@ -245,6 +247,16 @@ async fn main() -> Result<()> {
         let indexes = Indexes::build(&registry)
             .await
             .unwrap_or_else(|e| panic!("plugin manifest conflict at startup: {e}"));
+
+        // Push plugin-contributed system-prompt segments to the host now that
+        // the enabled set is finalised. This must happen before the first turn
+        // so the model sees (e.g.) the html-canvas rendering instructions in
+        // its system prompt.
+        let startup_segments = registry.active_prompt_segments();
+        if let Some(host) = current_host(&host_slot).await {
+            host.set_prompt_segments(startup_segments);
+        }
+
         app.install_plugin_runtime(registry, indexes);
     }
 
@@ -648,6 +660,27 @@ async fn save_transcript_now(app: &App, host: &Arc<Host>) -> Result<PathBuf> {
     if app.entries.is_empty() {
         return Ok(PathBuf::new());
     }
+    // Collect interactive-state snapshots from every live canvas renderer
+    // and push them into the host's stored `Html` blocks before the
+    // transcript is serialized. The renderer's `ContentBlockId.0` equals
+    // the canvas's stream ordinal among top-level `Html` blocks, which is
+    // exactly the index `set_canvas_states` walks.
+    let states: Vec<(u32, String)> = app
+        .canvas_registry
+        .iter_renderers()
+        .filter_map(|(id, r)| {
+            r.snapshot_state().map(|bytes| {
+                use base64::Engine as _;
+                (
+                    id.0,
+                    base64::engine::general_purpose::STANDARD.encode(bytes),
+                )
+            })
+        })
+        .collect();
+    if !states.is_empty() {
+        host.set_canvas_states(&states).await;
+    }
     let path = app.transcript_path.read().await.clone();
     host.save_transcript(&path)
         .await
@@ -725,6 +758,38 @@ async fn dispatch_slash_command(
     if let (Some(reg), Some(idx)) = (&app.plugin_registry, &app.plugin_indexes) {
         let reg = reg.clone();
         let idx = idx.clone();
+
+        // Collect the suppress_prompt_segments list for this slash before
+        // dispatching. Look up under a brief synchronous lock; guards are
+        // dropped before any `.await` below, keeping async discipline.
+        let suppress: Vec<String> = {
+            let reg_guard = reg.read().await;
+            let idx_guard = idx.read().await;
+            idx_guard
+                .slash
+                .get(name_str)
+                .and_then(|pid| reg_guard.get(pid))
+                .and_then(|handle| handle.try_lock().ok().map(|g| g.manifest()))
+                .map(|m| {
+                    m.contributions
+                        .slash_commands
+                        .into_iter()
+                        .find(|s| s.name == name_str)
+                        .map(|s| s.suppress_prompt_segments)
+                        .unwrap_or_default()
+                })
+                .unwrap_or_default()
+            // reg_guard and idx_guard drop here
+        };
+        // If the slash spec suppresses any prompt segments, tell the host
+        // before dispatching so the next turn (which some slashes trigger
+        // immediately via Effect::RunTurn) omits those segments.
+        if !suppress.is_empty() {
+            if let Some(host) = current_host(host_slot).await {
+                host.set_turn_suppression(suppress);
+            }
+        }
+
         let effs_result = {
             let reg_guard = reg.read().await;
             let idx_guard = idx.read().await;
@@ -2424,7 +2489,143 @@ fn translate_turn_event_to_host_event(
         | TurnEvent::ToolCallDenied { .. }
         | TurnEvent::Cancelled { .. }
         | TurnEvent::AbortedAfterGrace { .. }
-        | TurnEvent::ResourceUpdated { .. } => None,
+        | TurnEvent::ResourceUpdated { .. }
+        | TurnEvent::HtmlBlockStart { .. }
+        | TurnEvent::HtmlBlockDelta { .. }
+        | TurnEvent::HtmlBlockStop { .. } => None,
+    }
+}
+
+/// Attempt to create a [`savvagent_plugin::ContentRenderer`] for the
+/// `Entry::Canvas` identified by `canvas_id` and register it in
+/// `app.canvas_registry`.
+///
+/// Called from the `run_app` event loop immediately after a
+/// `TurnEvent::HtmlBlockStop` is processed (the sync half — moving
+/// `source_preview` into `source` — already happened inside
+/// `App::handle_html_block_stop`). This is the async half because it
+/// needs to take read locks on the plugin indexes and registry.
+///
+/// Failures are warn-logged rather than propagated; the canvas entry
+/// stays visible in the conversation log with its `source` field
+/// populated even when no renderer is available (e.g. when the plugin
+/// is disabled or the index hasn't been built yet).
+async fn create_canvas_renderer(app: &mut App, canvas_id: savvagent_plugin::ContentBlockId) {
+    // Extract the finalized source from the entry.
+    let source = match app
+        .entries
+        .iter()
+        .find(|e| matches!(e, Entry::Canvas { id, .. } if *id == canvas_id))
+    {
+        Some(Entry::Canvas { source, .. }) => source.clone(),
+        _ => {
+            tracing::debug!(?canvas_id, "create_canvas_renderer: canvas entry not found");
+            return;
+        }
+    };
+
+    // Look up the plugin that owns the canonical html renderer.
+    let plugin_id = {
+        let Some(indexes_arc) = app.plugin_indexes.as_ref() else {
+            tracing::debug!("create_canvas_renderer: plugin_indexes not installed");
+            return;
+        };
+        let indexes = indexes_arc.read().await;
+        match indexes.content_renderer_for("html") {
+            Some(id) => id.clone(),
+            None => {
+                tracing::debug!("create_canvas_renderer: no html renderer registered");
+                return;
+            }
+        }
+        // indexes guard drops here
+    };
+
+    // Retrieve the plugin and call create_renderer (sync).
+    let renderer_result = {
+        let Some(registry_arc) = app.plugin_registry.as_ref() else {
+            tracing::debug!("create_canvas_renderer: plugin_registry not installed");
+            return;
+        };
+        let registry = registry_arc.read().await;
+        let Some(handle) = registry.get(&plugin_id) else {
+            tracing::warn!(
+                plugin_id = %plugin_id.as_str(),
+                "create_canvas_renderer: plugin not found in registry"
+            );
+            return;
+        };
+        // Lock the plugin and call create_renderer (sync, no await inside).
+        let guard = match handle.try_lock() {
+            Ok(g) => g,
+            Err(_) => {
+                tracing::warn!(
+                    plugin_id = %plugin_id.as_str(),
+                    "create_canvas_renderer: plugin mutex contended"
+                );
+                return;
+            }
+        };
+        guard.create_renderer("html", canvas_id, &source)
+        // guard + registry drop here
+    };
+
+    match renderer_result {
+        Ok(renderer) => {
+            app.canvas_registry.insert(canvas_id, renderer);
+            tracing::debug!(?canvas_id, "canvas renderer created and registered");
+        }
+        Err(err) => {
+            tracing::warn!(
+                ?canvas_id,
+                ?err,
+                "create_renderer failed; canvas stays as source"
+            );
+        }
+    }
+}
+
+/// Write the finalized canvas identified by `canvas_id` to
+/// `~/.savvagent/canvases/<unix>-<turn>-<block>.html`.
+///
+/// Called immediately after [`create_canvas_renderer`] succeeds so the
+/// export is gated on full block reception. Failures are warn-logged;
+/// the canvas entry in the conversation log is unaffected. Disable
+/// auto-export by toggling the `internal:html-canvas` plugin off via
+/// `~/.savvagent/plugins.toml`.
+fn auto_export_canvas(app: &App, canvas_id: savvagent_plugin::ContentBlockId, turn_id: u32) {
+    use crate::app::Entry;
+    use crate::plugin::builtin::html_canvas::auto_export::{
+        auto_export_path, canvases_dir, write_canvas,
+    };
+
+    let Some(base) = canvases_dir() else {
+        return;
+    };
+
+    // Retrieve the finalized source from the entry.
+    let source = match app
+        .entries
+        .iter()
+        .find(|e| matches!(e, Entry::Canvas { id, .. } if *id == canvas_id))
+    {
+        Some(Entry::Canvas { source, .. }) => source.clone(),
+        _ => {
+            tracing::debug!(?canvas_id, "auto_export_canvas: canvas entry not found");
+            return;
+        }
+    };
+
+    let unix_ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    let path = auto_export_path(&base, unix_ts, turn_id, canvas_id);
+    if let Err(err) = write_canvas(&path, &source) {
+        tracing::warn!(?err, ?path, "auto-export of canvas failed");
+    } else {
+        tracing::debug!(?path, "canvas auto-exported");
     }
 }
 
@@ -2448,6 +2649,66 @@ async fn maybe_emit_context_changed(app: &mut App, last_emitted: &mut u32) {
     .await
     {
         tracing::warn!(error = %err, "ContextSizeChanged dispatch failed");
+    }
+}
+
+/// Apply the effects a canvas renderer emitted in response to an input
+/// event. Phase 2.0 wires the two `OpenUrl` targets:
+///
+/// * `SystemBrowser` shells out to the OS opener (`xdg-open` / `open` /
+///   `start`); failures are warn-only so a missing opener never crashes the
+///   TUI. (Task 24 will consolidate this into an `open_in_browser` helper.)
+/// * `ContinueConversation` stages the URL into the prompt editor and notes
+///   it, leaving the user to review and submit — programmatic prompt
+///   submission (`Effect::PromptSend`) is still a stub, so we don't fabricate
+///   a turn here.
+///
+/// `Effect::Stack` is flattened recursively. Every other effect is logged and
+/// ignored for Phase 2.0 (canvases only emit `OpenUrl` today).
+async fn apply_canvas_effects(
+    app: &mut App,
+    _host_slot: &HostSlot,
+    effects: Vec<savvagent_plugin::Effect>,
+) {
+    for effect in effects {
+        match effect {
+            savvagent_plugin::Effect::OpenUrl { url, target } => match target {
+                savvagent_plugin::UrlTarget::SystemBrowser => {
+                    let opener = if cfg!(target_os = "macos") {
+                        "open"
+                    } else if cfg!(target_os = "windows") {
+                        "start"
+                    } else {
+                        "xdg-open"
+                    };
+                    match tokio::process::Command::new(opener).arg(&url).spawn() {
+                        Ok(_) => {
+                            app.push_note(format!("Opening {url} in browser"));
+                        }
+                        Err(err) => {
+                            tracing::warn!(error = %err, %url, "failed to open URL in browser");
+                            app.push_note(format!("Failed to open {url}: {err}"));
+                        }
+                    }
+                }
+                savvagent_plugin::UrlTarget::ContinueConversation => {
+                    // No programmatic submit path yet (`Effect::PromptSend`
+                    // is a stub), so stage the URL in the prompt editor for
+                    // the user to send. Documented Phase 2.0 behavior.
+                    app.input_textarea = make_input_textarea(std::iter::once(url.clone()));
+                    app.input_mode = InputMode::Editing;
+                    app.push_note(format!(
+                        "Staged \"{url}\" in the prompt — press Enter to send"
+                    ));
+                }
+            },
+            savvagent_plugin::Effect::Stack(inner) => {
+                Box::pin(apply_canvas_effects(app, _host_slot, inner)).await;
+            }
+            other => {
+                tracing::debug!(effect = ?other, "ignoring canvas effect (unhandled in Phase 2.0)");
+            }
+        }
     }
 }
 
@@ -2555,6 +2816,13 @@ async fn run_app(
             match msg {
                 WorkerMsg::Event(e) => {
                     let was_complete = matches!(e, TurnEvent::TurnComplete { .. });
+                    // Capture the canvas id before apply_turn_event consumes
+                    // the event and removes the index from html_block_index_to_id.
+                    let html_block_stop_id = if let TurnEvent::HtmlBlockStop { index } = &e {
+                        app.html_block_index_to_id.get(index).copied()
+                    } else {
+                        None
+                    };
                     // Translate the streaming TurnEvent before
                     // `apply_turn_event` (which consumes `e` by value)
                     // so the translator and the App mutation each get
@@ -2573,6 +2841,19 @@ async fn run_app(
                     );
                     app.apply_turn_event(e);
                     app.update_metrics();
+                    // If an HTML block just completed, try to create a renderer
+                    // for it via the plugin registry. This is the async half of
+                    // handle_html_block_stop — the sync half (preview→source
+                    // swap) already happened inside apply_turn_event.
+                    if let Some(canvas_id) = html_block_stop_id {
+                        create_canvas_renderer(app, canvas_id).await;
+                        // Auto-export: write the finalized canvas to
+                        // ~/.savvagent/canvases/<unix>-<turn>-<block>.html.
+                        // Runs after renderer creation so it only fires for
+                        // fully-received blocks. Disable by toggling the
+                        // internal:html-canvas plugin off via plugins.toml.
+                        auto_export_canvas(app, canvas_id, current_turn_id.unwrap_or(next_turn_id));
+                    }
                     if let Some(he) = host_event {
                         if let Err(err) =
                             crate::plugin::effects::dispatch_host_event(app, he, 0).await
@@ -2714,19 +2995,22 @@ async fn run_app(
         }
         let evt = event::read()?;
         // Mouse wheel ticks scroll the conversation log when the home screen
-        // is active (no plugin screen on top, no modal/file-picker). Other
-        // mouse events (clicks, drags) are ignored — see
-        // `log_scroll_offset_after_wheel` for the offset math.
+        // is active (no plugin screen on top, no modal/file-picker). A left
+        // click on a rendered canvas focuses it and routes a synthetic press
+        // (and the matching release) into the renderer. Other mouse events
+        // are ignored — see `log_scroll_offset_after_wheel` for the offset
+        // math.
         if let Event::Mouse(me) = &evt {
-            use crossterm::event::MouseEventKind;
+            use crossterm::event::{MouseButton as CtMouseButton, MouseEventKind as MEK};
+            // Scroll-wheel: only on the home editing screen.
             let on_home = app.screen_stack.is_empty()
                 && matches!(app.input_mode, InputMode::Editing)
                 && !app.is_file_picker_active
                 && !app.show_splash;
             if on_home {
                 let dir = match me.kind {
-                    MouseEventKind::ScrollUp => Some(app::WheelDirection::Up),
-                    MouseEventKind::ScrollDown => Some(app::WheelDirection::Down),
+                    MEK::ScrollUp => Some(app::WheelDirection::Up),
+                    MEK::ScrollDown => Some(app::WheelDirection::Down),
                     _ => None,
                 };
                 if let Some(direction) = dir {
@@ -2735,6 +3019,81 @@ async fn run_app(
                         direction,
                         MOUSE_WHEEL_SCROLL_STEP,
                     );
+                }
+            }
+            // Canvas click routing. Allowed whenever no plugin screen /
+            // file-picker / splash is up — including while already focused on
+            // a canvas (`InputMode::Canvas`), so clicks can move between
+            // canvases. Click-only for Phase 2.0: we route Press/Release but
+            // NOT Move/Drag, because each dispatch re-parses the document and
+            // pointer-move spam would tank performance. `a:hover` is therefore
+            // not supported yet; revisit if hover becomes a requirement.
+            let canvas_routable = app.screen_stack.is_empty()
+                && !app.is_file_picker_active
+                && !app.show_splash
+                && app.canvas_registry.image_protocol_available();
+            let portable_kind = match me.kind {
+                MEK::Down(_) => Some(savvagent_plugin::MouseEventKind::Press),
+                MEK::Up(_) => Some(savvagent_plugin::MouseEventKind::Release),
+                _ => None,
+            };
+            if canvas_routable {
+                if let Some(kind) = portable_kind {
+                    if let Some((cw, ch)) = app.canvas_registry.image_cell_size() {
+                        let cell = savvagent_canvas::CellPixelSize {
+                            width: cw,
+                            height: ch,
+                        };
+                        if let Some((cid, px, py)) =
+                            app::canvas_hit(&app.canvas_click_targets, me.column, me.row, cell)
+                        {
+                            // A press moves focus into the clicked canvas
+                            // before the event is delivered, so the renderer
+                            // sees the click as the focused element.
+                            if matches!(kind, savvagent_plugin::MouseEventKind::Press)
+                                && !app.is_canvas_focused(cid)
+                            {
+                                app.focus_canvas(cid, None);
+                            }
+                            let button = match me.kind {
+                                MEK::Down(b) | MEK::Up(b) | MEK::Drag(b) => Some(match b {
+                                    CtMouseButton::Left => savvagent_plugin::MouseButton::Left,
+                                    CtMouseButton::Right => savvagent_plugin::MouseButton::Right,
+                                    CtMouseButton::Middle => savvagent_plugin::MouseButton::Middle,
+                                }),
+                                _ => None,
+                            };
+                            let portable = savvagent_plugin::MouseEventPortable {
+                                kind,
+                                button,
+                                x_pixel: px,
+                                y_pixel: py,
+                                modifiers: crate::plugin::convert::modifiers_to_portable(
+                                    me.modifiers,
+                                ),
+                            };
+                            // Borrow the renderer mutably only for the dispatch
+                            // await; `effects` is owned afterwards so no borrow
+                            // of `app` is held across `apply_canvas_effects`.
+                            let effects = if let Some(renderer) = app.canvas_registry.get_mut(cid) {
+                                match renderer
+                                    .dispatch(savvagent_plugin::InputEvent::Mouse(portable))
+                                    .await
+                                {
+                                    Ok(outcome) => Some(outcome.effects),
+                                    Err(err) => {
+                                        tracing::warn!(error = %err, "canvas dispatch failed");
+                                        None
+                                    }
+                                }
+                            } else {
+                                None
+                            };
+                            if let Some(effects) = effects {
+                                apply_canvas_effects(app, &host_slot, effects).await;
+                            }
+                        }
+                    }
                 }
             }
             continue;
@@ -3371,7 +3730,191 @@ async fn run_app(
                 }
                 _ => {}
             },
+            // Canvas focus: built-in keys (Esc / Tab / BackTab / Ctrl-J /
+            // Ctrl-K / Ctrl-O) take precedence over plugin
+            // `OnFocusedCanvas` bindings, which in turn precede a raw key
+            // dispatch to the renderer. See `handle_canvas_key`.
+            InputMode::Canvas { id, element_idx } => {
+                handle_canvas_key(app, *key, id, element_idx, &host_slot).await;
+            }
         }
+    }
+}
+
+/// Direction of canvas-to-canvas traversal (`Ctrl-J` / `Ctrl-K`).
+const CANVAS_NEXT: i32 = 1;
+const CANVAS_PREV: i32 = -1;
+
+/// Return the id of the canvas adjacent to `current` in `entries` order,
+/// stepping by `delta` (`+1` next, `-1` previous) with wrap-around.
+/// Returns `None` when there are no canvases, and `Some(current)` when it
+/// is the only canvas. Non-canvas entries are skipped.
+fn adjacent_canvas(
+    entries: &[Entry],
+    current: savvagent_plugin::ContentBlockId,
+    delta: i32,
+) -> Option<savvagent_plugin::ContentBlockId> {
+    let ids: Vec<savvagent_plugin::ContentBlockId> = entries
+        .iter()
+        .filter_map(|e| match e {
+            Entry::Canvas { id, .. } => Some(*id),
+            _ => None,
+        })
+        .collect();
+    if ids.is_empty() {
+        return None;
+    }
+    let pos = ids.iter().position(|x| *x == current)?;
+    let len = ids.len() as i32;
+    let next = (pos as i32 + delta).rem_euclid(len) as usize;
+    Some(ids[next])
+}
+
+/// Compute the next focusable-element index after stepping `current` by
+/// `delta` over `len` elements, wrapping. `None` (nothing focused) steps
+/// to the first (`delta >= 0`) or last (`delta < 0`) element. Returns
+/// `None` when there are no focusable elements.
+fn cycle_index(current: Option<u32>, len: usize, delta: i32) -> Option<u32> {
+    if len == 0 {
+        return None;
+    }
+    let len_i = len as i32;
+    let next = match current {
+        Some(c) => (c as i32 + delta).rem_euclid(len_i),
+        None if delta >= 0 => 0,
+        None => len_i - 1,
+    };
+    Some(next as u32)
+}
+
+/// Handle a key while a canvas holds focus. Precedence:
+/// 1. Built-in keys (Esc, Tab, BackTab, Ctrl-J/K, Ctrl-O).
+/// 2. Plugin `KeyScope::OnFocusedCanvas` bindings.
+/// 3. Raw key dispatch to the focused renderer.
+async fn handle_canvas_key(
+    app: &mut App,
+    key: crossterm::event::KeyEvent,
+    id: savvagent_plugin::ContentBlockId,
+    element_idx: Option<u32>,
+    host_slot: &HostSlot,
+) {
+    use crossterm::event::{KeyCode, KeyModifiers};
+
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+
+    // --- 1. Built-in keys (always win) ---
+    match key.code {
+        KeyCode::Esc => {
+            app.unfocus_canvas();
+            return;
+        }
+        KeyCode::Tab => {
+            let len = app
+                .canvas_registry
+                .get_mut(id)
+                .map(|r| r.focusable_elements().len())
+                .unwrap_or(0);
+            let next = cycle_index(element_idx, len, 1);
+            if let Some(r) = app.canvas_registry.get_mut(id) {
+                r.set_focus(next);
+            }
+            app.set_canvas_element(next);
+            return;
+        }
+        KeyCode::BackTab => {
+            let len = app
+                .canvas_registry
+                .get_mut(id)
+                .map(|r| r.focusable_elements().len())
+                .unwrap_or(0);
+            let next = cycle_index(element_idx, len, -1);
+            if let Some(r) = app.canvas_registry.get_mut(id) {
+                r.set_focus(next);
+            }
+            app.set_canvas_element(next);
+            return;
+        }
+        KeyCode::Char('j') if ctrl => {
+            if let Some(next) = adjacent_canvas(&app.entries, id, CANVAS_NEXT) {
+                app.focus_canvas(next, None);
+            }
+            return;
+        }
+        KeyCode::Char('k') if ctrl => {
+            if let Some(prev) = adjacent_canvas(&app.entries, id, CANVAS_PREV) {
+                app.focus_canvas(prev, None);
+            }
+            return;
+        }
+        KeyCode::Char('o') if ctrl => {
+            // Open the focused canvas's final source in the system browser.
+            let source = app.entries.iter().find_map(|e| match e {
+                Entry::Canvas {
+                    id: eid, source, ..
+                } if *eid == id => Some(source.clone()),
+                _ => None,
+            });
+            match source {
+                Some(source) => {
+                    use crate::plugin::builtin::html_canvas::open_in_browser;
+                    match open_in_browser::write_temp_html(id, &source) {
+                        Ok(path) => match open_in_browser::shell_open(&path) {
+                            Ok(()) => app.push_note(format!(
+                                "Opening canvas in browser ({})",
+                                path.display()
+                            )),
+                            Err(err) => {
+                                tracing::warn!(error = %err, "failed to open canvas in browser");
+                                app.push_note(format!("Failed to open canvas: {err}"));
+                            }
+                        },
+                        Err(err) => {
+                            tracing::warn!(error = %err, "failed to write canvas temp file");
+                            app.push_note(format!("Failed to write canvas file: {err}"));
+                        }
+                    }
+                }
+                None => app.push_note("No source available for this canvas yet".to_string()),
+            }
+            return;
+        }
+        _ => {}
+    }
+
+    // --- 2. Plugin OnFocusedCanvas bindings (built-in keys already missed) ---
+    let portable = crate::plugin::convert::key_event_to_portable(key);
+    if let (Some(_reg), Some(idx)) = (&app.plugin_registry, &app.plugin_indexes) {
+        let action = {
+            let idx_guard = idx.read().await;
+            let router = crate::plugin::keybindings::KeybindingRouter::new(&idx_guard);
+            router.route_canvas(&portable)
+        };
+        if let Some(action) = action {
+            dispatch_bound_action(app, action).await;
+            return;
+        }
+    }
+
+    // --- 3. Raw key dispatch to the renderer ---
+    // Borrow the renderer mutably only for the dispatch await; `effects`
+    // is owned afterwards so no borrow of `app` is held across
+    // `apply_canvas_effects` (mirrors the mouse handler).
+    let effects = if let Some(renderer) = app.canvas_registry.get_mut(id) {
+        match renderer
+            .dispatch(savvagent_plugin::InputEvent::Key(portable))
+            .await
+        {
+            Ok(outcome) => Some(outcome.effects),
+            Err(err) => {
+                tracing::warn!(error = %err, "canvas key dispatch failed");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    if let Some(effects) = effects {
+        apply_canvas_effects(app, host_slot, effects).await;
     }
 }
 
@@ -3986,5 +4529,196 @@ anthropic = "from-models-toml"
         let (model, warning) = resolve_initial_model_for_with_caps(&anthropic_spec(), None);
         assert_eq!(model, "from-routing-toml");
         assert!(warning.is_none());
+    }
+}
+
+#[cfg(test)]
+mod canvas_key_tests {
+    use super::*;
+    use async_trait::async_trait;
+    use savvagent_plugin::{
+        ContentBlockId, ContentRenderer, FocusableElement, Frame, PixelFormat, PixelSize, Rect,
+    };
+
+    /// Build an empty `App` for canvas-key tests.
+    fn build_app() -> App {
+        App::new("test-model".into(), PathBuf::from("/tmp"), "en".to_string())
+    }
+
+    /// Empty host slot — Esc/Tab paths never touch it.
+    fn empty_host_slot() -> HostSlot {
+        Arc::new(RwLock::new(None))
+    }
+
+    fn key(code: crossterm::event::KeyCode) -> crossterm::event::KeyEvent {
+        crossterm::event::KeyEvent::new(code, crossterm::event::KeyModifiers::NONE)
+    }
+
+    /// Stub renderer exposing `n` focusable elements and recording the
+    /// last `set_focus` call so Tab traversal can be asserted.
+    struct StubRenderer {
+        id: ContentBlockId,
+        n: usize,
+        last_focus: Option<u32>,
+    }
+
+    #[async_trait]
+    impl ContentRenderer for StubRenderer {
+        fn id(&self) -> ContentBlockId {
+            self.id
+        }
+        fn render(&mut self, _size: PixelSize) -> Frame {
+            Frame {
+                width: 1,
+                height: 1,
+                format: PixelFormat::Rgba8,
+                bytes: vec![0, 0, 0, 0],
+            }
+        }
+        fn focusable_elements(&self) -> Vec<FocusableElement> {
+            (0..self.n)
+                .map(|i| FocusableElement {
+                    id: format!("el{i}"),
+                    bounds: Rect {
+                        x: 0,
+                        y: 0,
+                        width: 1,
+                        height: 1,
+                    },
+                })
+                .collect()
+        }
+        fn set_focus(&mut self, index: Option<u32>) {
+            self.last_focus = index;
+        }
+    }
+
+    fn canvas(id: u32) -> Entry {
+        Entry::Canvas {
+            id: ContentBlockId(id),
+            source: format!("<p>{id}</p>"),
+            source_preview: None,
+        }
+    }
+
+    #[test]
+    fn adjacent_canvas_wraps_forward_and_back() {
+        // 3 canvases interleaved with non-canvas entries.
+        let entries = vec![
+            Entry::Note("intro".into()),
+            canvas(0),
+            Entry::Note("mid".into()),
+            canvas(5),
+            canvas(9),
+            Entry::Note("outro".into()),
+        ];
+        let next = |cur: u32| adjacent_canvas(&entries, ContentBlockId(cur), CANVAS_NEXT);
+        let prev = |cur: u32| adjacent_canvas(&entries, ContentBlockId(cur), CANVAS_PREV);
+        assert_eq!(next(0), Some(ContentBlockId(5)));
+        assert_eq!(next(5), Some(ContentBlockId(9)));
+        assert_eq!(next(9), Some(ContentBlockId(0)), "wraps to first");
+        assert_eq!(prev(0), Some(ContentBlockId(9)), "wraps to last");
+        assert_eq!(prev(9), Some(ContentBlockId(5)));
+    }
+
+    #[test]
+    fn adjacent_canvas_single_returns_itself_and_empty_is_none() {
+        let one = vec![canvas(3)];
+        assert_eq!(
+            adjacent_canvas(&one, ContentBlockId(3), CANVAS_NEXT),
+            Some(ContentBlockId(3))
+        );
+        let none: Vec<Entry> = vec![Entry::Note("x".into())];
+        assert_eq!(adjacent_canvas(&none, ContentBlockId(0), CANVAS_NEXT), None);
+    }
+
+    #[test]
+    fn cycle_index_wraps_and_handles_none() {
+        assert_eq!(cycle_index(None, 3, 1), Some(0), "None forward -> first");
+        assert_eq!(cycle_index(None, 3, -1), Some(2), "None back -> last");
+        assert_eq!(cycle_index(Some(0), 3, 1), Some(1));
+        assert_eq!(cycle_index(Some(2), 3, 1), Some(0), "forward wraps");
+        assert_eq!(cycle_index(Some(0), 3, -1), Some(2), "back wraps");
+        assert_eq!(cycle_index(Some(1), 0, 1), None, "no elements -> None");
+        assert_eq!(cycle_index(None, 0, 1), None);
+    }
+
+    #[tokio::test]
+    async fn esc_returns_to_editing() {
+        let mut app = build_app();
+        let id = app.canvas_registry.allocate_id();
+        app.entries.push(canvas(id.0));
+        app.focus_canvas(id, None);
+        assert!(app.is_canvas_focused(id));
+        handle_canvas_key(&mut app, key(KeyCode::Esc), id, None, &empty_host_slot()).await;
+        assert!(matches!(app.input_mode, InputMode::Editing));
+    }
+
+    #[tokio::test]
+    async fn tab_advances_element_index_and_sets_renderer_focus() {
+        let mut app = build_app();
+        let id = app.canvas_registry.allocate_id();
+        app.canvas_registry.insert(
+            id,
+            Box::new(StubRenderer {
+                id,
+                n: 3,
+                last_focus: None,
+            }),
+        );
+        app.entries.push(canvas(id.0));
+        app.focus_canvas(id, None);
+
+        // None -> 0
+        handle_canvas_key(&mut app, key(KeyCode::Tab), id, None, &empty_host_slot()).await;
+        assert!(matches!(
+            app.input_mode,
+            InputMode::Canvas {
+                element_idx: Some(0),
+                ..
+            }
+        ));
+
+        // 0 -> 1
+        handle_canvas_key(&mut app, key(KeyCode::Tab), id, Some(0), &empty_host_slot()).await;
+        assert!(matches!(
+            app.input_mode,
+            InputMode::Canvas {
+                element_idx: Some(1),
+                ..
+            }
+        ));
+
+        // BackTab 1 -> 0
+        handle_canvas_key(
+            &mut app,
+            key(KeyCode::BackTab),
+            id,
+            Some(1),
+            &empty_host_slot(),
+        )
+        .await;
+        assert!(matches!(
+            app.input_mode,
+            InputMode::Canvas {
+                element_idx: Some(0),
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn ctrl_j_jumps_to_next_canvas() {
+        let mut app = build_app();
+        let a = app.canvas_registry.allocate_id();
+        let b = app.canvas_registry.allocate_id();
+        app.entries.push(canvas(a.0));
+        app.entries.push(canvas(b.0));
+        app.focus_canvas(a, None);
+
+        let mut k = key(KeyCode::Char('j'));
+        k.modifiers = crossterm::event::KeyModifiers::CONTROL;
+        handle_canvas_key(&mut app, k, a, None, &empty_host_slot()).await;
+        assert!(app.is_canvas_focused(b), "Ctrl-J moves to the next canvas");
     }
 }

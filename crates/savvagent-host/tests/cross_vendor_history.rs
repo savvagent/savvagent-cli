@@ -17,6 +17,8 @@
 //! Tests use the axum fake-vendor servers in `support/mod.rs`; live-vendor
 //! twins are marked `#[ignore]` so PR CI does not need credentials.
 
+#![allow(clippy::collapsible_if)]
+
 mod support;
 
 use savvagent_mcp::ProviderHandler;

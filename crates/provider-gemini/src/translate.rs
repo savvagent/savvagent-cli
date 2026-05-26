@@ -226,6 +226,9 @@ fn push_part_for_block(
             thought_signature: signature.clone(),
             ..api::Part::default()
         }),
+        // Html source is echoed to Gemini as plain text so the model can
+        // reference its own prior canvas output. The host is what renders.
+        spp::ContentBlock::Html { source, .. } => out.push(api::Part::text(source.clone())),
     }
 }
 

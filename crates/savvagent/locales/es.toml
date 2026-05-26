@@ -38,6 +38,7 @@ list-models-fell-back         = "%{name}: catálogo de modelos en vivo no dispon
 list-models-empty             = "%{name}: el proveedor devolvió una lista de modelos vacía; mostrando la lista de respaldo integrada."
 not-connected-tools           = "No conectado — no hay herramientas que listar."
 no-tools-registered           = "No hay herramientas registradas."
+open-url-failed               = "Error al abrir la URL: %{url}"
 provider-api-key-missing      = "La clave de API de %{name} no se encontró en el keyring. Ejecuta `/connect` desde la vista de inicio para ingresarla."
 provider-endpoint-unreachable = "El endpoint de %{name} no está accesible. Inicia `ollama serve` e inténtalo de nuevo."
 provider-invalid-id           = "Id de proveedor inválido desde el plugin: %{id}"

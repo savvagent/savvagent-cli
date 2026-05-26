@@ -13,6 +13,17 @@ use savvagent_plugin::{
     ThemeColor,
 };
 
+/// Convert crossterm [`KeyModifiers`] into the WIT-portable [`KeyMods`].
+/// Shared by key-event and mouse-event translation.
+pub fn modifiers_to_portable(m: KeyModifiers) -> KeyMods {
+    KeyMods {
+        ctrl: m.contains(KeyModifiers::CONTROL),
+        alt: m.contains(KeyModifiers::ALT),
+        shift: m.contains(KeyModifiers::SHIFT),
+        meta: m.contains(KeyModifiers::SUPER),
+    }
+}
+
 /// Convert a crossterm `KeyEvent` into the WIT-portable shape used by
 /// the plugin runtime. Unknown key codes map to `KeyCodePortable::Unknown`.
 pub fn key_event_to_portable(e: KeyEvent) -> KeyEventPortable {
@@ -38,12 +49,7 @@ pub fn key_event_to_portable(e: KeyEvent) -> KeyEventPortable {
             KeyCode::Null => KeyCodePortable::Unknown,
             _ => KeyCodePortable::Unknown,
         },
-        modifiers: KeyMods {
-            ctrl: e.modifiers.contains(KeyModifiers::CONTROL),
-            alt: e.modifiers.contains(KeyModifiers::ALT),
-            shift: e.modifiers.contains(KeyModifiers::SHIFT),
-            meta: e.modifiers.contains(KeyModifiers::SUPER),
-        },
+        modifiers: modifiers_to_portable(e.modifiers),
     }
 }
 

@@ -20,6 +20,7 @@
 //! paths resolve against the root, and symlink escapes are caught by
 //! `std::fs::canonicalize`.
 
+#![allow(clippy::collapsible_if)] // pre-existing debt; many sites under rustc 1.95 new lint
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 

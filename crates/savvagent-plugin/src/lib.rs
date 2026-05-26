@@ -34,13 +34,17 @@ pub use styled::{StyledLine, StyledSpan, TextMods, ThemeColor};
 
 /// Closed-vocabulary effect and bound-action types returned by plugin callbacks.
 pub mod effect;
-pub use effect::{BoundAction, Effect};
+pub use effect::{BoundAction, Effect, UrlTarget};
+
+/// System-prompt segment contributions.
+pub mod prompt;
+pub use prompt::SystemPromptSegment;
 
 /// Plugin manifest, contributions bundle, and per-kind spec types.
 pub mod manifest;
 pub use manifest::{
-    Contributions, KeyScope, KeybindingSpec, Manifest, PluginKind, ProviderSpec, ScreenLayout,
-    ScreenSpec, SlashSpec, SlotSpec, ToolSummarySpec,
+    ContentRendererSpec, Contributions, KeyScope, KeybindingSpec, Manifest, PluginKind,
+    ProviderSpec, ScreenLayout, ScreenSpec, SlashSpec, SlotSpec, ToolSummarySpec,
 };
 
 /// The [`Plugin`] trait — the WIT-portable entry point each plugin implements.
@@ -50,6 +54,13 @@ pub use plugin::Plugin;
 /// The [`Screen`] trait — per-open instances pushed onto the runtime's screen stack.
 pub mod screen;
 pub use screen::Screen;
+
+/// Content renderer trait surface (HTML canvas etc.).
+pub mod content;
+pub use content::{
+    ContentBlockId, ContentRenderer, FocusKind, FocusableElement, Frame, InputEvent, InputOutcome,
+    MouseButton, MouseEventKind, MouseEventPortable, PixelFormat, PixelSize, Rect,
+};
 
 /// The [`InProcessToolHandler`] trait — savvagent-internal trait for tools
 /// whose implementation runs on the calling tokio runtime.
@@ -116,5 +127,76 @@ mod trait_smoke {
             p.summarize_tool_result("read_file", "{\"bytes\":12}")
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn dummy_plugin_create_renderer_default_returns_not_found() {
+        use crate::content::ContentBlockId;
+
+        let p = DummyPlugin;
+        let r = p.create_renderer("html", ContentBlockId(0), "<p>x</p>");
+        assert!(
+            matches!(r, Err(PluginError::ContentRendererNotFound(ref t)) if t == "html"),
+            "default impl should return ContentRendererNotFound",
+        );
+    }
+
+    #[test]
+    fn effect_open_url_variants() {
+        use crate::effect::{Effect, UrlTarget};
+        let e = Effect::OpenUrl {
+            url: "https://example.com".into(),
+            target: UrlTarget::SystemBrowser,
+        };
+        match e {
+            Effect::OpenUrl { url, target } => {
+                assert_eq!(url, "https://example.com");
+                assert_eq!(target, UrlTarget::SystemBrowser);
+            }
+            _ => panic!("expected OpenUrl"),
+        }
+    }
+
+    #[tokio::test]
+    async fn default_snapshot_returns_none_and_restore_is_ok() {
+        use crate::content::{ContentBlockId, ContentRenderer, Frame, PixelFormat, PixelSize};
+
+        struct Stub;
+        #[async_trait::async_trait]
+        impl ContentRenderer for Stub {
+            fn id(&self) -> ContentBlockId {
+                ContentBlockId(0)
+            }
+            fn render(&mut self, _: PixelSize) -> Frame {
+                Frame {
+                    width: 1,
+                    height: 1,
+                    format: PixelFormat::Rgba8,
+                    bytes: vec![0, 0, 0, 0],
+                }
+            }
+        }
+
+        let mut s = Stub;
+        assert!(s.snapshot_state().is_none());
+        assert!(s.restore_state(b"anything").is_ok());
+    }
+
+    #[test]
+    fn frame_round_trips_through_pixel_format() {
+        use crate::content::{Frame, PixelFormat, PixelSize};
+        let frame = Frame {
+            width: 2,
+            height: 1,
+            format: PixelFormat::Rgba8,
+            bytes: vec![255, 0, 0, 255, 0, 0, 255, 255],
+        };
+        assert_eq!(frame.width, 2);
+        assert_eq!(frame.bytes.len(), 8);
+        let size = PixelSize {
+            width: 100,
+            height: 50,
+        };
+        assert_eq!(size.width * size.height, 5_000);
     }
 }

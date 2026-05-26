@@ -93,6 +93,113 @@ boundary changes and PATCH captures fixes).
   contract so Stop hooks can detect "the agent already tried to stop
   once" once savvagent gains a re-run-on-Stop-block mechanism.
 
+## 0.17.0 - unreleased
+
+> Part of the inline HTML canvas initiative. Per the repo's multi-phase
+> release convention (`feedback_phase_release_rollup`), **no git tag is
+> pushed for 0.17.0** — the final tag (v0.18.0) goes up after Phase 2
+> (mouse + keyboard interaction) lands. See
+> `docs/superpowers/specs/2026-05-21-inline-html-canvas-design.md` and
+> `docs/superpowers/plans/2026-05-21-inline-html-canvas-phase-1.md`.
+
+### Added
+
+- **SPP v0.2.0**: new `ContentBlock::Html { source }` content block and
+  `BlockDelta::HtmlSourceDelta { source }` stream delta. Additive: v0.1.0
+  conformance is preserved.
+- **`savvagent-fence` crate**: streaming parser that extracts
+  ```` ```html-canvas ```` fenced blocks from model text output. Wired
+  into all four providers (`provider-anthropic`, `provider-gemini`,
+  `provider-openai`, `provider-local`).
+- **`savvagent-canvas` crate**: Blitz-backed `HtmlCanvas` implementing
+  `ContentRenderer` for static rendering (Phase 1). Pinned to
+  `blitz-{dom,html,paint,traits} = 0.3.0-alpha.4` +
+  `anyrender 0.10` / `anyrender_vello_cpu 0.12` / `peniko 0.6`. Includes
+  a subset validator that emits `tracing::warn!` for elements outside
+  the canvas subset (e.g., `<script>`, `<iframe>`, `<details>` with its
+  Phase 1 paint-regardless-of-open quirk).
+- **Plugin trait surface extensions** (`savvagent-plugin`):
+  `ContentRenderer` trait + supporting types (`Frame`, `PixelSize`,
+  `PixelFormat`, `ContentBlockId`, `InputEvent`, `MouseEventPortable`,
+  `FocusableElement`, `InputOutcome`, `Rect`, `FocusKind`,
+  `MouseEventKind`, `MouseButton`); `Plugin::create_renderer` factory;
+  `Contributions::content_renderers` + `Contributions::prompt_segments`;
+  `SlashSpec::suppress_prompt_segments`;
+  `Effect::OpenUrl { url, target }` + `UrlTarget`; `SystemPromptSegment`;
+  `PluginError::ContentRendererNotFound`.
+- **Host prompt-segment composition** (`savvagent-host`):
+  `Host::set_prompt_segments` and `Host::set_turn_suppression` allow
+  the TUI to compose plugin-contributed `SystemPromptSegment`s into
+  the model's system prompt, with per-slash suppression for slashes
+  whose output is destined for non-canvas surfaces.
+- **`internal:html-canvas` built-in plugin**: claims SPP `"html"` blocks
+  as the canonical renderer; contributes the default system prompt
+  segment instructing models to use ```` ```html-canvas ```` fences for
+  structured documents; ships the `/save-canvas [path] [--block N]
+  [--open]` slash command.
+- **Auto-export**: every finalized HTML canvas is written to
+  `~/.savvagent/canvases/<unix>-<turn>-<block>.html` (mode 0o600,
+  directory 0o700). Disable by toggling the `internal:html-canvas`
+  plugin off in `plugins.toml`; there is no separate auto-export
+  toggle in v0.17.0.
+- **TUI inline canvas rendering**: `Entry::Canvas` variant +
+  `CanvasRegistry` on `App` holds live renderer instances; rendering
+  uses `ratatui-image 11.0.2` (kitty / iTerm2 / WezTerm / Ghostty /
+  sixel). Streaming HTML blocks show a typewriter-style source preview
+  during stream and swap to the rendered canvas on `ContentBlockStop`.
+  Terminals without an image protocol show source code with a banner.
+- **Docs**: `docs/canvas-terminal-compat.md` (supported terminals +
+  tmux passthrough setup). README updated with the inline HTML
+  rendering blurb, `/save-canvas` row, and `~/.savvagent/canvases/`
+  persistence entry.
+
+### Changed
+
+- **MSRV bump**: workspace `rust-version` raised from `1.85` to `1.89`
+  to accommodate Blitz's transitive deps (notably `stylo`).
+- **Workspace deps**: added `savvagent-fence`, `savvagent-canvas`,
+  `blitz-dom`, `blitz-html`, `blitz-paint`, `blitz-traits`, `anyrender`,
+  `anyrender_vello_cpu`, `peniko`, `ratatui-image`, `image`.
+- **`ratatui-image` features**: `chafa-dyn` is disabled (libchafa not
+  required); `crossterm` + `image-defaults` retain sixel / kitty /
+  iTerm2 / halfblocks support. Terminals with sixel patches (including
+  Alacritty-with-sixel) work via the crossterm backend.
+- **Anthropic stream translator**: introduced a separate
+  SPP-output block-index space (`upstream_to_local` map) so a single
+  upstream Text block can fan out into multiple SPP Text/Html blocks
+  across fence transitions. `ContentBlockStart` for Text is now
+  emitted lazily on the first delta to keep the wire shape consistent.
+
+### Fixed
+
+- `savvagent-fence::finish` correctly handles the closing fence
+  arriving without a trailing newline (was incorrectly setting
+  `unclosed_fence: true`).
+- `savvagent-fence::push` eagerly flushes partial-line tails that
+  provably can't form a fence-marker prefix; per-token streaming no
+  longer stalls until a newline.
+- `provider-local::translate` no longer drops `ContentBlock::Html`
+  blocks from echoed conversation history (multi-turn canvas
+  conversations against Ollama preserve prior canvas content).
+- `HtmlCanvas` uses `blitz_dom::StyleThreading::Sequential` to prevent
+  Blitz's default Parallel threading from panicking against Stylo's
+  global thread pool under concurrent renders (Blitz #430).
+- `HtmlCanvas::render` clamps width and natural-height to
+  `u16::MAX` and logs `tracing::warn!` to avoid silent truncation
+  inside `vello_cpu`'s u16 dimensions.
+
+### Notes
+
+- Phase 1 is static rendering only — no interactivity inside the
+  canvas. Phase 2 will add mouse + keyboard interaction, focus
+  management, soft freeze, and the `Ctrl-O` open-in-browser
+  keybinding. Phase 2 will ship as v0.18.0 and is the release that
+  carries the v0.18.0 git tag (per the multi-phase rollup
+  convention).
+- Pre-existing `clippy::collapsible_if` violations across the workspace
+  are temporarily allowed at the crate level under rustc 1.95's
+  enhanced lint stringency. To be cleaned up in a follow-up pass.
+
 ## 0.16.1 - 2026-05-21
 
 ### Added

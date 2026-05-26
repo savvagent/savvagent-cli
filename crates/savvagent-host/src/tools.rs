@@ -993,6 +993,75 @@ fn render_result_payload(result: &rmcp::model::CallToolResult) -> String {
     out
 }
 
+/// Walk a tool result's content array and produce the `ContentBlock`
+/// sequence for the `ToolResult.content` field. Text items (and
+/// `structured_content`) concatenate into a single leading
+/// `ContentBlock::Text`; each `text/html` embedded resource becomes
+/// its own `ContentBlock::Html { source }`, in document order.
+///
+/// Tool-emitted HTML carrier: an MCP embedded resource with
+/// `mimeType: "text/html"` (rmcp 1.6.0 has no native html content type).
+pub(crate) fn tool_result_to_blocks(
+    result: &rmcp::model::CallToolResult,
+) -> Vec<savvagent_protocol::ContentBlock> {
+    use savvagent_protocol::ContentBlock;
+    let mut out = Vec::new();
+    let mut text_buf = String::new();
+
+    // structured_content (if any) flattens to text, same as today.
+    if let Some(v) = &result.structured_content {
+        text_buf
+            .push_str(&serde_json::to_string(v).unwrap_or_else(|_| "<unrenderable JSON>".into()));
+    }
+
+    for c in &result.content {
+        if let Some(t) = c.as_text() {
+            if !text_buf.is_empty() {
+                text_buf.push('\n');
+            }
+            text_buf.push_str(&t.text);
+        } else if let Some(res) = c.as_resource() {
+            // text/html embedded resource → Html block.
+            if let rmcp::model::ResourceContents::TextResourceContents {
+                mime_type, text, ..
+            } = &res.resource
+            {
+                if mime_type.as_deref() == Some("text/html") {
+                    // Flush any pending text first to preserve order.
+                    if !text_buf.is_empty() {
+                        out.push(ContentBlock::Text {
+                            text: std::mem::take(&mut text_buf),
+                        });
+                    }
+                    out.push(ContentBlock::Html {
+                        source: text.clone(),
+                        state: None,
+                    });
+                    continue;
+                }
+                // Non-html text resource: fold into the text buffer.
+                if !text_buf.is_empty() {
+                    text_buf.push('\n');
+                }
+                text_buf.push_str(text);
+            }
+        }
+        // Image/Audio/ResourceLink: ignored for block production (today's
+        // behavior ignores non-text too). Don't add handling — YAGNI.
+    }
+    if !text_buf.is_empty() {
+        out.push(ContentBlock::Text { text: text_buf });
+    }
+    // Guarantee at least one block so ToolResult.content is never empty
+    // (matches today's invariant of always having a Text block).
+    if out.is_empty() {
+        out.push(ContentBlock::Text {
+            text: String::new(),
+        });
+    }
+    out
+}
+
 fn input_schema_value(arc: Arc<rmcp::model::JsonObject>) -> rmcp::model::JsonObject {
     Arc::try_unwrap(arc).unwrap_or_else(|a| (*a).clone())
 }
@@ -1013,21 +1082,34 @@ fn discriminant(v: &Value) -> &'static str {
 pub(crate) struct ToolCallOutcome {
     /// True if the tool reported failure or transport error.
     pub is_error: bool,
-    /// Text payload to embed in a `tool_result` content block.
+    /// Text payload for TUI events and the `ToolCall.result` display field.
     pub payload: String,
+    /// Structured content blocks for the message-history `ToolResult`. A
+    /// leading `Text` block plus any `text/html` embedded resources as
+    /// `Html` blocks. For error/transport paths this is a single `Text`
+    /// block wrapping `payload`.
+    pub blocks: Vec<savvagent_protocol::ContentBlock>,
 }
 
 impl ToolCallOutcome {
     pub(crate) fn success(payload: String) -> Self {
+        let blocks = vec![savvagent_protocol::ContentBlock::Text {
+            text: payload.clone(),
+        }];
         Self {
             is_error: false,
             payload,
+            blocks,
         }
     }
     pub(crate) fn error(payload: String) -> Self {
+        let blocks = vec![savvagent_protocol::ContentBlock::Text {
+            text: payload.clone(),
+        }];
         Self {
             is_error: true,
             payload,
+            blocks,
         }
     }
 
@@ -1041,10 +1123,12 @@ impl ToolCallOutcome {
         match result {
             Ok(r) => {
                 let payload = render_result_payload(&r);
-                if r.is_error == Some(true) {
-                    Self::error(payload)
-                } else {
-                    Self::success(payload)
+                let blocks = tool_result_to_blocks(&r);
+                let is_error = r.is_error == Some(true);
+                Self {
+                    is_error,
+                    payload,
+                    blocks,
                 }
             }
             Err(e) => {
@@ -1361,6 +1445,63 @@ mod tool_call_outcome_tests {
             outcome.payload.contains("transport error"),
             "transport-error payload must self-identify: {}",
             outcome.payload
+        );
+    }
+
+    #[test]
+    fn html_resource_becomes_html_block() {
+        use rmcp::model::{Content, ResourceContents};
+        use savvagent_protocol::ContentBlock;
+
+        let html_resource = Content::resource(ResourceContents::TextResourceContents {
+            uri: "canvas://x".into(),
+            mime_type: Some("text/html".into()),
+            text: "<!doctype html><body><p>hi</p></body>".into(),
+            meta: None,
+        });
+        let result = CallToolResult::success(vec![
+            Content::text("Diff follows:".to_string()),
+            html_resource,
+        ]);
+        let blocks = tool_result_to_blocks(&result);
+        assert_eq!(blocks.len(), 2, "text then html: {blocks:?}");
+        match &blocks[0] {
+            ContentBlock::Text { text } => assert_eq!(text, "Diff follows:"),
+            other => panic!("expected Text first, got {other:?}"),
+        }
+        match &blocks[1] {
+            ContentBlock::Html { source, .. } => assert!(source.contains("<p>hi</p>")),
+            other => panic!("expected Html second, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn text_only_result_produces_single_text_block() {
+        use rmcp::model::Content;
+        use savvagent_protocol::ContentBlock;
+        let result = CallToolResult::success(vec![Content::text("plain".to_string())]);
+        let blocks = tool_result_to_blocks(&result);
+        assert_eq!(blocks.len(), 1);
+        assert!(matches!(&blocks[0], ContentBlock::Text { text } if text == "plain"));
+    }
+
+    #[test]
+    fn non_html_resource_falls_back_to_text() {
+        use rmcp::model::{Content, ResourceContents};
+        let result = CallToolResult::success(vec![Content::resource(
+            ResourceContents::TextResourceContents {
+                uri: "file://x".into(),
+                mime_type: Some("text/plain".into()),
+                text: "just text".into(),
+                meta: None,
+            },
+        )]);
+        let blocks = tool_result_to_blocks(&result);
+        // No Html block; the plain-text resource folds into a Text block.
+        assert!(
+            blocks
+                .iter()
+                .all(|b| !matches!(b, savvagent_protocol::ContentBlock::Html { .. }))
         );
     }
 }

@@ -48,6 +48,7 @@ impl Plugin for LspInstallerPlugin {
             summary: "Install language servers".into(),
             args_hint: None,
             requires_arg: false,
+            suppress_prompt_segments: vec![],
         }];
         contributions.screens = vec![
             ScreenSpec {
