@@ -3,6 +3,8 @@ resolver = "3"
 members = [
     "crates/savvagent",
     "crates/savvagent-plugin",
+    "crates/savvagent-plugin-wit",
+    "crates/savvagent-plugin-wasm",
     "crates/savvagent-protocol",
     "crates/savvagent-mcp",
     "crates/savvagent-host",
@@ -22,7 +24,7 @@ members = [
 default-members = ["crates/savvagent"]
 
 [workspace.package]
-version = "0.17.0"
+version = "0.18.0"
 edition = "2024"
 license = "AGPL-3.0-or-later"
 repository = "https://github.com/robhicks/savvagent-rs"
@@ -30,20 +32,22 @@ rust-version = "1.89"
 
 [workspace.dependencies]
 # Local crates
-savvagent-plugin = { path = "crates/savvagent-plugin", version = "0.17.0" }
-savvagent-protocol = { path = "crates/savvagent-protocol", version = "0.17.0" }
-savvagent-mcp = { path = "crates/savvagent-mcp", version = "0.17.0" }
-savvagent-host = { path = "crates/savvagent-host", version = "0.17.0" }
-provider-anthropic = { path = "crates/provider-anthropic", version = "0.17.0" }
-provider-gemini = { path = "crates/provider-gemini", version = "0.17.0" }
-provider-local = { path = "crates/provider-local", version = "0.17.0" }
-provider-openai = { path = "crates/provider-openai", version = "0.17.0" }
-tool-bash = { path = "crates/tool-bash", version = "0.17.0" }
-tool-fs = { path = "crates/tool-fs", version = "0.17.0" }
-tool-grep = { path = "crates/tool-grep", version = "0.17.0" }
-tool-lsp = { path = "crates/tool-lsp", version = "0.17.0" }
-savvagent-fence = { path = "crates/savvagent-fence", version = "0.17.0" }
-savvagent-canvas = { path = "crates/savvagent-canvas", version = "0.17.0" }
+savvagent-plugin = { path = "crates/savvagent-plugin", version = "0.18.0" }
+savvagent-plugin-wit = { path = "crates/savvagent-plugin-wit", version = "0.18.0" }
+savvagent-plugin-wasm = { path = "crates/savvagent-plugin-wasm", version = "0.18.0" }
+savvagent-protocol = { path = "crates/savvagent-protocol", version = "0.18.0" }
+savvagent-mcp = { path = "crates/savvagent-mcp", version = "0.18.0" }
+savvagent-host = { path = "crates/savvagent-host", version = "0.18.0" }
+provider-anthropic = { path = "crates/provider-anthropic", version = "0.18.0" }
+provider-gemini = { path = "crates/provider-gemini", version = "0.18.0" }
+provider-local = { path = "crates/provider-local", version = "0.18.0" }
+provider-openai = { path = "crates/provider-openai", version = "0.18.0" }
+tool-bash = { path = "crates/tool-bash", version = "0.18.0" }
+tool-fs = { path = "crates/tool-fs", version = "0.18.0" }
+tool-grep = { path = "crates/tool-grep", version = "0.18.0" }
+tool-lsp = { path = "crates/tool-lsp", version = "0.18.0" }
+savvagent-fence = { path = "crates/savvagent-fence", version = "0.18.0" }
+savvagent-canvas = { path = "crates/savvagent-canvas", version = "0.18.0" }
 
 # Blitz building blocks — pinned per Phase 0 spike findings
 # (`docs/superpowers/notes/2026-05-21-blitz-spike.md`). We depend on the
@@ -118,6 +122,22 @@ grep-regex = "0.1"
 grep-searcher = "0.1"
 ignore = "0.4"
 globset = "0.4"
+
+# External-plugin (sub-project D) WIT tooling. `wit-bindgen` is the guest-side
+# code generator; host bindings live in `savvagent-plugin-wasm` and come from
+# `wasmtime::component::bindgen!`. The wit-bindgen workspace pin reserves a
+# single source of truth for the version downstream guest crates (Task 12
+# example plugins) pick up.
+wit-bindgen = "0.57"
+
+# Host-side WIT bindings + WASM execution for external plugins. Pinned to
+# wasmtime 34.x (the most recent stable line whose MSRV matches our
+# workspace `rust-version = 1.85`); the plan's original sketch of 24.0 is
+# >12 releases out of date. `component-model` and `async` are both default
+# features on wasmtime 34, so no explicit feature set is needed.
+wasmtime = "34"
+wasmtime-wasi = "34"
+walkdir = "2.5"
 
 # Misc
 uuid = { version = "1", features = ["v4", "serde"] }

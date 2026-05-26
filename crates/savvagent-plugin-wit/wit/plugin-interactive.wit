@@ -1,0 +1,56 @@
+package savvagent:plugin@0.1.0;
+
+// Per-screen instance interface, exported by interactive-world plugins.
+//
+// `create-screen` and the per-instance methods live together in this
+// interface so they share the same `screen-instance` resource type
+// without crossing the import/export boundary (which would otherwise
+// force callers to call `take_handle()` + `from_handle()` to bridge
+// resource types from different bindgen-generated modules — see
+// https://github.com/bytecodealliance/wit-bindgen for the inline-resource
+// vs export-resource semantics).
+//
+// Render is **content-only**: the host paints chrome (borders, title,
+// centering) around the styled lines a screen returns. There are no
+// host-imported draw primitives — the runtime-side `Screen::render` is
+// already sync-returns-Vec<StyledLine>, so a draw-buffer model would add
+// unsafe pointer wiring for no functional gain (and conflict with the
+// crate's `#![forbid(unsafe_code)]` policy). See
+// `crates/savvagent-plugin/src/screen.rs` for the trait this world adapts
+// onto.
+interface screens {
+    use types.{plugin-error, effect, key-event-portable, region, styled-line};
+
+    record screen-args {
+        // Serialized `savvagent_plugin::ScreenArgs` (matches the parent
+        // crate's `ScreenArgs` shape; JSON keeps us out of an arms race
+        // with future ScreenArgs additions).
+        invocation-json: string,
+        terminal-width: u16,
+        terminal-height: u16,
+    }
+
+    resource screen-instance {
+        on-key: func(key: key-event-portable) -> result<list<effect>, plugin-error>;
+        on-event: func(event-json: string) -> result<list<effect>, plugin-error>;
+        render: func(area: region) -> list<styled-line>;
+        tips: func() -> list<styled-line>;
+    }
+
+    create-screen: func(screen-id: string, args: screen-args)
+        -> result<screen-instance, plugin-error>;
+}
+
+// `plugin-interactive` world — plugins that own one or more screens with
+// per-open state. Render is **content-only** (see `screens` above).
+world plugin-interactive {
+    use types.{plugin-manifest, plugin-error, theme-color, log-level};
+
+    // ---- Imports -----------------------------------------------------
+    import log: func(level: log-level, msg: string);
+    import current-theme: func() -> list<tuple<string, theme-color>>;
+
+    // ---- Exports -----------------------------------------------------
+    export screens;
+    export manifest: func() -> result<plugin-manifest, plugin-error>;
+}

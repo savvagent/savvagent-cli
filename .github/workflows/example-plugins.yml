@@ -1,0 +1,42 @@
+# Builds the `examples/plugin-hello-*` crates with `cargo component`. These
+# examples are deliberately outside the main workspace because cargo-component
+# needs its own profile/target setup, so they need their own job rather than
+# riding along on the main CI.
+#
+# This workflow is **supplemental**: `continue-on-error: true` and no
+# branch-protection requirement, so a flaky cargo-component install never
+# gates a merge. If a real regression shows up here, fix it as a separate
+# PR.
+name: Example plugins build
+
+on:
+  push:
+    paths:
+      - "examples/plugin-hello-*/**"
+      - "crates/savvagent-plugin-wit/**"
+  pull_request:
+    paths:
+      - "examples/plugin-hello-*/**"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust + cargo-component
+        run: |
+          # The examples target `wasm32-unknown-unknown` rather than
+          # `wasm32-wasip2` because the host's wasmtime config does not
+          # link a WASI preview-2 implementation. Keep this in sync with
+          # the in-tree fixtures under
+          # `crates/savvagent-plugin-wasm/tests/fixtures-src/`.
+          rustup target add wasm32-unknown-unknown
+          cargo install cargo-component --locked
+      - name: Build each example
+        run: |
+          set -e
+          for dir in examples/plugin-hello-*; do
+            echo "==> building $dir"
+            (cd "$dir" && cargo component build --release --target wasm32-unknown-unknown)
+          done

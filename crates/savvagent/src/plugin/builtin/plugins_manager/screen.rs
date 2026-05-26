@@ -28,6 +28,13 @@ pub(crate) struct PluginRow {
     pub(crate) kind: PluginKind,
     pub(crate) enabled: bool,
     pub(crate) contribution_summary: String,
+    /// `true` when the plugin id's vendor prefix is something other than
+    /// `internal:`. Populated by the runtime via
+    /// [`super::is_external_id`] when it builds rows from the registry.
+    /// The screen renders a trailing `(external)` or `(built-in)` label
+    /// based on this flag — it's surface-only and never affects toggling
+    /// behaviour.
+    pub(crate) external: bool,
 }
 
 impl PluginsManagerScreen {
@@ -91,6 +98,11 @@ impl Screen for PluginsManagerScreen {
                 bold: i == self.cursor,
                 ..Default::default()
             };
+            let origin_label = if row.external {
+                rust_i18n::t!("picker.plugins-manager.row-external").to_string()
+            } else {
+                rust_i18n::t!("picker.plugins-manager.row-builtin").to_string()
+            };
             out.push(StyledLine {
                 spans: vec![
                     StyledSpan {
@@ -107,6 +119,12 @@ impl Screen for PluginsManagerScreen {
                     },
                     StyledSpan {
                         text: format!("  {}", row.contribution_summary),
+                        fg: Some(ThemeColor::Muted),
+                        bg: None,
+                        modifiers: TextMods::default(),
+                    },
+                    StyledSpan {
+                        text: format!("  {origin_label}"),
                         fg: Some(ThemeColor::Muted),
                         bg: None,
                         modifiers: TextMods::default(),
@@ -186,6 +204,7 @@ mod tests {
             kind: PluginKind::Core,
             enabled: true,
             contribution_summary: "".into(),
+            external: false,
         }];
         let mut s = PluginsManagerScreen::with_rows(rows);
         let effs = s.on_key(key(KeyCodePortable::Enter)).await.unwrap();
@@ -214,6 +233,7 @@ mod tests {
             kind: PluginKind::Optional,
             enabled: true,
             contribution_summary: "".into(),
+            external: false,
         }];
         let mut s = PluginsManagerScreen::with_rows(rows);
         let effs = s.on_key(key(KeyCodePortable::Enter)).await.unwrap();
@@ -237,6 +257,7 @@ mod tests {
             kind: PluginKind::Optional,
             enabled: false,
             contribution_summary: "".into(),
+            external: false,
         }];
         let mut s = PluginsManagerScreen::with_rows(rows);
         let effs = s.on_key(key(KeyCodePortable::Char(' '))).await.unwrap();
@@ -263,6 +284,7 @@ mod tests {
                 kind: PluginKind::Core,
                 enabled: true,
                 contribution_summary: "".into(),
+                external: false,
             },
             PluginRow {
                 id: PluginId::new("internal:b").expect("valid"),
@@ -271,6 +293,7 @@ mod tests {
                 kind: PluginKind::Optional,
                 enabled: true,
                 contribution_summary: "".into(),
+                external: false,
             },
         ];
         let mut s = PluginsManagerScreen::with_rows(rows);
@@ -286,5 +309,54 @@ mod tests {
     fn id_is_plugins_manager() {
         let s = PluginsManagerScreen::empty();
         assert_eq!(s.id(), "plugins.manager");
+    }
+
+    /// Confirm the trailing origin suffix renders distinctly for built-in
+    /// vs. external rows. Locks in the surface contract for Task 10
+    /// (sub-project D): the manager screen visibly distinguishes wasm
+    /// plugins from in-process built-ins so users can tell at a glance
+    /// where each plugin came from.
+    #[test]
+    fn render_includes_origin_suffix_per_row() {
+        let rows = vec![
+            PluginRow {
+                id: PluginId::new("internal:home-footer").expect("valid"),
+                name: "Home footer".into(),
+                version: "0".into(),
+                kind: PluginKind::Core,
+                enabled: true,
+                contribution_summary: "".into(),
+                external: false,
+            },
+            PluginRow {
+                id: PluginId::new("acme:demo").expect("valid"),
+                name: "Demo".into(),
+                version: "0".into(),
+                kind: PluginKind::Optional,
+                enabled: true,
+                contribution_summary: "".into(),
+                external: true,
+            },
+        ];
+        let s = PluginsManagerScreen::with_rows(rows);
+        let lines = s.render(Region {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 24,
+        });
+        assert_eq!(lines.len(), 2);
+        let line0: String = lines[0].spans.iter().map(|sp| sp.text.clone()).collect();
+        let line1: String = lines[1].spans.iter().map(|sp| sp.text.clone()).collect();
+        let builtin = rust_i18n::t!("picker.plugins-manager.row-builtin").to_string();
+        let external = rust_i18n::t!("picker.plugins-manager.row-external").to_string();
+        assert!(
+            line0.contains(&builtin),
+            "expected built-in suffix in row 0: {line0:?}"
+        );
+        assert!(
+            line1.contains(&external),
+            "expected external suffix in row 1: {line1:?}"
+        );
     }
 }

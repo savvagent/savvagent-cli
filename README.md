@@ -637,6 +637,120 @@ tool-use-loop iteration boundary; the model decides which (if any) to
 pull. The host routes the read to whichever connected tool server
 published the URI.
 
+## Authoring external plugins
+
+As of v0.18.0 Savvagent loads WASM Component-Model plugins from
+well-known directories at startup. External plugins ship as a single
+`.wasm` file plus a `plugin.toml` manifest, are trust-gated by SHA-256,
+and adapt into the same in-process plugin registry the built-in
+plugins live in — so anything the v0.9.0 `Plugin` trait can express
+(slash commands, hooks, themes, render slots, keybindings, screens,
+providers) can ship as a third-party plugin.
+
+The long-form guide lives at [`docs/plugins/authoring.md`](docs/plugins/authoring.md);
+the canonical contract is the design spec at
+[`docs/superpowers/specs/2026-05-25-external-plugins-design.md`](docs/superpowers/specs/2026-05-25-external-plugins-design.md).
+
+### Three worlds at a glance
+
+A plugin declares exactly one WIT world; the world fixes what it can
+contribute and which host capabilities it can import.
+
+| World | Contributes | Host imports |
+|---|---|---|
+| `plugin-static` | slash commands, hooks, themes, render slots, keybindings | `log`, `current-theme` |
+| `plugin-interactive` | screens (per-open state via Component Model resources) | `log`, `current-theme` |
+| `plugin-provider` | a new provider in the `/connect` pool (`complete` / `list_models` / `count_tokens`) | `log`, `http` (allow-listed), `keyring` (allow-listed), `progress` |
+
+One `.wasm` declares one world. Organizations that want to ship both
+themes and a custom screen publish two plugins.
+
+### Discovery paths
+
+Mirror sub-projects A/B/C. First-wins by plugin id; project beats
+user; `.savvagent/` beats `.claude/`:
+
+1. `<project>/.savvagent/plugins/<id>/plugin.toml`
+2. `<project>/.claude/plugins/<id>/plugin.toml`
+3. `~/.savvagent/plugins/<id>/plugin.toml`
+4. `~/.claude/plugins/<id>/plugin.toml`
+
+Each plugin lives in its own directory named after its id. The
+directory contains at least `plugin.toml` and (after install)
+`plugin.wasm`.
+
+### Minimal `plugin.toml`
+
+```toml
+[plugin]
+id = "savvagent.hello-static"
+name = "Hello (Static)"
+version = "0.1.0"
+world = "plugin-static"
+savvagent = "^0.18"
+description = "Minimal static-world example. Defines /hello."
+
+[exports]
+slash-commands = ["hello"]
+```
+
+`provider`-world plugins add a `provider-id` under `[exports]` and an
+optional `[security]` block listing `allowed-hosts` (exact match in
+v1) and `keyring-accounts`. See the
+[authoring guide](docs/plugins/authoring.md#wit-contract-reference) for
+the full schema and the [design spec §1](docs/superpowers/specs/2026-05-25-external-plugins-design.md)
+for the canonical reference.
+
+### `/plugins install <toml-url>`
+
+The argument is a URL pointing at a remote `plugin.toml`. Savvagent
+fetches and validates the manifest (64 KB cap), fetches the `wasm` URL
+the manifest references (32 MB cap), computes a SHA-256 over the
+whole staging tree, then opens a trust-prompt modal showing the
+manifest fields, source URL, and tree hash. On confirm, the staging
+directory is atomic-moved into `~/.savvagent/plugins/<id>/` and the
+trust record is written to `~/.savvagent/plugin-trust.toml`. On
+reject, the staging directory is deleted.
+
+### `/plugins` subcommands
+
+| Command | Behavior |
+|---|---|
+| `/plugins` | Open the plugin manager screen — lists every discovered plugin with trust status, world, exports, and source path. Toggle optional plugins on / off. |
+| `/plugins install <toml-url>` | Install flow above. |
+| `/plugins trust <id>` | Re-open the trust prompt for an untrusted plugin (e.g. after a tree-hash change). |
+| `/plugins revoke <id>` | Drop the trust record. Plugin stays on disk, unloads next start. |
+| `/plugins remove <id>` | Revoke + delete the plugin directory. |
+| `/plugins enable <id>` | Clear `disabled-reason` (re-enable a plugin auto-disabled after repeated traps). |
+| `/plugins disable <id>` | Set `disabled-reason = "manual"`, unload next start. |
+
+Untrusted, hash-mismatched, or disabled plugins are skipped on load —
+they appear in `/plugins` with the reason rendered as the row badge.
+
+### Example plugins
+
+Three runnable examples live under `examples/`:
+
+- [`examples/plugin-hello-static/`](examples/plugin-hello-static/) — `/hello` slash command.
+- [`examples/plugin-hello-interactive/`](examples/plugin-hello-interactive/) — opens a screen rendering `Hello, world!`.
+- [`examples/plugin-hello-provider/`](examples/plugin-hello-provider/) — echo provider that returns the last user message.
+
+Each example is intentionally outside the workspace (cargo-component's
+profile setup clashes with the workspace release config). Build with:
+
+```bash
+cd examples/plugin-hello-static
+cargo component build --release --target wasm32-unknown-unknown
+```
+
+The produced `.wasm` lands under that example's `target/`; drop it
+plus the example's `plugin.toml` into `~/.savvagent/plugins/<id>/`
+and trust it via `/plugins install` or `/plugins trust <id>`.
+
+See [`docs/plugins/authoring.md`](docs/plugins/authoring.md) for the
+full quickstart, capability matrix, three-strikes recovery, and the
+explicit non-goals for v0.18.0.
+
 ## Language Server Protocol (LSP)
 
 tool-lsp wraps user-configured LSP servers behind a small MCP tool surface (`lsp_definition`, `lsp_references`, `lsp_hover`, `lsp_document_symbols`, `lsp_workspace_symbols`, `lsp_rename`, `lsp_code_actions`) and publishes diagnostics as MCP resources via the `lsp://diagnostics/<absolute-path>` URI scheme. Diagnostics surface in the conversation as `[resource updated: lsp://diagnostics/<path>]` notes; the model fetches contents via the built-in `read_resource` tool.

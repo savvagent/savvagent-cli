@@ -60,7 +60,7 @@ use app::{
     parse_bash_command,
 };
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
-use providers::{PROVIDERS, ProviderSpec};
+use providers::{ProviderSpec, effective_providers};
 use savvagent_host::{
     BashNetworkChoice, Host, HostConfig, LegacyModelResolution, PermissionDecision,
     ProviderEndpoint, ProviderRegistration, ProviderView, SandboxConfig, SandboxMode,
@@ -194,13 +194,32 @@ async fn main() -> Result<()> {
         use crate::plugin::registry::PluginRegistry;
         use savvagent_plugin::PluginKind;
 
-        let set = plugin::register_builtins(
+        // Theme provider shared with wasm static/interactive adapters via
+        // their `current-theme()` host import. v0.18.0 hands every wasm
+        // plugin an empty snapshot; theme-sync to the TUI's active
+        // palette is a Task 13 polish item. The handle is built here so
+        // a future revision can update it alongside `Effect::SetTheme`
+        // without restructuring the bootstrap.
+        let wasm_theme = savvagent_plugin_wasm::host_imports::theme::provider(Vec::new());
+        let home_dir = dirs::home_dir();
+        let (set, external_warnings) = plugin::register_builtins_with_external(
             app.trust_levels.clone(),
             app.user_hooks_index.clone(),
             app.session_id.clone(),
             project_root.clone(),
             app.transcript_path.clone(),
-        );
+            home_dir.as_deref(),
+            wasm_theme,
+        )
+        .await;
+        for warn in external_warnings {
+            // External-plugin warnings (untrusted / hash-mismatch /
+            // instantiation failure) are surfaced as notes so the user
+            // can debug skipped plugins from the TUI without leaving
+            // for the log file. `tracing::warn!` already fired for the
+            // log-only path inside `register_builtins_with_external`.
+            app.push_note(warn);
+        }
         let mut registry = PluginRegistry::new(set);
 
         // Apply persisted Optional-plugin enabled state from
@@ -510,10 +529,11 @@ async fn bootstrap_pool_host(
                 }
             };
             // Map the ProviderRegistration id back to a `&'static str` by
-            // looking it up in the legacy PROVIDERS catalog (which already
-            // exists). This is only used for the header display + active_provider_id.
-            let static_id = PROVIDERS
-                .iter()
+            // looking it up in the runtime provider catalog (built-ins +
+            // any wasm providers installed at startup). This is only
+            // used for the header display + active_provider_id.
+            let static_id = effective_providers()
+                .into_iter()
                 .find(|s| s.id == reg.id.as_str())
                 .map(|s| s.id);
             (model, static_id)
@@ -1014,7 +1034,10 @@ async fn handle_model_command(app: &mut App, rest: &str, host_slot: &HostSlot) {
             };
             match host.set_active_provider(&pid).await {
                 Ok(()) => {
-                    if let Some(s) = PROVIDERS.iter().find(|s| s.id == pid.as_str()) {
+                    if let Some(s) = effective_providers()
+                        .into_iter()
+                        .find(|s| s.id == pid.as_str())
+                    {
                         app.active_provider_id = Some(s.id);
                     }
                     if let Err(err) = crate::plugin::effects::dispatch_host_event(
@@ -1045,7 +1068,7 @@ async fn handle_model_command(app: &mut App, rest: &str, host_slot: &HostSlot) {
         app.push_note(rust_i18n::t!("notes.model-not-connected").to_string());
         return;
     };
-    if PROVIDERS.iter().all(|s| s.id != spec_id) {
+    if effective_providers().into_iter().all(|s| s.id != spec_id) {
         app.push_note(rust_i18n::t!("notes.model-unknown-provider", id = spec_id).to_string());
         return;
     }
@@ -1072,7 +1095,7 @@ async fn handle_model_command(app: &mut App, rest: &str, host_slot: &HostSlot) {
     }
 
     // Persist immediately for the direct /model <id> command path.
-    if let Some(spec) = PROVIDERS.iter().find(|s| s.id == spec_id) {
+    if let Some(spec) = effective_providers().into_iter().find(|s| s.id == spec_id) {
         match models_pref::save_for_provider(spec.id, &bare_model).await {
             Ok(()) => {}
             Err(e) => {
@@ -1296,7 +1319,10 @@ async fn apply_pending_model_change(
         if pid.as_str() != app.active_provider_id.unwrap_or("") {
             match host.set_active_provider(&pid).await {
                 Ok(()) => {
-                    if let Some(s) = PROVIDERS.iter().find(|s| s.id == pid.as_str()) {
+                    if let Some(s) = effective_providers()
+                        .into_iter()
+                        .find(|s| s.id == pid.as_str())
+                    {
                         app.active_provider_id = Some(s.id);
                     }
                     if let Err(err) = crate::plugin::effects::dispatch_host_event(
@@ -1327,7 +1353,7 @@ async fn apply_pending_model_change(
         app.push_note(rust_i18n::t!("notes.model-not-connected").to_string());
         return;
     };
-    let Some(spec) = PROVIDERS.iter().find(|s| s.id == spec_id) else {
+    let Some(spec) = effective_providers().into_iter().find(|s| s.id == spec_id) else {
         app.push_note(rust_i18n::t!("notes.model-unknown-provider", id = spec_id).to_string());
         return;
     };
@@ -1410,7 +1436,10 @@ async fn apply_pending_pool_add(app: &mut App, host_slot: &HostSlot) {
         return;
     };
 
-    let spec = match PROVIDERS.iter().find(|s| s.id == pending.id.as_str()) {
+    let spec = match effective_providers()
+        .into_iter()
+        .find(|s| s.id == pending.id.as_str())
+    {
         Some(s) => s,
         None => {
             tracing::warn!(provider = %pending.id.as_str(),
@@ -1978,7 +2007,7 @@ async fn handle_use_command(app: &mut App, rest: &str, host_slot: &HostSlot) {
             // Sync app.active_provider_id and app.model to the new active
             // provider so every subsequent site that branches on
             // app.active_provider_id sees the correct value.
-            let spec = PROVIDERS.iter().find(|s| s.id == provider);
+            let spec = effective_providers().into_iter().find(|s| s.id == provider);
             if let Some(spec) = spec {
                 app.active_provider_id = Some(spec.id);
                 app.model = resolve_initial_model_for(spec);
@@ -3512,12 +3541,12 @@ async fn run_app(
             InputMode::SelectingProvider => match key.code {
                 KeyCode::Esc => app.input_mode = InputMode::Editing,
                 KeyCode::Up if app.provider_index > 0 => app.provider_index -= 1,
-                KeyCode::Down if app.provider_index + 1 < PROVIDERS.len() => {
+                KeyCode::Down if app.provider_index + 1 < effective_providers().len() => {
                     app.provider_index += 1
                 }
                 KeyCode::Enter => {
                     let idx = app.provider_index;
-                    if let Some(spec) = PROVIDERS.get(idx) {
+                    if let Some(spec) = effective_providers().get(idx).copied() {
                         if !spec.api_key_required {
                             // Keyless provider — connect immediately without a
                             // stored or prompted API key.

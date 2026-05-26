@@ -207,8 +207,15 @@ no-plugins        = "  (no hay plugins registrados)"
 row-core          = "(core)"
 row-on            = "[ on ]"
 row-off           = "[ off]"
+row-builtin       = "(integrado)"
+row-external      = "(externo)"
 core-cannot-disable = "Los plugins Core no se pueden desactivar."
 tips              = "Arriba/Abajo navegar · Espacio/Enter alternar · Esc cerrar"
+
+[picker.plugins-trust-modal]
+modal-title       = "¿Instalar plugin externo?"
+warning           = "AVISO: los plugins externos ejecutan WebAssembly en sandbox, pero pueden acceder a la red, al keyring y a archivos del proyecto."
+tips              = "Enter confiar e instalar · Esc cancelar"
 
 [picker.command-palette]
 modal-title       = "Paleta de comandos"

@@ -59,6 +59,12 @@ pub mod hooks;
 /// for the type returned from [`register_builtins`].
 pub(crate) use registry::BuiltinSet;
 
+/// External (wasm) plugin discovery + adapter wrapping. Owned by the
+/// `savvagent-plugin-wasm` crate; the savvagent crate composes built-ins
+/// and externals together via [`register_builtins_with_external`].
+mod external;
+pub(crate) use external::register_builtins_with_external;
+
 /// Returns the set of built-in plugin instances and provider-plugin shims.
 ///
 /// PR 2 adds: home-footer, home-tips.

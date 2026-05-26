@@ -1,0 +1,10 @@
+[plugin]
+id = "savvagent.hello-static"
+name = "Hello (Static)"
+version = "0.1.0"
+world = "plugin-static"
+savvagent = "^0.18"
+description = "Minimal static-world example. Defines /hello."
+
+[exports]
+slash-commands = ["hello"]

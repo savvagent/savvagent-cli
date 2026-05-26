@@ -1,0 +1,39 @@
+package savvagent:plugin@0.1.0;
+
+// `plugin-static` world — stateless plugins: slash commands, hooks, themes,
+// keybindings, render-slots. The host imports `log` and `current-theme` so
+// the plugin can emit traces and pick colors that match the active theme.
+// Plugin exports cover everything Task 4 wires into the static-world
+// adapter (`on-event`, `handle-slash`, `render-slot`, `themes`).
+world plugin-static {
+    use types.{plugin-manifest, plugin-error, effect, theme-color, region,
+               styled-line, theme-entry, log-level};
+
+    // ---- Host-imported capabilities ----------------------------------
+    import log: func(level: log-level, msg: string);
+    import current-theme: func() -> list<tuple<string, theme-color>>;
+
+    // ---- Plugin exports ----------------------------------------------
+    export manifest: func() -> result<plugin-manifest, plugin-error>;
+
+    // Slash command dispatch. `name` is the registered slash command
+    // identifier (without leading `/`); `args` is the tokenized argv tail.
+    export handle-slash: func(name: string, args: list<string>)
+        -> result<list<effect>, plugin-error>;
+
+    // Hook callback. `event-json` is a serialized `savvagent_plugin::Event`
+    // (one variant per `HookKind` declared in the manifest); we ship JSON
+    // here so the host doesn't have to maintain a parallel WIT mirror for
+    // every Event payload variant.
+    export on-event: func(event-json: string)
+        -> result<list<effect>, plugin-error>;
+
+    // Render-slot draw. Slot ids must match the manifest's
+    // `contributions.render-slots`. Returning an empty list is legal.
+    export render-slot: func(slot-id: string, area: region) -> list<styled-line>;
+
+    // Theme catalog. Returning an empty list is legal even when the
+    // manifest's `contributions.themes` is true (e.g. a plugin that ships
+    // themes lazily).
+    export themes: func() -> list<theme-entry>;
+}

@@ -311,6 +311,34 @@ pub enum ScreenArgs {
         /// the screen so a typo in the picker doesn't disappear silently.
         entry_ids: Vec<String>,
     },
+    /// Open the external-plugin trust-prompt modal after `/plugins
+    /// install <url>` finished staging the plugin to a tempdir. Carries
+    /// everything the modal needs to show the user (id, display name,
+    /// version, source URL, SHA-256 hash) plus the absolute path to the
+    /// staging directory the modal moves into `~/.savvagent/plugins/`
+    /// on confirm or deletes on cancel.
+    PluginsTrustModal {
+        /// Plugin id from the staged `plugin.toml` (`<org>.<name>`).
+        id: String,
+        /// Display name from the staged manifest's `[plugin] name`.
+        name: String,
+        /// Version from the staged manifest's `[plugin] version`.
+        version: String,
+        /// URL the user passed to `/plugins install`.
+        source_url: String,
+        /// SHA-256 hex over the staged plugin directory tree.
+        hash: String,
+        /// Absolute path to the staging directory. Persisted as a
+        /// `PathBuf` because `tempfile::TempDir::into_path` returns the
+        /// real on-disk location after disabling auto-cleanup; the modal
+        /// is responsible for moving or deleting it.
+        staging_dir: std::path::PathBuf,
+        /// Home directory the install command was invoked with. Carried
+        /// through so the trust modal writes to the same root the caller
+        /// staged into — critical for tests/sandboxes where
+        /// `dirs::home_dir()` would resolve to a different path.
+        home_dir: std::path::PathBuf,
+    },
 }
 
 impl ScreenArgs {
@@ -341,6 +369,7 @@ impl ScreenArgs {
             ScreenArgs::MigrationPicker { .. } => Some("migration.picker"),
             ScreenArgs::TrustModal { .. } => Some("trust.modal"),
             ScreenArgs::LspInstallProgress { .. } => Some("lsp_installer.progress"),
+            ScreenArgs::PluginsTrustModal { .. } => Some("plugins.trust-modal"),
         }
     }
 }
@@ -537,6 +566,40 @@ mod tests {
     fn lsp_install_progress_screen_id_is_lsp_installer_progress() {
         let args = ScreenArgs::LspInstallProgress { entry_ids: vec![] };
         assert_eq!(args.screen_id(), Some("lsp_installer.progress"));
+    }
+
+    #[test]
+    fn plugins_trust_modal_carries_install_payload() {
+        let args = ScreenArgs::PluginsTrustModal {
+            id: "acme.demo".into(),
+            name: "Demo".into(),
+            version: "0.1.0".into(),
+            source_url: "https://example.com/plugin.toml".into(),
+            hash: "abc123".into(),
+            staging_dir: std::path::PathBuf::from("/tmp/staging"),
+            home_dir: std::path::PathBuf::from("/home/test"),
+        };
+        assert_eq!(args.screen_id(), Some("plugins.trust-modal"));
+        match args {
+            ScreenArgs::PluginsTrustModal {
+                id,
+                name,
+                version,
+                source_url,
+                hash,
+                staging_dir,
+                home_dir,
+            } => {
+                assert_eq!(id, "acme.demo");
+                assert_eq!(name, "Demo");
+                assert_eq!(version, "0.1.0");
+                assert_eq!(source_url, "https://example.com/plugin.toml");
+                assert_eq!(hash, "abc123");
+                assert_eq!(staging_dir, std::path::PathBuf::from("/tmp/staging"));
+                assert_eq!(home_dir, std::path::PathBuf::from("/home/test"));
+            }
+            _ => panic!("expected PluginsTrustModal"),
+        }
     }
 
     #[test]

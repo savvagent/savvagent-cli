@@ -8,6 +8,80 @@ boundary changes and PATCH captures fixes).
 
 ## [Unreleased]
 
+## 0.18.0 - 2026-05-26
+
+### Added
+
+- **External plugins (sub-project D).** WebAssembly Component-Model
+  plugins implementing one of three WIT worlds (`plugin-static`,
+  `plugin-interactive`, `plugin-provider`) can now be discovered from
+  four well-known directories — `<project>/.savvagent/plugins/`,
+  `<project>/.claude/plugins/`, `~/.savvagent/plugins/`,
+  `~/.claude/plugins/` — hash-trusted via SHA-256 over the whole
+  plugin directory tree, and adapted into the live plugin registry
+  alongside the built-in plugins. Static plugins contribute slash
+  commands, hooks, themes, render slots, and keybindings. Interactive
+  plugins own screens (per-open state via Component Model resources).
+  Provider plugins ship a new `complete` / `list-models` /
+  `count-tokens` provider that joins the `/connect` pool, with
+  capability-gated `http` (exact-match `allowed-hosts`),
+  `keyring` (account allow-list), and `progress` host imports.
+- **Two new crates.** `savvagent-plugin-wit` holds the `.wit` files
+  and `wit-bindgen`-generated host bindings (no runtime deps beyond
+  `wit-bindgen`); `savvagent-plugin-wasm` holds the wasmtime-backed
+  runtime, the three per-world adapters, the manifest parser,
+  four-path discovery, the `plugin-trust.toml` ledger, and the
+  capability-gated host imports.
+- **`/plugins` slash subcommands.** `/plugins install <toml-url>` pulls
+  a remote `plugin.toml` (64 KB cap), follows the manifest's `wasm`
+  URL (32 MB cap), hashes the staging tree, and opens a trust prompt
+  showing manifest fields, source URL, and hash. `/plugins trust`,
+  `/plugins revoke`, `/plugins remove`, `/plugins enable`, and
+  `/plugins disable` manage the per-id trust state in
+  `~/.savvagent/plugin-trust.toml`. `/plugins list` (and the bare
+  `/plugins` manager screen) shows every discovered plugin with
+  trust status, world, declared exports, and source path.
+- **Three-strikes-disable + epoch-interruption trap recovery.** A
+  trapping wasm plugin does not unload — the trap is surfaced as
+  `PluginError::Unsupported(trap-info)`, the long-lived store is
+  dropped, and the next call lazily rebuilds it. After 3 traps within
+  a rolling 10-minute window the plugin is auto-disabled with
+  `disabled-reason = "repeated-traps"` persisted to
+  `plugin-trust.toml`; the user re-enables via
+  `/plugins enable <id>`. Per-host-import-call wall-time caps are
+  enforced via wasmtime's `epoch_interruption` (default 5 s,
+  overridable per-plugin up to 300 s via `[runtime] call-timeout-ms`).
+- **Plugin manager screen distinguishes external plugins** with an
+  `(external)` label so it is obvious which rows came from `.wasm`
+  vs the built-in registry.
+- **Three runnable example plugins** under `examples/`:
+  `plugin-hello-static/` (the `/hello` slash command),
+  `plugin-hello-interactive/` (renders `Hello, world!` from a wasm
+  screen), `plugin-hello-provider/` (echo provider that returns the
+  last user message). Each example is deliberately outside the
+  workspace so `cargo component build`'s profile setup doesn't
+  clash with the workspace release config; a supplemental CI job
+  exercises them via `cargo component build`.
+
+### Dependencies
+
+- `wasmtime = "34"` (and `wasmtime-wasi = "34"`) pinned at the
+  workspace level. Default features cover Component-Model + async,
+  which is exactly what the runtime needs.
+
+### Notes
+
+- Sub-projects A (user slash commands), B (user-defined hooks), and
+  C (user-defined agents) shipped together as v0.17.0 immediately
+  before this release. v0.18.0 is sub-project D — the WIT-portable
+  plugin runtime v0.9.0 was always designed for.
+- See [`docs/superpowers/specs/2026-05-25-external-plugins-design.md`](docs/superpowers/specs/2026-05-25-external-plugins-design.md)
+  for the canonical design rationale (trust model, capability
+  matrix, non-goals) and
+  [`docs/plugins/authoring.md`](docs/plugins/authoring.md) for the
+  long-form author's guide (quickstart, WIT reference, capability
+  table, three-strikes recovery, v0.18.0 limitations).
+
 ## 0.17.0 - 2026-05-23
 
 ### Added

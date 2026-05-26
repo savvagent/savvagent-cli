@@ -1,0 +1,49 @@
+# Fault fixture for Task 7: timeout.wasm.
+#
+# Implements the `plugin-static` world. `manifest()` is well-formed.
+# `handle_slash("forever", ..)` enters an infinite loop. In v0.18.0 the
+# adapter does NOT enable wasmtime's `epoch_interruption`, so this loop
+# cannot be interrupted from inside wasm — Task 8 will add epoch bumping
+# to surface a clean `interrupt-trap`.
+#
+# For v0.18.0 the integration test wraps `handle_slash` in
+# `tokio::time::timeout`, which lets the *host* bound its own awaiting
+# without depending on wasm-side interruption. The wasm thread keeps
+# running until the host process exits; that's acceptable because each
+# fault test spins up its own temp dir + adapter and tears them down
+# along with the wasm engine when the test exits.
+#
+# Like the other fixture crates this is deliberately outside the
+# workspace; cargo-component requires its own profile + target setup
+# that would clash with the workspace's release config.
+#
+# Build with `just build-fixtures` (from repo root); the resulting wasm
+# component is copied to `tests/fixtures/timeout.wasm` and committed.
+[package]
+name = "fixture-timeout"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# Same pinning as the other Task 7 fault fixtures.
+wit-bindgen = "0.41"
+wit-bindgen-rt = { version = "0.44", features = ["bitflags"] }
+
+[package.metadata.component]
+package = "savvagent:plugin"
+
+[package.metadata.component.target]
+path = "../../../../savvagent-plugin-wit/wit"
+world = "plugin-static"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = "symbols"
+
+[workspace]

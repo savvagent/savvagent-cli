@@ -10,7 +10,9 @@ use savvagent_plugin::{Effect, HostEvent, PluginId, PluginKind, ScreenArgs, UrlT
 use crate::app::{App, PendingModelChange, PendingRoutingAction};
 use crate::plugin::builtin::command_palette::screen::{PaletteCommand, PaletteScreen};
 use crate::plugin::builtin::plugins_manager::screen::{PluginRow, PluginsManagerScreen};
-use crate::plugin::builtin::plugins_manager::{persistence, summarize_contributions};
+use crate::plugin::builtin::plugins_manager::{
+    is_external_id, persistence, summarize_contributions,
+};
 use crate::plugin::hooks::HookDispatcher;
 use crate::plugin::manifests::Indexes;
 use crate::plugin::slash::SlashRouter;
@@ -235,8 +237,8 @@ async fn apply_one(app: &mut App, eff: Effect, depth: u8) -> Result<(), String> 
             // than panicking so plugin authors can't crash the TUI by
             // emitting `PromptApiKey` for a provider that's not in the
             // built-in catalog yet.
-            match crate::providers::PROVIDERS
-                .iter()
+            match crate::providers::effective_providers()
+                .into_iter()
                 .position(|p| p.id == provider_id.as_str())
             {
                 Some(idx) => app.enter_api_key_for(idx),
@@ -927,6 +929,7 @@ async fn build_plugins_manager_rows(
         };
         let manifest = plugin.lock().await.manifest();
         let summary = summarize_contributions(&manifest.contributions);
+        let external = is_external_id(&pid);
         rows.push(PluginRow {
             id: pid.clone(),
             name: manifest.name,
@@ -934,6 +937,7 @@ async fn build_plugins_manager_rows(
             kind: manifest.kind,
             enabled: reg.is_enabled(&pid),
             contribution_summary: summary,
+            external,
         });
     }
     rows

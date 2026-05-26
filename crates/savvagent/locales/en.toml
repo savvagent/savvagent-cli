@@ -211,8 +211,15 @@ no-plugins        = "  (no plugins registered)"
 row-core          = "(core)"
 row-on            = "[ on ]"
 row-off           = "[ off]"
+row-builtin       = "(built-in)"
+row-external      = "(external)"
 core-cannot-disable = "Core plugins cannot be disabled."
 tips              = "Up/Down navigate · Space/Enter toggle · Esc close"
+
+[picker.plugins-trust-modal]
+modal-title       = "Install external plugin?"
+warning           = "WARNING: external plugins run sandboxed WebAssembly but may access network, keyring entries, and files inside your project."
+tips              = "Enter trust + install · Esc cancel"
 
 [picker.command-palette]
 modal-title       = "Command Palette"

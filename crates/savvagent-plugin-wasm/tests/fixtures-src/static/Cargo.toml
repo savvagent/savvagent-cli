@@ -1,0 +1,44 @@
+# Fixture for the savvagent-plugin-wasm static-world adapter tests.
+#
+# This crate is **deliberately outside the workspace** (see the root
+# `Cargo.toml`'s `members` list). cargo-component requires its own profile
+# and target setup that would clash with the workspace's release config.
+#
+# Build with `just build-fixtures` (from repo root) which calls
+# `cargo component build --release`; the resulting wasm component is
+# copied to `tests/fixtures/static.wasm` and committed.
+[package]
+name = "fixture-static"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# Pinned to versions that work with `cargo component 0.21.1`:
+# cargo-component bundles its own bindings emitter and links
+# `wit-bindgen-rt` directly; the user-facing `wit-bindgen` crate is
+# imported only for the `export!` macro path that the generated bindings
+# reference. Both versions track the wasm-tools toolchain rather than the
+# workspace's `wit-bindgen` pin.
+wit-bindgen = "0.41"
+wit-bindgen-rt = { version = "0.44", features = ["bitflags"] }
+
+[package.metadata.component]
+package = "savvagent:plugin"
+
+[package.metadata.component.target]
+path = "../../../../savvagent-plugin-wit/wit"
+world = "plugin-static"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = "symbols"
+
+# Keep the fixture's target dir out of the workspace's `[workspace]`
+# auto-discovery.
+[workspace]

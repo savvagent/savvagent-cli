@@ -1,0 +1,191 @@
+package savvagent:plugin@0.1.0;
+
+interface types {
+    // ---- Key events ---------------------------------------------------
+    record key-event-portable {
+        code: key-code,
+        modifiers: key-modifiers,
+    }
+
+    variant key-code {
+        %char(string),        // single-char text input; UTF-8 grapheme is fine
+        enter,
+        escape,
+        backspace,
+        tab,
+        backtab,
+        delete,
+        insert,
+        home,
+        %end,
+        page-up,
+        page-down,
+        up,
+        down,
+        left,
+        right,
+        function(u8),         // F1..F12 -> 1..12
+        null,
+    }
+
+    record key-modifiers {
+        ctrl: bool,
+        shift: bool,
+        alt: bool,
+        meta: bool,
+    }
+
+    // ---- Geometry & color --------------------------------------------
+    record region {
+        x: u16,
+        y: u16,
+        width: u16,
+        height: u16,
+    }
+
+    variant theme-color {
+        reset,
+        black,
+        red,
+        green,
+        yellow,
+        blue,
+        magenta,
+        cyan,
+        gray,
+        dark-gray,
+        light-red,
+        light-green,
+        light-yellow,
+        light-blue,
+        light-magenta,
+        light-cyan,
+        white,
+        indexed(u8),
+        rgb(rgb-color),
+    }
+
+    record rgb-color { r: u8, g: u8, b: u8 }
+
+    record text-mods {
+        bold: bool,
+        italic: bool,
+        underline: bool,
+        reverse: bool,
+        dim: bool,
+    }
+
+    // ---- Effects -----------------------------------------------------
+    // Mirror of savvagent_plugin::Effect (closed set; v0.9.0 §9 rule).
+    variant effect {
+        push-note(note),
+        open-screen(screen-target),
+        set-theme(string),
+        run-slash(slash-call),
+        save-transcript,
+        clear-log,
+        register-keybinding(keybinding),
+    }
+
+    record note {
+        text: string,
+        level: note-level,
+    }
+
+    variant note-level { info, warning, error }
+
+    record screen-target {
+        plugin-id: string,
+        screen-id: string,
+        args-json: string,           // serialized ScreenArgs
+    }
+
+    record slash-call {
+        name: string,
+        args: list<string>,
+    }
+
+    record keybinding {
+        key: key-event-portable,
+        action: keybinding-action,
+    }
+
+    variant keybinding-action {
+        slash(slash-call),
+        emit-effect(effect-name),
+    }
+
+    variant effect-name {
+        save-transcript-action,
+        clear-log-action,
+    }
+
+    // ---- Manifest ----------------------------------------------------
+    record plugin-manifest {
+        id: string,
+        name: string,
+        version: string,
+        description: string,
+        kind: plugin-kind,
+        contributions: contributions,
+    }
+
+    variant plugin-kind { core, optional }
+
+    record contributions {
+        slash-commands: list<string>,
+        hooks: list<hook-kind>,
+        screens: list<string>,
+        render-slots: list<string>,
+        keybindings: list<keybinding>,
+        themes: bool,
+    }
+
+    // ---- Hook discriminants (mirror savvagent_plugin::HookKind) -----
+    variant hook-kind {
+        host-starting,
+        connect,
+        disconnect,
+        turn-start,
+        turn-end,
+        tool-call-start,
+        tool-call-end,
+        prompt-submitted,
+        transcript-saved,
+        provider-registered,
+        context-size-changed,
+        active-provider-changed,
+        subagent-stop,
+    }
+
+    // ---- Errors ------------------------------------------------------
+    variant plugin-error {
+        invalid-input(string),
+        io(string),
+        capability-denied(string),
+        unsupported(string),
+        screen-not-found(string),
+    }
+
+    // ---- Render output ----------------------------------------------
+    record styled-span {
+        text: string,
+        fg: theme-color,
+        bg: theme-color,
+        mods: text-mods,
+    }
+
+    record styled-line {
+        spans: list<styled-span>,
+    }
+
+    // ---- Logging level -----------------------------------------------
+    variant log-level { trace, debug, info, warn, error }
+
+    // ---- Theme catalog entry ----------------------------------------
+    record theme-entry {
+        slug: string,
+        name: string,
+        colors: list<tuple<string, theme-color>>,
+    }
+}

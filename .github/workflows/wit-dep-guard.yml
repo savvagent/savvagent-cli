@@ -1,0 +1,37 @@
+name: WIT dep-guard
+
+# Enforces that `crates/savvagent-plugin-wit` stays a leaf crate. The WIT
+# contract crate must never grow runtime dependencies on the TUI stack,
+# async runtime, error glue, HTTP client, or wasm runtime — those belong
+# in `savvagent-plugin-wasm` (Task 2+). This is a cheap grep that runs on
+# every push/PR that touches the crate.
+
+on:
+  push:
+    paths:
+      - "crates/savvagent-plugin-wit/**"
+      - ".github/workflows/wit-dep-guard.yml"
+  pull_request:
+    paths:
+      - "crates/savvagent-plugin-wit/**"
+      - ".github/workflows/wit-dep-guard.yml"
+
+jobs:
+  guard:
+    name: Forbidden dependency grep
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Forbidden deps grep
+        run: |
+          set -euo pipefail
+          # Extract the [dependencies] section only (stop at the next table header).
+          deps=$(awk '/^\[dependencies\]/{f=1;next} /^\[/{f=0} f' \
+                 crates/savvagent-plugin-wit/Cargo.toml)
+          for forbidden in ratatui crossterm tokio anyhow reqwest wasmtime; do
+            if echo "$deps" | grep -Eq "^${forbidden}([[:space:]]|=)"; then
+              echo "::error::savvagent-plugin-wit must not depend on '$forbidden'"
+              exit 1
+            fi
+          done
+          echo "ok: no forbidden runtime dependencies in savvagent-plugin-wit"

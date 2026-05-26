@@ -2,7 +2,7 @@
 
 use crate::app::{App, Entry, InputMode, TranscriptEntry, log_scroll_y};
 use crate::palette::Palette;
-use crate::providers::PROVIDERS;
+use crate::providers::effective_providers;
 use crate::splash;
 use ratatui::{
     Frame,
@@ -371,8 +371,8 @@ pub fn render(app: &mut App, frame: &mut Frame, frame_data: &HomeFrameData) {
     if matches!(app.input_mode, InputMode::SelectingProvider) {
         let popup = centered_rect(60, 40, area);
         frame.render_widget(Clear, popup);
-        let items: Vec<ListItem> = PROVIDERS
-            .iter()
+        let items: Vec<ListItem> = effective_providers()
+            .into_iter()
             .enumerate()
             .map(|(i, spec)| {
                 let style = if i == app.provider_index {

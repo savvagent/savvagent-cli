@@ -1,0 +1,39 @@
+# Example external plugin: hello-interactive.
+#
+# This crate is **deliberately outside the workspace** because cargo-component
+# needs its own profile + target setup that would clash with the workspace's
+# release config. Build it directly with:
+#
+#     cargo component build --release --target wasm32-unknown-unknown
+#
+# See `src/lib.rs` for an important note on how interactive plugins are
+# opened — there is no slash command in this example because slash commands
+# live in the `plugin-static` world, not `plugin-interactive`.
+[package]
+name = "plugin-hello-interactive"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# Same versions as the in-tree fixtures + the hello-static example.
+wit-bindgen = "0.41"
+wit-bindgen-rt = { version = "0.44", features = ["bitflags"] }
+
+[package.metadata.component]
+package = "savvagent:plugin"
+
+[package.metadata.component.target]
+path = "../../crates/savvagent-plugin-wit/wit"
+world = "plugin-interactive"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = "symbols"
+
+[workspace]

@@ -1,0 +1,29 @@
+[package]
+name = "savvagent-plugin-wit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "WIT contract for savvagent external plugins (sub-project D)."
+
+# Intentionally dependency-light. The host-side bindings for these WIT files
+# are generated inside `savvagent-plugin-wasm` (Task 2) via
+# `wasmtime::component::bindgen!`. Guest-side plugin authors depend on
+# `wit-bindgen` themselves — this crate exists purely to own the `.wit`
+# files and a parse-only sanity test.
+#
+# `.github/workflows/wit-dep-guard.yml` enforces this rule in CI: nothing
+# from ratatui / crossterm / tokio / anyhow / reqwest / wasmtime may appear
+# in `[dependencies]`. See that workflow for the canonical forbidden list.
+
+[dependencies]
+
+[build-dependencies]
+# none — build.rs only emits cargo::rerun-if-changed.
+
+[dev-dependencies]
+wit-parser = "0.250"
+
+[lints.rust]
+unsafe_code = "forbid"

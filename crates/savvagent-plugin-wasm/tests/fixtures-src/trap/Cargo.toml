@@ -1,0 +1,49 @@
+# Fault fixture for Task 7: trap.wasm.
+#
+# Implements the `plugin-static` world. `manifest()` returns a well-formed
+# manifest declaring one slash command `"boom"`. `handle_slash("boom", ..)`
+# deliberately panics via `core::arch::wasm32::unreachable()` — cargo
+# component's runtime turns the panic into a wasm trap, which the host's
+# `StaticAdapter` surfaces as `PluginError::Internal("wasm trap in
+# handle_slash: ...")`. The integration test asserts that string contains
+# one of "trap" / "panic" / "unreachable".
+#
+# Like the other fixture crates this is deliberately outside the workspace
+# (see the root `Cargo.toml`'s `members` list); cargo-component requires
+# its own profile + target setup that would clash with the workspace's
+# release config.
+#
+# Build with `just build-fixtures` (from repo root); the resulting wasm
+# component is copied to `tests/fixtures/trap.wasm` and committed.
+[package]
+name = "fixture-trap"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# Same pinning as the static / interactive / provider fixtures — all four
+# share the cargo-component 0.21.1 bindings emitter and the
+# `wit-bindgen-rt` 0.44 ABI.
+wit-bindgen = "0.41"
+wit-bindgen-rt = { version = "0.44", features = ["bitflags"] }
+
+[package.metadata.component]
+package = "savvagent:plugin"
+
+[package.metadata.component.target]
+path = "../../../../savvagent-plugin-wit/wit"
+world = "plugin-static"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = "symbols"
+
+# Keep the fixture's target dir out of the workspace's `[workspace]`
+# auto-discovery.
+[workspace]

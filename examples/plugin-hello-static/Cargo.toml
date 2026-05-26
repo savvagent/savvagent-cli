@@ -1,0 +1,44 @@
+# Example external plugin: hello-static.
+#
+# This crate is **deliberately outside the workspace** because cargo-component
+# needs its own profile + target setup that would clash with the workspace's
+# release config. Build it directly with:
+#
+#     cargo component build --release --target wasm32-unknown-unknown
+#
+# The resulting `.wasm` lands at
+# `target/wasm32-unknown-unknown/release/plugin_hello_static.wasm`. Drop that
+# file plus `plugin.toml` into one of savvagent's discovery paths (e.g.
+# `~/.savvagent/plugins/hello-static/`) and run `/plugins reload`.
+[package]
+name = "plugin-hello-static"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# Pinned to versions that work with `cargo component 0.21.1` — the same
+# combo the in-tree fixtures use. cargo-component bundles its own bindings
+# emitter and links `wit-bindgen-rt` directly; the user-facing `wit-bindgen`
+# crate is imported only for the `export!` macro path.
+wit-bindgen = "0.41"
+wit-bindgen-rt = { version = "0.44", features = ["bitflags"] }
+
+[package.metadata.component]
+package = "savvagent:plugin"
+
+[package.metadata.component.target]
+path = "../../crates/savvagent-plugin-wit/wit"
+world = "plugin-static"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = "symbols"
+
+# Keep this example's `target/` out of the workspace's auto-discovery.
+[workspace]

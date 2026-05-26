@@ -1,0 +1,105 @@
+package savvagent:plugin@0.1.0;
+
+// `plugin-provider` world — plugins implementing an SPP provider in WASM.
+// Uses the SPP-mirror types in `spp.wit` (same package, sibling interface;
+// the import is therefore `use spp.{...}`, not `use savvagent:spp/types`
+// per the Task 1 single-package reconciliation).
+world plugin-provider {
+    use types.{plugin-manifest, plugin-error, log-level};
+    use spp.{complete-request, complete-response, stream-event,
+             model-info, list-models-response,
+             count-tokens-request, count-tokens-response,
+             provider-error, provider-manifest};
+
+    // ---- Imports -----------------------------------------------------
+    // `log` is a host-provided function, declared inline. The three
+    // capability interfaces live as sibling interfaces in this package
+    // and are imported directly by name (WIT does not permit aliased
+    // interface imports inside a world; `import x: y` is for functions
+    // and inline anonymous types only).
+    import log: func(level: log-level, msg: string);
+    import http-capability;
+    import keyring-capability;
+    import progress-capability;
+
+    // ---- Exports -----------------------------------------------------
+    // `manifest` returns a provider manifest the host uses to register the
+    // plugin's models (and the default-model id, if any). Named `manifest`
+    // (not `init`) to align with the `plugin-static` and `plugin-interactive`
+    // worlds, which both export `manifest()` as the discovery entry point.
+    export manifest: func() -> result<provider-manifest, plugin-error>;
+
+    // Core SPP `complete` call. Provider errors flow back as
+    // `provider-error`; plugin-side bugs (panics, unsupported config) flow
+    // back via the host's adapter as traps.
+    export complete: func(req: complete-request)
+        -> result<complete-response, provider-error>;
+
+    // Optional but recommended discovery export. Hosts treat
+    // `not-implemented` as "fall through to optimistic model selection".
+    export list-models: func() -> result<list-models-response, provider-error>;
+
+    // Optional pre-flight token counting.
+    export count-tokens: func(req: count-tokens-request)
+        -> result<count-tokens-response, provider-error>;
+}
+
+// ---- Capability interfaces -----------------------------------------
+
+interface http-capability {
+    record http-request {
+        method: string,
+        url: string,
+        headers: list<tuple<string, string>>,
+        body: option<list<u8>>,
+        timeout-ms: option<u32>,
+    }
+
+    record http-response {
+        status: u16,
+        headers: list<tuple<string, string>>,
+        body: list<u8>,
+    }
+
+    variant http-error {
+        transport(string),
+        tls(string),
+        denied-host(string),
+        denied-method(string),
+        oversize,
+        timeout,
+        body-too-large(u64),
+    }
+
+    // Streamed HTTP response (provider SSE / chunked encoding). The
+    // plugin pulls chunks until `next-chunk` returns `none`.
+    resource http-stream {
+        status: func() -> u16;
+        headers: func() -> list<tuple<string, string>>;
+        next-chunk: func() -> result<option<list<u8>>, http-error>;
+    }
+
+    fetch: func(req: http-request) -> result<http-response, http-error>;
+    fetch-stream: func(req: http-request) -> result<http-stream, http-error>;
+}
+
+interface keyring-capability {
+    variant keyring-error {
+        not-found,
+        denied(string),
+        backend(string),
+    }
+
+    // The keyring service is always `savvagent`; only `account` is a
+    // parameter, and only accounts pre-declared in the plugin's manifest
+    // (Task 3) are allowed.
+    get: func(account: string) -> result<string, keyring-error>;
+}
+
+interface progress-capability {
+    // Sibling-interface import: SPP lives in the same package as a sibling
+    // interface, so the syntax is `use spp.{stream-event}` rather than the
+    // cross-package `use savvagent:spp/types.{stream-event}` the plan sketched.
+    use spp.{stream-event};
+    emit-stream-event: func(event: stream-event);
+}

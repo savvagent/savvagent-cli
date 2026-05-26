@@ -207,8 +207,15 @@ no-plugins        = "  (कोई प्लगइन पंजीकृत न�
 row-core          = "(core)"
 row-on            = "[ on ]"
 row-off           = "[ off]"
+row-builtin       = "(अंतर्निहित)"
+row-external      = "(बाह्य)"
 core-cannot-disable = "Core प्लगइन निष्क्रिय नहीं किए जा सकते।"
 tips              = "ऊपर/नीचे नेविगेट · Space/Enter टॉगल · Esc बंद करें"
+
+[picker.plugins-trust-modal]
+modal-title       = "बाहरी प्लगइन इंस्टॉल करें?"
+warning           = "चेतावनी: बाहरी प्लगइन सैंडबॉक्स्ड WebAssembly में चलते हैं, लेकिन नेटवर्क, keyring और प्रोजेक्ट फ़ाइलों तक पहुंच सकते हैं।"
+tips              = "Enter भरोसा + इंस्टॉल · Esc रद्द करें"
 
 [picker.command-palette]
 modal-title       = "कमांड पैलेट"

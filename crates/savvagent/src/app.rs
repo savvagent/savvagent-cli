@@ -194,7 +194,7 @@ use serde_json::Value;
 use tui_textarea::{TextArea, WrapMode};
 
 use crate::prompt_history::PromptHistory;
-use crate::providers::{PROVIDERS, ProviderSpec};
+use crate::providers::{ProviderSpec, effective_providers};
 
 /// Minimum height (rows, including borders) for the main prompt input.
 /// 1 visible content row + 2 border rows.
@@ -1858,7 +1858,7 @@ impl App {
     pub fn open_provider_selector(&mut self) {
         self.provider_index = self
             .active_provider_id
-            .and_then(|id| PROVIDERS.iter().position(|p| p.id == id))
+            .and_then(|id| effective_providers().into_iter().position(|p| p.id == id))
             .unwrap_or(0);
         self.input_mode = InputMode::SelectingProvider;
     }
@@ -1870,7 +1870,7 @@ impl App {
     /// an empty input to reuse it; otherwise the placeholder just hints
     /// at the env-var name.
     pub fn enter_api_key_for(&mut self, idx: usize) {
-        let Some(spec) = PROVIDERS.get(idx) else {
+        let Some(spec) = effective_providers().get(idx).copied() else {
             self.input_mode = InputMode::Editing;
             return;
         };

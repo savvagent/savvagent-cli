@@ -1,0 +1,44 @@
+# Fault fixture for Task 7: denied-account.wasm.
+#
+# Implements the `plugin-provider` world. `complete()` calls
+# `keyring_capability::get("not-listed")`. The integration test stages a
+# manifest whose `[security] keyring-accounts` is `["allowed"]`, so the
+# host's `KeyringState::get` returns
+# `KeyringError::Denied("not-listed")` before any keyring backend is
+# consulted.
+#
+# Like the other fixture crates this is deliberately outside the
+# workspace; cargo-component requires its own profile + target setup
+# that would clash with the workspace's release config.
+#
+# Build with `just build-fixtures` (from repo root); the resulting wasm
+# component is copied to `tests/fixtures/denied-account.wasm` and
+# committed.
+[package]
+name = "fixture-denied-account"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# Same pinning as the other Task 7 fault fixtures.
+wit-bindgen = "0.41"
+wit-bindgen-rt = { version = "0.44", features = ["bitflags"] }
+
+[package.metadata.component]
+package = "savvagent:plugin"
+
+[package.metadata.component.target]
+path = "../../../../savvagent-plugin-wit/wit"
+world = "plugin-provider"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = "symbols"
+
+[workspace]

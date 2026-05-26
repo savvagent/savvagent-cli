@@ -6,3 +6,20 @@
 
 # Local worktrees created by Claude Code's EnterWorktree tool.
 .claude/worktrees/
+
+# wasm-fixture source trees ship as standalone (non-workspace) component
+# crates; their `target/` directories are reproducible from the committed
+# `*.wasm` next door.
+crates/savvagent-plugin-wasm/tests/fixtures-src/*/target/
+
+# cargo-component re-emits `src/bindings.rs` on every build from the WIT
+# files in `crates/savvagent-plugin-wit/wit`; the file is generated, not
+# hand-written, and lives only inside the fixture sources.
+crates/savvagent-plugin-wasm/tests/fixtures-src/*/src/bindings.rs
+
+# Example external plugins under `examples/plugin-hello-*` are also
+# standalone (non-workspace) component crates. Same rules apply: keep
+# their `Cargo.lock` and sources, ignore the build artifacts and the
+# generated `bindings.rs`.
+examples/plugin-hello-*/target/
+examples/plugin-hello-*/src/bindings.rs
