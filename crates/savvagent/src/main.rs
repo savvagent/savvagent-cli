@@ -37,6 +37,7 @@ mod i18n_smoke {
 mod app;
 mod config_file;
 mod creds;
+mod egui_app;
 mod migration;
 mod models_pref;
 mod palette;
@@ -79,7 +80,7 @@ const LOG_SCROLL_STEP: u16 = 10;
 const MOUSE_WHEEL_SCROLL_STEP: u16 = 3;
 
 /// Worker → main-loop messages.
-enum WorkerMsg {
+pub(crate) enum WorkerMsg {
     Event(TurnEvent),
     /// Sent if `run_turn_streaming` returned an error.
     Error(String),
@@ -104,13 +105,13 @@ enum WorkerMsg {
     ModelRestored(String),
 }
 
-type HostSlot = Arc<RwLock<Option<Arc<Host>>>>;
+pub(crate) type HostSlot = Arc<RwLock<Option<Arc<Host>>>>;
 
 /// Resolved paths for every bundled tool-server binary the TUI knows how to
 /// register. Each field is `None` when the binary couldn't be found; the
 /// host just doesn't advertise that tool's surface in `tools/list`.
 #[derive(Clone, Default)]
-struct ToolBins {
+pub(crate) struct ToolBins {
     fs: Option<PathBuf>,
     bash: Option<PathBuf>,
     grep: Option<PathBuf>,
@@ -143,6 +144,66 @@ async fn main() -> Result<()> {
     dotenvy::dotenv().ok();
     init_tracing();
 
+    // `savvagent gui` launches the experimental native egui front-end
+    // (v0.19.0 migration, in progress) instead of the ratatui TUI. Every
+    // other invocation runs the TUI exactly as before. `eframe::run_native`
+    // owns the main thread for the lifetime of the window; we are inside
+    // `#[tokio::main]`, so spawned turn workers use `Handle::current()`.
+    if std::env::args().nth(1).as_deref() == Some("gui") {
+        return egui_app::run().map_err(|e| anyhow::anyhow!("egui front-end failed: {e}"));
+    }
+
+    let (mut app, host_slot, project_root, tool_bins) = bootstrap_app_and_host().await?;
+
+    let mut terminal = tui::init()?;
+
+    // Restore terminal on panic.
+    let original_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = tui::restore();
+        original_hook(info);
+    }));
+
+    let res = run_app(
+        &mut terminal,
+        &mut app,
+        host_slot.clone(),
+        project_root,
+        tool_bins,
+    )
+    .await;
+
+    let _ = tui::restore();
+
+    if let Some(host) = current_host(&host_slot).await {
+        if let Err(e) = save_transcript_now(&app, &host).await {
+            eprintln!("warning: could not save transcript on exit: {e}");
+        }
+    }
+    if let Some(host) = host_slot.write().await.take() {
+        host.shutdown().await;
+    }
+
+    if let Err(err) = res {
+        eprintln!("{err:?}");
+    }
+
+    // If `/update` succeeded during this session, the on-disk binary is
+    // a newer version than the one we're still running. Surface a hint
+    // on stderr now that the alt-screen has torn down.
+    if let Some((from, to)) = plugin::builtin::self_update::pending_restart_hint() {
+        eprintln!("savvagent: installed v{to} (was v{from}). Restart to use the new version.");
+    }
+
+    Ok(())
+}
+
+/// Build the shared application state: resolve tool binaries, bootstrap the
+/// provider-pool host, build `App`, install the plugin runtime, and align
+/// startup state/notes. Shared by the ratatui TUI (`run_app`) and the egui
+/// front-end (`egui_app::run`); contains no terminal/window-specific setup.
+pub(crate) async fn bootstrap_app_and_host() -> Result<(App, HostSlot, std::path::PathBuf, ToolBins)>
+{
     let project_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let tool_bins = ToolBins {
         fs: locate_bundled_bin("savvagent-tool-fs", "SAVVAGENT_TOOL_FS_BIN"),
@@ -162,15 +223,6 @@ async fn main() -> Result<()> {
     let host_slot: HostSlot = Arc::new(RwLock::new(initial.map(|(h, _, _, _)| h)));
 
     let transcript_dir = transcript_dir();
-
-    let mut terminal = tui::init()?;
-
-    // Restore terminal on panic.
-    let original_hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        let _ = tui::restore();
-        original_hook(info);
-    }));
 
     let initial_locale = crate::plugin::builtin::language::catalog::detect_initial();
     rust_i18n::set_locale(&initial_locale);
@@ -307,38 +359,8 @@ async fn main() -> Result<()> {
     if tool_bins.lsp.is_none() {
         app.push_note(rust_i18n::t!("errors.tool-lsp-not-found").to_string());
     }
-    let res = run_app(
-        &mut terminal,
-        &mut app,
-        host_slot.clone(),
-        project_root,
-        tool_bins,
-    )
-    .await;
 
-    let _ = tui::restore();
-
-    if let Some(host) = current_host(&host_slot).await {
-        if let Err(e) = save_transcript_now(&app, &host).await {
-            eprintln!("warning: could not save transcript on exit: {e}");
-        }
-    }
-    if let Some(host) = host_slot.write().await.take() {
-        host.shutdown().await;
-    }
-
-    if let Err(err) = res {
-        eprintln!("{err:?}");
-    }
-
-    // If `/update` succeeded during this session, the on-disk binary is
-    // a newer version than the one we're still running. Surface a hint
-    // on stderr now that the alt-screen has torn down.
-    if let Some((from, to)) = plugin::builtin::self_update::pending_restart_hint() {
-        eprintln!("savvagent: installed v{to} (was v{from}). Restart to use the new version.");
-    }
-
-    Ok(())
+    Ok((app, host_slot, project_root, tool_bins))
 }
 
 /// Build the host using the provider pool path, reading startup policy from
@@ -632,7 +654,7 @@ fn locate_bundled_bin(name: &str, env_override: &str) -> Option<PathBuf> {
     None
 }
 
-async fn current_host(slot: &HostSlot) -> Option<Arc<Host>> {
+pub(crate) async fn current_host(slot: &HostSlot) -> Option<Arc<Host>> {
     slot.read().await.clone()
 }
 
@@ -676,7 +698,7 @@ fn transcript_dir() -> PathBuf {
     home.join(".savvagent").join("transcripts")
 }
 
-async fn save_transcript_now(app: &App, host: &Arc<Host>) -> Result<PathBuf> {
+pub(crate) async fn save_transcript_now(app: &App, host: &Arc<Host>) -> Result<PathBuf> {
     if app.entries.is_empty() {
         return Ok(PathBuf::new());
     }
@@ -2443,7 +2465,7 @@ async fn perform_connect(
 /// monotonic and matched across Start/End pairs. The strict-sequential
 /// nature of `Host::run_turn_inner` (tool calls don't interleave per
 /// turn) makes a single `last_tool_call_id` slot sufficient.
-fn translate_turn_event_to_host_event(
+pub(crate) fn translate_turn_event_to_host_event(
     event: &TurnEvent,
     next_turn_id: &mut u32,
     current_turn_id: &mut Option<u32>,
@@ -2539,7 +2561,10 @@ fn translate_turn_event_to_host_event(
 /// stays visible in the conversation log with its `source` field
 /// populated even when no renderer is available (e.g. when the plugin
 /// is disabled or the index hasn't been built yet).
-async fn create_canvas_renderer(app: &mut App, canvas_id: savvagent_plugin::ContentBlockId) {
+pub(crate) async fn create_canvas_renderer(
+    app: &mut App,
+    canvas_id: savvagent_plugin::ContentBlockId,
+) {
     // Extract the finalized source from the entry.
     let source = match app
         .entries
@@ -2622,7 +2647,11 @@ async fn create_canvas_renderer(app: &mut App, canvas_id: savvagent_plugin::Cont
 /// the canvas entry in the conversation log is unaffected. Disable
 /// auto-export by toggling the `internal:html-canvas` plugin off via
 /// `~/.savvagent/plugins.toml`.
-fn auto_export_canvas(app: &App, canvas_id: savvagent_plugin::ContentBlockId, turn_id: u32) {
+pub(crate) fn auto_export_canvas(
+    app: &App,
+    canvas_id: savvagent_plugin::ContentBlockId,
+    turn_id: u32,
+) {
     use crate::app::Entry;
     use crate::plugin::builtin::html_canvas::auto_export::{
         auto_export_path, canvases_dir, write_canvas,

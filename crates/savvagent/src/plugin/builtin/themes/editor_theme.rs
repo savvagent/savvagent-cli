@@ -108,13 +108,23 @@ fn color_to_hex(c: Color, fallback: &str) -> String {
 }
 
 /// Resolve an xterm 256-color palette index to `#RRGGBB`.
+fn indexed_to_hex(n: u8) -> String {
+    let (r, g, b) = xterm_256_rgb(n);
+    format!("#{r:02x}{g:02x}{b:02x}")
+}
+
+/// Resolve an xterm 256-color palette index to its RGB triple.
 ///
 /// Layout:
 /// * `0..=15`  — system colors (ANSI 8 + bright ANSI 8)
 /// * `16..=231` — 6×6×6 RGB cube
 /// * `232..=255` — 24 grayscale steps
-fn indexed_to_hex(n: u8) -> String {
-    let (r, g, b) = match n {
+///
+/// Single source of truth shared with the egui sink
+/// (`crate::egui_app::convert`) so indexed colors render identically in the
+/// code-editor syntax theme and the GUI conversation log.
+pub(crate) fn xterm_256_rgb(n: u8) -> (u8, u8, u8) {
+    match n {
         0 => (0, 0, 0),
         1 => (128, 0, 0),
         2 => (0, 128, 0),
@@ -149,8 +159,7 @@ fn indexed_to_hex(n: u8) -> String {
             let v = (8_u16 + 10_u16 * (n as u16 - 232)).min(255) as u8;
             (v, v, v)
         }
-    };
-    format!("#{r:02x}{g:02x}{b:02x}")
+    }
 }
 
 #[cfg(test)]

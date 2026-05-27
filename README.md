@@ -89,7 +89,18 @@ cargo build
 
 # Run the TUI. With nothing configured, it boots disconnected.
 cargo run -p savvagent
+
+# Or launch the experimental native GUI (egui) instead of the TUI.
+cargo run -p savvagent -- gui
 ```
+
+> **Experimental GUI (v0.19.0, in progress).** `savvagent gui` opens a
+> native `eframe`/`egui` window that reuses the exact same host, plugin
+> runtime, and turn machinery as the TUI — it paints the conversation log,
+> the plugin header/tips/footer slots, and a prompt that submits streaming
+> turns. It is being built alongside the ratatui TUI, which remains the
+> default and is unchanged. Screens/modals, the code editor, markdown, the
+> file picker, and inline canvases are not wired up in the GUI yet.
 
 If the bundled tool servers (`savvagent-tool-fs`, `savvagent-tool-bash`,
 `savvagent-tool-grep`) aren't on `$PATH` and aren't sitting next to the

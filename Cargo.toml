@@ -58,6 +58,13 @@ blitz-dom = "=0.3.0-alpha.4"
 blitz-html = "=0.3.0-alpha.4"
 blitz-paint = "=0.3.0-alpha.4"
 blitz-traits = "=0.3.0-alpha.4"
+
+# Native GUI front-end (v0.19.0 egui migration). Default features keep the
+# glow backend plus x11 + wayland windowing, which are required to open a
+# window on Linux — do NOT set default-features = false without re-adding
+# those windowing features.
+eframe = "0.32"
+egui = "0.32"
 anyrender = "0.10"
 anyrender_vello_cpu = "0.12"
 peniko = "0.6"

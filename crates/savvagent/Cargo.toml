@@ -71,6 +71,13 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 dotenvy.workspace = true
 dirs.workspace = true
+# Native GUI front-end (v0.19.0 egui migration). Built alongside the ratatui
+# TUI; launched via the `savvagent gui` subcommand. `futures` provides a
+# foreign-executor `block_on` for the sync egui paint pass (tokio's own
+# block_on panics inside the runtime).
+eframe.workspace = true
+egui.workspace = true
+futures.workspace = true
 crossterm.workspace = true
 ratatui.workspace = true
 ratatui-image.workspace = true
