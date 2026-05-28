@@ -10,11 +10,13 @@
 //! plugin render boundary the ratatui TUI uses — `build_model` reuses
 //! `ui::compute_home_frame_data` — so the GUI and TUI agree on slot content.
 
+use savvagent_plugin::manifest::ScreenLayout;
 use savvagent_plugin::{StyledLine, StyledSpan, TextMods};
 
 use super::{FONT_SIZE, SavvagentApp};
 use crate::app::Entry;
 use crate::egui_app::convert::styled_line_to_job;
+use crate::egui_app::screen::modal_geometry;
 use crate::palette::Palette;
 
 /// Paint the whole window: header, footer/tips, prompt, and the conversation
@@ -23,11 +25,90 @@ use crate::palette::Palette;
 /// it, which reads top-to-bottom as `log → footer → prompt`.
 pub fn paint(state: &mut SavvagentApp, ctx: &egui::Context) {
     let palette = Palette::for_theme(state.app.active_theme);
+    let screen_open = !state.app.screen_stack.is_empty();
 
     paint_header(state, ctx);
-    paint_prompt(state, ctx);
+    if !screen_open {
+        paint_prompt(state, ctx); // prompt hidden while a modal owns input
+    }
     paint_footer(state, ctx, &palette);
     paint_log(state, ctx, &palette);
+
+    if screen_open {
+        paint_screen_overlay(state, ctx, &palette);
+    }
+}
+
+/// Paint the top screen of the stack (if any) as an overlay above the home
+/// panels. The screen's `render(region)` is SYNC, so no async here. The caller
+/// (`paint`) checks `screen_stack` itself to suppress the home prompt; this
+/// function silently does nothing when the stack is empty.
+fn paint_screen_overlay(state: &SavvagentApp, ctx: &egui::Context, palette: &Palette) {
+    let Some((screen, layout)) = state.app.screen_stack.top() else {
+        return;
+    };
+    // Glyph metrics for points <-> cols/rows.
+    let font = egui::FontId::monospace(FONT_SIZE);
+    let (glyph_w, glyph_h) = ctx.fonts(|f| (f.glyph_width(&font, 'M'), f.row_height(&font)));
+    let avail = ctx.available_rect(); // central area below/above panels already reserved
+    let geom = modal_geometry(avail, layout, glyph_w, glyph_h);
+
+    // Dim the background behind a modal/bottom-sheet so focus is obvious.
+    if !matches!(layout, ScreenLayout::Fullscreen { .. }) {
+        let painter = ctx.layer_painter(egui::LayerId::new(
+            egui::Order::Middle,
+            egui::Id::new("screen_dim"),
+        ));
+        painter.rect_filled(avail, 0.0, egui::Color32::from_black_alpha(128));
+    }
+
+    let title = match layout {
+        ScreenLayout::CenteredModal { title: Some(t), .. } => Some(t.clone()),
+        _ => None,
+    };
+    let id = screen.id();
+    let lines = screen.render(geom.region);
+    let tips = screen.tips();
+
+    let area = egui::Area::new(egui::Id::new(("screen_overlay", id.clone())))
+        .order(egui::Order::Foreground)
+        .fixed_pos(geom.outer.min);
+    area.show(ctx, |ui| {
+        ui.set_clip_rect(geom.outer);
+        let frame = egui::Frame::popup(ui.style())
+            .fill(palette_bg(palette))
+            .stroke(egui::Stroke::new(1.0, palette_border(palette)));
+        frame.show(ui, |ui| {
+            ui.set_width(geom.outer.width());
+            ui.set_height(geom.outer.height());
+            if let Some(t) = &title {
+                ui.label(egui::RichText::new(t).strong());
+                ui.separator();
+            }
+            // view-file/edit-file are marker screens whose rich widget lands in
+            // Plan 3; show a placeholder rather than an empty modal.
+            if id == "view-file" || id == "edit-file" {
+                ui.weak("[file view/edit — Plan 3]");
+            }
+            for line in &lines {
+                ui.label(styled_line_to_job(line, palette, FONT_SIZE));
+            }
+            if !tips.is_empty() {
+                ui.separator();
+                for line in &tips {
+                    ui.label(styled_line_to_job(line, palette, FONT_SIZE));
+                }
+            }
+        });
+    });
+}
+
+// Small helpers to pull two palette slots as Color32 for chrome.
+fn palette_bg(p: &Palette) -> egui::Color32 {
+    crate::egui_app::convert::theme_color_to_color32(savvagent_plugin::ThemeColor::Bg, p)
+}
+fn palette_border(p: &Palette) -> egui::Color32 {
+    crate::egui_app::convert::theme_color_to_color32(savvagent_plugin::ThemeColor::Border, p)
 }
 
 /// Top panel: product name + active provider/model label.

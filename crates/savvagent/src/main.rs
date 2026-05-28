@@ -737,7 +737,7 @@ pub(crate) async fn save_transcript_now(app: &App, host: &Arc<Host>) -> Result<P
 /// All other slash commands are routed through the plugin SlashRouter; on
 /// `SlashError::Unknown` we fall back to the legacy `App::handle_command`
 /// for backwards compatibility with commands not yet ported to plugins.
-async fn dispatch_slash_command(
+pub(crate) async fn dispatch_slash_command(
     app: &mut App,
     cmd: &str,
     host_slot: &HostSlot,
@@ -1305,7 +1305,7 @@ async fn refresh_cached_models(app: &mut App, host_slot: &HostSlot) {
 /// applies the bare model id. A bare id (no slash) is treated as a model
 /// on the currently-active provider for backwards compatibility with the
 /// `/model <id>` slash form.
-async fn apply_pending_model_change(
+pub(crate) async fn apply_pending_model_change(
     app: &mut App,
     host_slot: &HostSlot,
     _project_root: &Path,
@@ -1436,7 +1436,7 @@ async fn apply_pending_model_change(
 /// client build is the price for fixing the silent-failure path where
 /// `/connect <provider>` with a stored key only landed in
 /// `App::registered_providers` and never the host pool.
-async fn apply_pending_pool_add(app: &mut App, host_slot: &HostSlot) {
+pub(crate) async fn apply_pending_pool_add(app: &mut App, host_slot: &HostSlot) {
     use crate::plugin::builtin::{
         provider_anthropic::ProviderAnthropicPlugin, provider_gemini::ProviderGeminiPlugin,
         provider_local::ProviderLocalPlugin, provider_openai::ProviderOpenAiPlugin,
@@ -1584,7 +1584,7 @@ async fn apply_pending_pool_add(app: &mut App, host_slot: &HostSlot) {
 /// Drain `app.pending_routing_reload` (set by `Effect::ReloadRoutingRules`)
 /// and reload `~/.savvagent/routing.toml` via the host. No-op when nothing
 /// is queued. Mirrors `apply_pending_model_change`'s drain pattern.
-async fn apply_pending_routing_reload(app: &mut App, host_slot: &HostSlot) {
+pub(crate) async fn apply_pending_routing_reload(app: &mut App, host_slot: &HostSlot) {
     if app.pending_routing_reload.take().is_none() {
         return;
     }
@@ -1606,7 +1606,7 @@ async fn apply_pending_routing_reload(app: &mut App, host_slot: &HostSlot) {
 
 /// Drain `app.pending_routing_show` (set by `Effect::ShowRoutingRules`)
 /// and render the routing-rules summary. No-op when nothing is queued.
-async fn apply_pending_routing_show(app: &mut App, host_slot: &HostSlot) {
+pub(crate) async fn apply_pending_routing_show(app: &mut App, host_slot: &HostSlot) {
     if app.pending_routing_show.take().is_none() {
         return;
     }
@@ -1678,7 +1678,7 @@ fn render_routing_show(app: &mut App, rules: &savvagent_host::RoutingRules) {
 /// install the gate on the active host. No-op when nothing is queued or
 /// when no host exists yet (the effect arm already warns in that case via
 /// a tracing::warn — the gate is simply dropped).
-async fn apply_pending_gate(app: &mut App, host_slot: &HostSlot) {
+pub(crate) async fn apply_pending_gate(app: &mut App, host_slot: &HostSlot) {
     let Some(gate) = app.pending_gate.take() else {
         return;
     };
@@ -1698,7 +1698,7 @@ async fn apply_pending_gate(app: &mut App, host_slot: &HostSlot) {
 /// host exists yet. When the host exists but its registry slot is empty
 /// (post-shutdown race), each tool is dropped with a warn-log; the
 /// effect can be re-emitted by the plugin on the next host connection.
-async fn apply_pending_in_process_tools(app: &mut App, host_slot: &HostSlot) {
+pub(crate) async fn apply_pending_in_process_tools(app: &mut App, host_slot: &HostSlot) {
     let queued = std::mem::take(&mut app.pending_in_process_tools);
     if queued.is_empty() {
         return;

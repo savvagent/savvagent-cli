@@ -1,4 +1,4 @@
-//! Native egui front-end (v0.19.0 migration, Plan 1). Built alongside the
+//! Native egui front-end (v0.19.0 migration, Plans 1–2). Built alongside the
 //! ratatui TUI and launched via the `savvagent gui` subcommand — see
 //! `docs/superpowers/specs/2026-05-26-v0.19.0-egui-frontend-design.md`.
 //!
@@ -28,6 +28,7 @@
 pub mod convert;
 pub mod fonts;
 pub mod render_model;
+pub mod screen;
 pub mod view;
 
 use std::path::PathBuf;
@@ -84,13 +85,9 @@ pub struct SavvagentApp {
     pub prompt: String,
 
     /// Project root + tool binaries — captured from `bootstrap_app_and_host`
-    /// and held for later GUI tasks (slash-command dispatch, `/connect`, tool
-    /// registration), which need them exactly as `run_app` does. Unread in the
-    /// foundation; the allow is scoped to these two reserved fields rather than
-    /// the whole struct so any *other* dead field still surfaces as a warning.
-    #[allow(dead_code)]
+    /// and threaded into the pending-action drain (`apply_pending_model_change`)
+    /// and slash-command dispatch, exactly as `run_app` does.
     project_root: PathBuf,
-    #[allow(dead_code)]
     tool_bins: ToolBins,
 }
 
@@ -252,18 +249,55 @@ impl SavvagentApp {
         }
     }
 
+    /// Drain the same pending-action queues `run_app` drains after a screen
+    /// key, in the same order, so picker selections (model/provider/routing/
+    /// etc.) take effect. Each `apply_pending_*` is a `pub(crate)` helper in
+    /// `main.rs`.
+    async fn drain_pending(&mut self) {
+        crate::apply_pending_model_change(
+            &mut self.app,
+            &self.host_slot,
+            &self.project_root,
+            &self.tool_bins,
+        )
+        .await;
+        crate::apply_pending_pool_add(&mut self.app, &self.host_slot).await;
+        crate::apply_pending_gate(&mut self.app, &self.host_slot).await;
+        crate::apply_pending_in_process_tools(&mut self.app, &self.host_slot).await;
+        crate::apply_pending_routing_reload(&mut self.app, &self.host_slot).await;
+        crate::apply_pending_routing_show(&mut self.app, &self.host_slot).await;
+    }
+
     /// Spawn a streaming turn for `text`. A faithful port of `run_app`'s
     /// Enter-key turn-spawn path: push the user entry, set `is_loading`,
     /// consume any one-turn model override, then `spawn` the worker that runs
     /// `Host::run_turn_streaming` and forwards `TurnEvent`s back over the
     /// channel.
     ///
-    /// Slash-command dispatch and the `PromptSubmitted` hook / pending-prompt
-    /// machinery are intentionally out of scope for the foundation (they're
-    /// owned by later GUI tasks); this is the plain "send a prompt to the
-    /// active host" path.
+    /// `/`-prefixed input is routed to the shared `dispatch_slash_command`
+    /// instead (opening pickers / running commands); the `PromptSubmitted` hook
+    /// and pending-prompt-prefix machinery remain out of scope for now.
     fn submit_prompt(&mut self, text: String) {
         if text.is_empty() || self.app.is_loading {
+            return;
+        }
+        // Slash command -> dispatch (opens pickers, runs commands) instead of a
+        // turn. Mirrors the ratatui submit path: record the input in history,
+        // run the shared `dispatch_slash_command` (which itself calls
+        // `apply_effects` and may push a screen / queue pending actions), then
+        // drain the pending queues to apply anything it staged.
+        if text.starts_with('/') {
+            self.app.prompt_history.append(text.clone());
+            let tx = self.worker_tx.clone();
+            futures::executor::block_on(crate::dispatch_slash_command(
+                &mut self.app,
+                &text,
+                &self.host_slot,
+                &self.project_root,
+                &self.tool_bins,
+                &tx,
+            ));
+            futures::executor::block_on(self.drain_pending());
             return;
         }
         let Some(host) = futures::executor::block_on(current_host(&self.host_slot)) else {
@@ -322,27 +356,33 @@ impl SavvagentApp {
 
 impl eframe::App for SavvagentApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // 1. Global input routing. Only Ctrl-C (quit) is handled globally in
-        //    the foundation; the prompt `TextEdit` consumes its own keys. We
-        //    convert through the same portable-key sink the plugin boundary
-        //    uses so a later task can route arbitrary global accelerators
-        //    through plugins without re-deriving modifiers.
+        // 1. Global quit chord. Observes Ctrl-C / Ctrl-D and requests a viewport
+        //    close — the events themselves still propagate to block 3 (when a
+        //    screen is open) or to the prompt `TextEdit`, but the close request
+        //    races them and shuts the window. The GUI deliberately does NOT
+        //    route home keybindings through the plugin `KeybindingRouter` —
+        //    pickers are opened via slash commands (see `submit_prompt`); only
+        //    the ratatui TUI drives plugin-bound home accelerators.
         let events = ctx.input(|i| i.events.clone());
         for ev in &events {
             if let Some(k) = convert::egui_event_to_portable(ev) {
-                use savvagent_plugin::KeyCodePortable;
-                if k.modifiers.ctrl && matches!(k.code, KeyCodePortable::Char('c')) {
+                use savvagent_plugin::KeyCodePortable as KC;
+                let quit = k.modifiers.ctrl && matches!(k.code, KC::Char('c') | KC::Char('d'));
+                if quit {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 }
             }
         }
 
         // 2. Drain the worker channel and rebuild the render-model snapshot in
-        //    one async pass on the UI thread. `handle_worker_msg` borrows
-        //    `&mut self`, while draining borrows `self.worker_rx`; we resolve
-        //    the aliasing by first collecting messages into an owned `Vec`
-        //    (borrows only `self.worker_rx`), then handling them (borrows the
-        //    rest of `self`).
+        //    one async pass. Runs every frame, screen open or not, so an
+        //    in-flight streaming turn can never wedge on the 128-slot channel
+        //    back-pressuring while a modal owns input.
+        //
+        //    `handle_worker_msg` borrows `&mut self`, while draining borrows
+        //    `self.worker_rx`; we resolve the aliasing by first collecting
+        //    messages into an owned `Vec` (borrows only `self.worker_rx`), then
+        //    handling them (borrows the rest of `self`).
         futures::executor::block_on(async {
             let mut drained = Vec::new();
             while let Ok(msg) = self.worker_rx.try_recv() {
@@ -355,12 +395,54 @@ impl eframe::App for SavvagentApp {
             *self.render_cache.lock().unwrap() = model;
         });
 
-        // 3. Paint.
+        // 3. If a screen is open, route input to it and skip home handling —
+        //    mirrors `run_app`'s precedence (quit → top screen `on_key` →
+        //    home). Effects (push/pop/close) and the pending-action queues are
+        //    applied per key, in the same order the TUI uses. The render model
+        //    is only rebuilt again when we actually routed keys; block 2's
+        //    rebuild is otherwise still current.
+        if !self.app.screen_stack.is_empty() {
+            let keys = screen::portable_keys_from_events(&events);
+            let had_keys = !keys.is_empty();
+            futures::executor::block_on(async {
+                for key in keys {
+                    let effs = match self.app.screen_stack.top_mut() {
+                        Some((top, _layout)) => match top.on_key(key).await {
+                            Ok(e) => e,
+                            Err(err) => {
+                                tracing::warn!(error = %err, "screen on_key failed");
+                                continue;
+                            }
+                        },
+                        None => break, // a prior key's effect closed the last screen
+                    };
+                    if let Err(err) =
+                        crate::plugin::effects::apply_effects(&mut self.app, effs).await
+                    {
+                        tracing::warn!(error = %err, "apply_effects (screen) failed");
+                    }
+                    self.drain_pending().await;
+                }
+                if had_keys {
+                    let model = build_model(&self.app, RENDER_COLS).await;
+                    *self.render_cache.lock().unwrap() = model;
+                }
+            });
+            view::paint(self, ctx);
+            ctx.request_repaint(); // screens are interactive; keep ticking
+            return;
+        }
+
+        // 4. Paint.
         view::paint(self, ctx);
 
-        // 4. Keep repainting while a turn streams so newly-arrived deltas show
+        // 5. Keep repainting while a turn streams so newly-arrived deltas show
         //    up without requiring a user input event to wake the event loop.
-        if self.app.is_loading {
+        //    Also repaint if a slash command just opened a screen (via
+        //    `submit_prompt` during paint), so the screen-routing block (3)
+        //    takes over next frame and the overlay stays interactive without
+        //    needing another input event.
+        if self.app.is_loading || !self.app.screen_stack.is_empty() {
             ctx.request_repaint();
         }
     }

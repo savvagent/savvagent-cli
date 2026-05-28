@@ -99,8 +99,20 @@ cargo run -p savvagent -- gui
 > runtime, and turn machinery as the TUI — it paints the conversation log,
 > the plugin header/tips/footer slots, and a prompt that submits streaming
 > turns. It is being built alongside the ratatui TUI, which remains the
-> default and is unchanged. Screens/modals, the code editor, markdown, the
-> file picker, and inline canvases are not wired up in the GUI yet.
+> default and is unchanged. Screens and modals now work: the
+> theme/model/language/connect/plugins/changelog pickers open and operate
+> via slash commands (`/theme`, `/model`, `/language`, `/connect`,
+> `/plugins`, `/changelog`, …). The active screen is painted as an egui
+> overlay — centered modal, full-screen, or bottom sheet — with chrome,
+> tips, and a dimmed backdrop, and keyboard input routes to it. Plugin-bound
+> home accelerators (the command palette's `/` chord and any plugin
+> keybindings) are **not** routed in the GUI yet — open those screens by
+> their slash command, or use the TUI. Also still **not** wired up in the
+> GUI (deferred to a later plan): the code editor (`/view`, `/edit`),
+> high-fidelity markdown rendering (the changelog renders as line-based
+> text), the file picker, the LSP-installer's multi-select screens, and
+> inline canvases. Those screens open, close, and route keys, but render as
+> line-based/placeholder content for now.
 
 If the bundled tool servers (`savvagent-tool-fs`, `savvagent-tool-bash`,
 `savvagent-tool-grep`) aren't on `$PATH` and aren't sitting next to the
@@ -110,8 +122,8 @@ at a specific path.
 
 Inside the TUI:
 
-1. Press <kbd>Ctrl-P</kbd> *or* type `/` on an empty prompt to open the
-   command palette. Keep typing to filter (e.g. `/co` narrows to
+1. Type `/` on an empty prompt to open the command palette. Keep typing
+   to filter (e.g. `/co` narrows to
    `/connect`); <kbd>↑</kbd>/<kbd>↓</kbd> move, <kbd>Enter</kbd> selects,
    <kbd>Esc</kbd> cancels. You can also just type the full command
    (`/connect`) and press <kbd>Enter</kbd>.
