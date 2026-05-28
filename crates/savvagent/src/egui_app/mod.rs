@@ -30,6 +30,7 @@ pub mod fonts;
 pub mod render_model;
 pub mod screen;
 pub mod view;
+pub mod widgets;
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -89,6 +90,17 @@ pub struct SavvagentApp {
     /// and slash-command dispatch, exactly as `run_app` does.
     project_root: PathBuf,
     tool_bins: ToolBins,
+
+    /// Per-open file state for the GUI editor (view-file/edit-file).
+    /// `None` when no marker screen is open. Loaded lazy by
+    /// `widgets::editor::ensure_buffer_for_active_screen` on the first
+    /// frame after the screen pushes; cleared by the same helper when
+    /// the stack no longer contains a marker screen.
+    pub editor_buffer: Option<widgets::editor::EditorBuffer>,
+
+    /// `Ctrl+O` file picker. The dialog is always allocated; `open()`
+    /// puts it in pick-file mode and `update()` paints it each frame.
+    pub file_picker: widgets::file_picker::FilePicker,
 }
 
 impl SavvagentApp {
@@ -116,6 +128,8 @@ impl SavvagentApp {
             prompt: String::new(),
             project_root,
             tool_bins,
+            editor_buffer: None,
+            file_picker: widgets::file_picker::FilePicker::default(),
         })
     }
 
@@ -268,6 +282,26 @@ impl SavvagentApp {
         crate::apply_pending_routing_show(&mut self.app, &self.host_slot).await;
     }
 
+    /// Save the GUI editor buffer to disk, push a status note, and clear
+    /// the dirty flag. Called from `update()` when `Ctrl-S` is observed
+    /// while the `edit-file` marker screen is on top. Bypasses
+    /// `Effect::SaveActiveFile` (which writes the ratatui editor, not
+    /// the GUI buffer).
+    fn save_editor_buffer(&mut self) {
+        let Some(buf) = self.editor_buffer.as_mut() else {
+            return;
+        };
+        let path_display = buf.path.display().to_string();
+        match buf.save_to_disk() {
+            Ok(()) => self
+                .app
+                .push_note(rust_i18n::t!("notes.file-saved", path = path_display).to_string()),
+            Err(e) => self.app.push_note(
+                rust_i18n::t!("notes.file-write-error", err = format!("{e:#}")).to_string(),
+            ),
+        }
+    }
+
     /// Spawn a streaming turn for `text`. A faithful port of `run_app`'s
     /// Enter-key turn-spawn path: push the user entry, set `is_loading`,
     /// consume any one-turn model override, then `spawn` the worker that runs
@@ -371,6 +405,10 @@ impl eframe::App for SavvagentApp {
                 if quit {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 }
+                let open_picker = k.modifiers.ctrl && matches!(k.code, KC::Char('o'));
+                if open_picker {
+                    self.file_picker.open();
+                }
             }
         }
 
@@ -395,6 +433,12 @@ impl eframe::App for SavvagentApp {
             *self.render_cache.lock().unwrap() = model;
         });
 
+        // Plan 3: keep the GUI editor buffer in sync with the active
+        // marker screen. Loads lazy from `App::active_file_path` on the
+        // first frame after `view-file`/`edit-file` opens and drops when
+        // the screen pops.
+        widgets::editor::ensure_buffer_for_active_screen(&mut self.editor_buffer, &self.app);
+
         // 3. If a screen is open, route input to it and skip home handling —
         //    mirrors `run_app`'s precedence (quit → top screen `on_key` →
         //    home). Effects (push/pop/close) and the pending-action queues are
@@ -402,7 +446,55 @@ impl eframe::App for SavvagentApp {
         //    is only rebuilt again when we actually routed keys; block 2's
         //    rebuild is otherwise still current.
         if !self.app.screen_stack.is_empty() {
-            let keys = screen::portable_keys_from_events(&events);
+            // Plan 3: when the edit-file marker screen is on top, Ctrl-S
+            // saves the GUI editor buffer directly and consumes the
+            // key — the screen's on_key would otherwise emit
+            // Effect::SaveActiveFile which writes the stale
+            // ratatui-side App::editor.
+            let edit_file_open = self
+                .app
+                .screen_stack
+                .top()
+                .map(|(s, _)| s.id() == "edit-file")
+                .unwrap_or(false);
+            let mut all_keys = screen::portable_keys_from_events(&events);
+            if edit_file_open {
+                let mut ctrl_s_count = 0usize;
+                let mut esc_pending = false;
+                all_keys.retain(|k| {
+                    let is_ctrl_s = k.modifiers.ctrl
+                        && matches!(k.code, savvagent_plugin::KeyCodePortable::Char('s'));
+                    if is_ctrl_s {
+                        ctrl_s_count += 1;
+                    }
+                    // Esc: observe but DO NOT consume — the screen still
+                    // needs to emit Effect::CloseScreen to pop itself.
+                    // We just pre-save here so that the apply_effects
+                    // CloseScreen arm's `app.save_file()` call
+                    // (effects.rs:61-62) becomes a no-op (path is None)
+                    // and the user's GUI edits land on disk instead of
+                    // being silently overwritten by the stale
+                    // App::editor (ratatui) buffer.
+                    let is_esc = matches!(k.code, savvagent_plugin::KeyCodePortable::Esc);
+                    if is_esc {
+                        esc_pending = true;
+                    }
+                    !is_ctrl_s
+                });
+                for _ in 0..ctrl_s_count {
+                    self.save_editor_buffer();
+                }
+                if esc_pending {
+                    // Save the GUI buffer (idempotent if not dirty; the
+                    // legacy TUI semantic is "save always on Esc-close
+                    // of edit-file"). Then tear down the ratatui-side
+                    // editor + path so the upcoming Effect::CloseScreen's
+                    // `app.save_file()` short-circuits.
+                    self.save_editor_buffer();
+                    self.app.clear_active_editor();
+                }
+            }
+            let keys = all_keys;
             let had_keys = !keys.is_empty();
             futures::executor::block_on(async {
                 for key in keys {

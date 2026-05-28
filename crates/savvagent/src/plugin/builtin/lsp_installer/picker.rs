@@ -53,10 +53,12 @@ mod tests {
         let mut p = LspPicker::new();
         // Type "RUST" — should match the rust-analyzer entry even though
         // the catalog id is lowercase.
-        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use savvagent_plugin::{KeyCodePortable, KeyEventPortable, KeyMods};
         for c in ['R', 'U', 'S', 'T'] {
-            p.inner
-                .on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::empty()));
+            p.inner.on_key(KeyEventPortable {
+                code: KeyCodePortable::Char(c),
+                modifiers: KeyMods::default(),
+            });
         }
         let filtered: Vec<&str> = p.inner.filtered().iter().map(|e| e.id).collect();
         assert!(

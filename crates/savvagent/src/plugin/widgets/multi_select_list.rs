@@ -158,24 +158,21 @@ impl<T: Clone> MultiSelectList<T> {
     /// | Printable char | Append to filter (Ctrl/Alt held → ignored); re-clamps cursor; emits `Preview`.    |
     ///
     /// All other keys return [`MultiSelectOutcome::Stay`].
-    pub fn on_key(&mut self, key: crossterm::event::KeyEvent) -> MultiSelectOutcome<T> {
-        use crossterm::event::{KeyCode, KeyModifiers};
+    pub fn on_key(&mut self, key: savvagent_plugin::KeyEventPortable) -> MultiSelectOutcome<T> {
+        use savvagent_plugin::KeyCodePortable as KC;
         match key.code {
-            KeyCode::Esc => MultiSelectOutcome::Cancel,
-            KeyCode::Enter => MultiSelectOutcome::Confirm(self.confirm_selection()),
-            KeyCode::Down => self.move_cursor(1),
-            KeyCode::Up => self.move_cursor(-1),
-            KeyCode::Char(' ') => self.toggle_cursor(),
-            KeyCode::Backspace => {
+            KC::Esc => MultiSelectOutcome::Cancel,
+            KC::Enter => MultiSelectOutcome::Confirm(self.confirm_selection()),
+            KC::Down => self.move_cursor(1),
+            KC::Up => self.move_cursor(-1),
+            KC::Char(' ') => self.toggle_cursor(),
+            KC::Backspace => {
                 if self.filter.pop().is_none() {
                     return MultiSelectOutcome::Stay;
                 }
                 self.clamp_after_filter_change()
             }
-            KeyCode::Char(c)
-                if !key.modifiers.contains(KeyModifiers::CONTROL)
-                    && !key.modifiers.contains(KeyModifiers::ALT) =>
-            {
+            KC::Char(c) if !key.modifiers.ctrl && !key.modifiers.alt => {
                 self.filter.push(c);
                 self.clamp_after_filter_change()
             }
@@ -273,34 +270,31 @@ mod tests {
         assert_eq!(l.filtered().len(), 3);
     }
 
-    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use savvagent_plugin::{KeyCodePortable as KC, KeyEventPortable, KeyMods};
 
-    fn key(code: KeyCode) -> KeyEvent {
-        KeyEvent::new(code, KeyModifiers::empty())
+    fn key(code: KC) -> KeyEventPortable {
+        KeyEventPortable {
+            code,
+            modifiers: KeyMods::default(),
+        }
     }
 
     #[test]
     fn esc_emits_cancel() {
         let mut l = list();
-        assert!(matches!(
-            l.on_key(key(KeyCode::Esc)),
-            MultiSelectOutcome::Cancel
-        ));
+        assert!(matches!(l.on_key(key(KC::Esc)), MultiSelectOutcome::Cancel));
     }
 
     #[test]
     fn unknown_key_emits_stay() {
         let mut l = list();
-        assert!(matches!(
-            l.on_key(key(KeyCode::F(5))),
-            MultiSelectOutcome::Stay
-        ));
+        assert!(matches!(l.on_key(key(KC::F(5))), MultiSelectOutcome::Stay));
     }
 
     #[test]
     fn enter_with_no_selection_returns_empty_confirm() {
         let mut l = list();
-        match l.on_key(key(KeyCode::Enter)) {
+        match l.on_key(key(KC::Enter)) {
             MultiSelectOutcome::Confirm(v) => assert!(v.is_empty()),
             other => panic!("expected Confirm([]), got {other:?}"),
         }
@@ -309,7 +303,7 @@ mod tests {
     #[test]
     fn down_moves_cursor_and_emits_preview() {
         let mut l = list();
-        let outcome = l.on_key(key(KeyCode::Down));
+        let outcome = l.on_key(key(KC::Down));
         assert_eq!(l.cursor(), 1);
         assert!(matches!(
             outcome,
@@ -320,9 +314,9 @@ mod tests {
     #[test]
     fn down_clamps_at_last_row() {
         let mut l = list();
-        l.on_key(key(KeyCode::Down));
-        l.on_key(key(KeyCode::Down));
-        let outcome = l.on_key(key(KeyCode::Down));
+        l.on_key(key(KC::Down));
+        l.on_key(key(KC::Down));
+        let outcome = l.on_key(key(KC::Down));
         assert_eq!(l.cursor(), 2);
         assert!(matches!(
             outcome,
@@ -333,7 +327,7 @@ mod tests {
     #[test]
     fn up_clamps_at_first_row() {
         let mut l = list();
-        let outcome = l.on_key(key(KeyCode::Up));
+        let outcome = l.on_key(key(KC::Up));
         assert_eq!(l.cursor(), 0);
         assert!(matches!(
             outcome,
@@ -344,14 +338,14 @@ mod tests {
     #[test]
     fn space_toggles_cursor_item() {
         let mut l = list();
-        let out = l.on_key(key(KeyCode::Char(' ')));
+        let out = l.on_key(key(KC::Char(' ')));
         assert!(matches!(
             out,
             MultiSelectOutcome::Toggle(Item { id: "a", .. })
         ));
         assert!(l.selected().contains("a"));
 
-        let out = l.on_key(key(KeyCode::Char(' ')));
+        let out = l.on_key(key(KC::Char(' ')));
         assert!(matches!(
             out,
             MultiSelectOutcome::Toggle(Item { id: "a", .. })
@@ -362,7 +356,7 @@ mod tests {
     #[test]
     fn typing_chars_narrows_filter() {
         let mut l = list();
-        l.on_key(key(KeyCode::Char('l')));
+        l.on_key(key(KC::Char('l')));
         assert_eq!(l.filter(), "l");
         let filtered: Vec<&str> = l.filtered().iter().map(|i| i.id).collect();
         assert_eq!(filtered, vec!["a", "c"], "alpha + charlie both contain 'l'");
@@ -371,30 +365,30 @@ mod tests {
     #[test]
     fn backspace_pops_filter_and_reclamps_cursor() {
         let mut l = list();
-        l.on_key(key(KeyCode::Char('l'))); // narrows to [a, c]; cursor 0
-        l.on_key(key(KeyCode::Down)); // cursor → 1
-        l.on_key(key(KeyCode::Char('p'))); // narrows to [a]; cursor must clamp to 0
+        l.on_key(key(KC::Char('l'))); // narrows to [a, c]; cursor 0
+        l.on_key(key(KC::Down)); // cursor → 1
+        l.on_key(key(KC::Char('p'))); // narrows to [a]; cursor must clamp to 0
         assert_eq!(
             l.cursor(),
             0,
             "cursor must clamp when filter shrinks past it"
         );
-        l.on_key(key(KeyCode::Backspace)); // back to [a, c]
+        l.on_key(key(KC::Backspace)); // back to [a, c]
         assert_eq!(l.filter(), "l");
     }
 
     #[test]
     fn selection_survives_filter_changes() {
         let mut l = list();
-        l.on_key(key(KeyCode::Char(' '))); // select a
-        l.on_key(key(KeyCode::Char('b'))); // filter narrows so 'a' is hidden
+        l.on_key(key(KC::Char(' '))); // select a
+        l.on_key(key(KC::Char('b'))); // filter narrows so 'a' is hidden
         assert!(l.filtered().iter().all(|i| i.id != "a"));
         assert!(
             l.selected().contains("a"),
             "selection persists across filter"
         );
-        l.on_key(key(KeyCode::Backspace)); // restore visibility
-        let out = l.on_key(key(KeyCode::Enter));
+        l.on_key(key(KC::Backspace)); // restore visibility
+        let out = l.on_key(key(KC::Enter));
         match out {
             MultiSelectOutcome::Confirm(items) => {
                 assert_eq!(items.iter().map(|i| i.id).collect::<Vec<_>>(), vec!["a"]);
@@ -407,14 +401,14 @@ mod tests {
     fn confirm_returns_items_in_catalog_order_not_selection_order() {
         let mut l = list();
         // Select c first (cursor=2), then a (cursor=0).
-        l.on_key(key(KeyCode::Down));
-        l.on_key(key(KeyCode::Down));
-        l.on_key(key(KeyCode::Char(' '))); // select c
-        l.on_key(key(KeyCode::Up));
-        l.on_key(key(KeyCode::Up));
-        l.on_key(key(KeyCode::Char(' '))); // select a
+        l.on_key(key(KC::Down));
+        l.on_key(key(KC::Down));
+        l.on_key(key(KC::Char(' '))); // select c
+        l.on_key(key(KC::Up));
+        l.on_key(key(KC::Up));
+        l.on_key(key(KC::Char(' '))); // select a
 
-        let out = l.on_key(key(KeyCode::Enter));
+        let out = l.on_key(key(KC::Enter));
         match out {
             MultiSelectOutcome::Confirm(items) => {
                 let ids: Vec<&str> = items.iter().map(|i| i.id).collect();

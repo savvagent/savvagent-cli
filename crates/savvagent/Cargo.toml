@@ -77,6 +77,8 @@ dirs.workspace = true
 # block_on panics inside the runtime).
 eframe.workspace = true
 egui.workspace = true
+egui_code_editor.workspace = true
+egui-file-dialog.workspace = true
 futures.workspace = true
 crossterm.workspace = true
 ratatui.workspace = true

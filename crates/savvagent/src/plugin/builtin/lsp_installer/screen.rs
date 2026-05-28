@@ -2,8 +2,8 @@
 
 use async_trait::async_trait;
 use savvagent_plugin::{
-    Effect, KeyCodePortable, KeyEventPortable, PluginError, Region, Screen, StyledLine, StyledSpan,
-    TextMods, ThemeColor,
+    Effect, KeyEventPortable, PluginError, Region, Screen, StyledLine, StyledSpan, TextMods,
+    ThemeColor,
 };
 
 use crate::plugin::builtin::lsp_installer::picker::LspPicker;
@@ -88,8 +88,7 @@ impl Screen for LspPickerScreen {
     }
 
     async fn on_key(&mut self, key: KeyEventPortable) -> Result<Vec<Effect>, PluginError> {
-        let ct_event = portable_to_crossterm(&key);
-        let outcome = self.inner.inner.on_key(ct_event);
+        let outcome = self.inner.inner.on_key(key);
         match outcome {
             MultiSelectOutcome::Stay
             | MultiSelectOutcome::Preview(_)
@@ -118,34 +117,10 @@ impl Screen for LspPickerScreen {
     }
 }
 
-fn portable_to_crossterm(key: &KeyEventPortable) -> crossterm::event::KeyEvent {
-    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-    let code = match key.code {
-        KeyCodePortable::Char(c) => KeyCode::Char(c),
-        KeyCodePortable::Enter => KeyCode::Enter,
-        KeyCodePortable::Esc => KeyCode::Esc,
-        KeyCodePortable::Up => KeyCode::Up,
-        KeyCodePortable::Down => KeyCode::Down,
-        KeyCodePortable::Backspace => KeyCode::Backspace,
-        _ => KeyCode::Null,
-    };
-    let mut mods = KeyModifiers::empty();
-    if key.modifiers.ctrl {
-        mods |= KeyModifiers::CONTROL;
-    }
-    if key.modifiers.alt {
-        mods |= KeyModifiers::ALT;
-    }
-    if key.modifiers.shift {
-        mods |= KeyModifiers::SHIFT;
-    }
-    KeyEvent::new(code, mods)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use savvagent_plugin::KeyMods;
+    use savvagent_plugin::{KeyCodePortable, KeyMods};
 
     fn key(code: KeyCodePortable) -> KeyEventPortable {
         KeyEventPortable {

@@ -37,21 +37,41 @@ pub fn paint(state: &mut SavvagentApp, ctx: &egui::Context) {
     if screen_open {
         paint_screen_overlay(state, ctx, &palette);
     }
+
+    // Plan 3: drive the file-dialog each frame. It paints itself; we only
+    // consume the result. The picked path becomes an `@<path>` reference
+    // in the prompt buffer.
+    state.file_picker.update(ctx);
+    if let Some(picked) = state.file_picker.take_picked() {
+        crate::egui_app::widgets::file_picker::splice_at_reference(&mut state.prompt, &picked);
+    }
 }
 
 /// Paint the top screen of the stack (if any) as an overlay above the home
 /// panels. The screen's `render(region)` is SYNC, so no async here. The caller
 /// (`paint`) checks `screen_stack` itself to suppress the home prompt; this
 /// function silently does nothing when the stack is empty.
-fn paint_screen_overlay(state: &SavvagentApp, ctx: &egui::Context, palette: &Palette) {
-    let Some((screen, layout)) = state.app.screen_stack.top() else {
-        return;
-    };
+fn paint_screen_overlay(state: &mut SavvagentApp, ctx: &egui::Context, palette: &Palette) {
     // Glyph metrics for points <-> cols/rows.
     let font = egui::FontId::monospace(FONT_SIZE);
     let (glyph_w, glyph_h) = ctx.fonts(|f| (f.glyph_width(&font, 'M'), f.row_height(&font)));
     let avail = ctx.available_rect(); // central area below/above panels already reserved
-    let geom = modal_geometry(avail, layout, glyph_w, glyph_h);
+
+    // Extract everything we need from the screen up-front so the immutable
+    // borrow on `state.app` ends before we mutably borrow `state.editor_buffer`
+    // inside the area closure. The screen's `render(region)` is the only call
+    // that touches per-frame screen state, and screens are owned by the stack,
+    // so the cloned outputs (lines/tips/id/layout) are stable for this frame.
+    let (layout, id, lines, tips, geom) = {
+        let Some((screen, layout)) = state.app.screen_stack.top() else {
+            return;
+        };
+        let geom = modal_geometry(avail, layout, glyph_w, glyph_h);
+        let id = screen.id();
+        let lines = screen.render(geom.region);
+        let tips = screen.tips();
+        (layout.clone(), id, lines, tips, geom)
+    };
 
     // Dim the background behind a modal/bottom-sheet so focus is obvious.
     if !matches!(layout, ScreenLayout::Fullscreen { .. }) {
@@ -62,13 +82,10 @@ fn paint_screen_overlay(state: &SavvagentApp, ctx: &egui::Context, palette: &Pal
         painter.rect_filled(avail, 0.0, egui::Color32::from_black_alpha(128));
     }
 
-    let title = match layout {
+    let title = match &layout {
         ScreenLayout::CenteredModal { title: Some(t), .. } => Some(t.clone()),
         _ => None,
     };
-    let id = screen.id();
-    let lines = screen.render(geom.region);
-    let tips = screen.tips();
 
     let area = egui::Area::new(egui::Id::new(("screen_overlay", id.clone())))
         .order(egui::Order::Foreground)
@@ -85,10 +102,15 @@ fn paint_screen_overlay(state: &SavvagentApp, ctx: &egui::Context, palette: &Pal
                 ui.label(egui::RichText::new(t).strong());
                 ui.separator();
             }
-            // view-file/edit-file are marker screens whose rich widget lands in
-            // Plan 3; show a placeholder rather than an empty modal.
+            // Plan 3: view-file/edit-file marker screens get the egui
+            // code editor. The buffer lives on SavvagentApp; if it
+            // hasn't loaded yet (file missing, IO error), the screen
+            // paints empty and the screen's `tips()` still shows.
             if id == "view-file" || id == "edit-file" {
-                ui.weak("[file view/edit — Plan 3]");
+                if let Some(buf) = state.editor_buffer.as_mut() {
+                    let editable = id == "edit-file";
+                    crate::egui_app::widgets::editor::paint_editor(ui, buf, palette, editable);
+                }
             }
             for line in &lines {
                 ui.label(styled_line_to_job(line, palette, FONT_SIZE));

@@ -104,15 +104,19 @@ cargo run -p savvagent -- gui
 > via slash commands (`/theme`, `/model`, `/language`, `/connect`,
 > `/plugins`, `/changelog`, …). The active screen is painted as an egui
 > overlay — centered modal, full-screen, or bottom sheet — with chrome,
-> tips, and a dimmed backdrop, and keyboard input routes to it. Plugin-bound
-> home accelerators (the command palette's `/` chord and any plugin
-> keybindings) are **not** routed in the GUI yet — open those screens by
-> their slash command, or use the TUI. Also still **not** wired up in the
-> GUI (deferred to a later plan): the code editor (`/view`, `/edit`),
+> tips, and a dimmed backdrop, and keyboard input routes to it.
+> `/view <path>` and `/edit <path>` now open a syntax-highlighted code
+> editor (powered by `egui_code_editor`) that reads its colors from the
+> active theme; `Ctrl-S` saves the buffer in `/edit`, `Esc` closes (with
+> save-on-close for `/edit`). `Ctrl-O` from the home prompt opens a file
+> picker; the chosen path is spliced into the prompt as an `@<path>`
+> reference. `/lsp` (the LSP-installer's multi-select picker) is now driven
+> by portable keys end-to-end. Plugin-bound home accelerators (the command
+> palette's `/` chord and any plugin keybindings) are **not** routed in the
+> GUI yet — open those screens by their slash command, or use the TUI. Also
+> still **not** wired up in the GUI (deferred to a later plan):
 > high-fidelity markdown rendering (the changelog renders as line-based
-> text), the file picker, the LSP-installer's multi-select screens, and
-> inline canvases. Those screens open, close, and route keys, but render as
-> line-based/placeholder content for now.
+> text) and inline canvases (render as placeholders).
 
 If the bundled tool servers (`savvagent-tool-fs`, `savvagent-tool-bash`,
 `savvagent-tool-grep`) aren't on `$PATH` and aren't sitting next to the
