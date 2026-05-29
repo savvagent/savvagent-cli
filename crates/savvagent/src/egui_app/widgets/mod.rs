@@ -5,6 +5,7 @@
 //! editor (`view-file`/`edit-file` marker screens), and the `Ctrl+O`
 //! file-picker that inserts `@<path>` references into the prompt buffer.
 
+pub mod canvas;
 pub mod editor;
 pub mod editor_theme;
 pub mod file_picker;

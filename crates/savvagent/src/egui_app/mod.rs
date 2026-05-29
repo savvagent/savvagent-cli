@@ -63,14 +63,14 @@ pub struct SavvagentApp {
     /// Shared conversation/UI state, built once by `bootstrap_app_and_host`.
     pub app: App,
     /// Atomically-swappable active host (shared with future `/connect`).
-    host_slot: HostSlot,
+    pub(crate) host_slot: HostSlot,
     /// Worker → UI messages, drained each frame in `update`.
     worker_rx: mpsc::Receiver<WorkerMsg>,
     /// Cloned into each spawned turn worker so it can report back.
     worker_tx: mpsc::Sender<WorkerMsg>,
     /// Tokio runtime handle captured from `main`'s `#[tokio::main]` runtime;
     /// turn workers are spawned onto it.
-    rt: Handle,
+    pub(crate) rt: Handle,
     /// Latest slot snapshot (banner/tips/footer/tool_entries) rebuilt each
     /// frame off the live `App`.
     render_cache: RenderModelCache,
@@ -101,6 +101,10 @@ pub struct SavvagentApp {
     /// `Ctrl+O` file picker. The dialog is always allocated; `open()`
     /// puts it in pick-file mode and `update()` paints it each frame.
     pub file_picker: widgets::file_picker::FilePicker,
+
+    /// Per-canvas egui `TextureHandle` cache. Renderer ownership stays on
+    /// `App::canvas_registry`; this cache only stores the GPU-side handles.
+    pub gui_canvas_cache: widgets::canvas::GuiCanvasCache,
 }
 
 impl SavvagentApp {
@@ -130,7 +134,17 @@ impl SavvagentApp {
             tool_bins,
             editor_buffer: None,
             file_picker: widgets::file_picker::FilePicker::default(),
+            gui_canvas_cache: widgets::canvas::GuiCanvasCache::new(),
         })
+    }
+
+    /// Drop the GUI texture cache and the shared renderer state in
+    /// `App::canvas_registry`. Call alongside any operation that resets
+    /// the conversation (today only `App::replay_transcript`).
+    #[allow(dead_code)] // Hook for upcoming GUI conversation-reset paths.
+    pub(crate) fn clear_canvas_caches(&mut self) {
+        self.app.canvas_registry.clear();
+        self.gui_canvas_cache.clear();
     }
 
     /// Read-only access to the cached render model for the paint pass.
@@ -182,21 +196,27 @@ impl SavvagentApp {
                 }
                 if was_complete {
                     if let Some(host) = current_host(&self.host_slot).await {
-                        if let Ok(path) = save_transcript_now(&self.app, &host).await {
-                            if !path.as_os_str().is_empty() {
-                                let saved_path = path.to_string_lossy().into_owned();
-                                self.app.last_transcript = Some(path);
-                                if let Err(err) = crate::plugin::effects::dispatch_host_event(
-                                    &mut self.app,
-                                    savvagent_plugin::HostEvent::TranscriptSaved {
-                                        path: saved_path,
-                                    },
-                                    0,
-                                )
-                                .await
-                                {
-                                    tracing::warn!(error = %err, "TranscriptSaved dispatch failed");
+                        match save_transcript_now(&self.app, &host).await {
+                            Ok(path) => {
+                                if !path.as_os_str().is_empty() {
+                                    let saved_path = path.to_string_lossy().into_owned();
+                                    self.app.last_transcript = Some(path);
+                                    if let Err(err) = crate::plugin::effects::dispatch_host_event(
+                                        &mut self.app,
+                                        savvagent_plugin::HostEvent::TranscriptSaved {
+                                            path: saved_path,
+                                        },
+                                        0,
+                                    )
+                                    .await
+                                    {
+                                        tracing::warn!(error = %err, "TranscriptSaved dispatch failed");
+                                    }
                                 }
+                            }
+                            Err(e) => {
+                                tracing::warn!(error = %e, "save_transcript_now failed");
+                                self.app.push_note(format!("Couldn't save transcript: {e}"));
                             }
                         }
                     }
@@ -405,7 +425,12 @@ impl eframe::App for SavvagentApp {
                 if quit {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 }
-                let open_picker = k.modifiers.ctrl && matches!(k.code, KC::Char('o'));
+                // Skip global Ctrl-O while a canvas holds focus — the
+                // focused-canvas handler owns Ctrl-O (open-in-browser),
+                // and the two would otherwise both fire.
+                let open_picker = k.modifiers.ctrl
+                    && matches!(k.code, KC::Char('o'))
+                    && !matches!(self.app.input_mode, crate::app::InputMode::Canvas { .. });
                 if open_picker {
                     self.file_picker.open();
                 }

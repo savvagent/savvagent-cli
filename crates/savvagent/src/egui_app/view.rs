@@ -201,7 +201,15 @@ fn paint_footer(state: &SavvagentApp, ctx: &egui::Context, palette: &Palette) {
 }
 
 /// Central panel: the conversation log, bottom-anchored and scrollable.
-fn paint_log(state: &SavvagentApp, ctx: &egui::Context, palette: &Palette) {
+fn paint_log(state: &mut SavvagentApp, ctx: &egui::Context, palette: &Palette) {
+    enum EntrySnap {
+        User(String),
+        Assistant(String),
+        Tool(String),
+        Note(String),
+    }
+
+    let screen_open = !state.app.screen_stack.is_empty();
     let model = state.render_cache().lock().unwrap().clone();
     egui::CentralPanel::default().show(ctx, |ui| {
         egui::ScrollArea::vertical()
@@ -222,23 +230,67 @@ fn paint_log(state: &SavvagentApp, ctx: &egui::Context, palette: &Palette) {
                 // — the render model is built in entry order. We walk a tool
                 // cursor alongside the entry loop to keep them aligned.
                 let mut tool_cursor = 0usize;
-                for entry in &state.app.entries {
-                    match entry {
-                        Entry::User(text) => paint_role_block(ui, palette, "you", text),
-                        Entry::Assistant(text) => paint_role_block(ui, palette, "savvagent", text),
-                        Entry::Tool { name, .. } => {
-                            let render = model.tool_entries.get(tool_cursor);
-                            tool_cursor += 1;
-                            paint_tool(ui, palette, name, render);
+                let mut any_canvas_clicked = false;
+                let entry_count = state.app.entries.len();
+                for idx in 0..entry_count {
+                    // Snapshot the entry shape for the immutable branches so
+                    // we don't hold a borrow across the canvas branch.
+                    let entry_snapshot = match &state.app.entries[idx] {
+                        Entry::User(t) => Some(EntrySnap::User(t.clone())),
+                        Entry::Assistant(t) => Some(EntrySnap::Assistant(t.clone())),
+                        Entry::Tool { name, .. } => Some(EntrySnap::Tool(name.clone())),
+                        Entry::RouteBadge(t) | Entry::Note(t) => Some(EntrySnap::Note(t.clone())),
+                        Entry::Canvas { .. } => None, // handled below
+                    };
+                    if let Some(snap) = entry_snapshot {
+                        match snap {
+                            EntrySnap::User(t) => paint_role_block(ui, palette, "you", &t),
+                            EntrySnap::Assistant(t) => {
+                                paint_role_block(ui, palette, "savvagent", &t)
+                            }
+                            EntrySnap::Tool(name) => {
+                                let render = model.tool_entries.get(tool_cursor);
+                                tool_cursor += 1;
+                                paint_tool(ui, palette, &name, render);
+                            }
+                            EntrySnap::Note(t) => {
+                                ui.weak(t);
+                            }
                         }
-                        Entry::RouteBadge(text) => {
-                            ui.weak(text);
-                        }
-                        Entry::Note(text) => {
-                            ui.weak(text);
-                        }
-                        Entry::Canvas { .. } => {
-                            ui.weak("[canvas — rendered in Plan 4]");
+                    } else {
+                        // Canvas branch: pull the source/preview out by
+                        // cloning so `state.app` can be borrowed mutably
+                        // for the renderer (the indexed entry aliases the
+                        // same borrow).
+                        let (cid, source, preview) = match &state.app.entries[idx] {
+                            Entry::Canvas {
+                                id,
+                                source,
+                                source_preview,
+                            } => (*id, source.clone(), source_preview.clone()),
+                            Entry::User(..)
+                            | Entry::Assistant(..)
+                            | Entry::Tool { .. }
+                            | Entry::RouteBadge(..)
+                            | Entry::Note(..) => {
+                                unreachable!("entry_snapshot was None only for Canvas")
+                            }
+                        };
+                        let clicked = crate::egui_app::widgets::canvas::paint(
+                            ui,
+                            ctx,
+                            &mut state.app,
+                            &mut state.gui_canvas_cache,
+                            &state.host_slot,
+                            &state.rt,
+                            cid,
+                            &source,
+                            preview.as_deref(),
+                            screen_open,
+                            palette,
+                        );
+                        if clicked {
+                            any_canvas_clicked = true;
                         }
                     }
                     ui.add_space(4.0);
@@ -250,6 +302,21 @@ fn paint_log(state: &SavvagentApp, ctx: &egui::Context, palette: &Palette) {
                 // appears as it streams.
                 if !state.app.live_text.is_empty() {
                     paint_role_block(ui, palette, "savvagent", &state.app.live_text);
+                }
+
+                // Click-outside-to-unfocus: if the user clicked anywhere
+                // this frame but no canvas claimed it, drop any active
+                // canvas focus. Runs after the entry loop so
+                // `any_canvas_clicked` is final. Skipped while a screen
+                // overlay is up — the user can't be clicking on a canvas,
+                // and `InputMode::Canvas` should survive the overlay.
+                let global_click = ctx.input(|i| i.pointer.any_click());
+                if !screen_open
+                    && global_click
+                    && !any_canvas_clicked
+                    && matches!(state.app.input_mode, crate::app::InputMode::Canvas { .. })
+                {
+                    state.app.unfocus_canvas();
                 }
             });
     });
