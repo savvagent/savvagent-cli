@@ -164,10 +164,14 @@ fn paint_prompt(state: &mut SavvagentApp, ctx: &egui::Context) {
                 .desired_width(f32::INFINITY)
                 .hint_text("Ask savvagent…"),
         );
-        // Enter (no Shift) submits. egui reports the Enter as a `key_pressed`
-        // in the same frame the widget loses focus.
-        let submit = resp.lost_focus()
-            && ui.input(|i| i.key_pressed(egui::Key::Enter) && !i.modifiers.shift);
+        // Enter (no Shift) submits. A *multiline* `TextEdit` consumes Enter to
+        // insert a newline and KEEPS focus, so `lost_focus()` never fires on
+        // Enter — gating submit on it (the single-line idiom) meant the prompt
+        // never submitted. Gate on `has_focus()` instead: the widget still
+        // inserts a trailing newline for this Enter, but `mem::take` + `trim`
+        // below discard it. Shift+Enter falls through to the default newline.
+        let enter_pressed = ui.input(|i| i.key_pressed(egui::Key::Enter) && !i.modifiers.shift);
+        let submit = resp.has_focus() && enter_pressed;
         if submit {
             let text = std::mem::take(&mut state.prompt);
             let trimmed = text.trim().to_string();
