@@ -12,16 +12,20 @@ use crate::plugin::registry::PluginRegistry;
 /// Routes a tool name to its owning plugin (via `Indexes::tool_summaries`)
 /// and forwards summary requests. Asynchronous because plugins live behind
 /// `Arc<tokio::sync::Mutex<dyn Plugin>>` in the registry.
-pub struct ToolSummaryRouter<'a> {
+use std::sync::Arc;
+
+use tokio::sync::RwLock;
+
+pub struct ToolSummaryRouter {
     /// Index over enabled-plugin manifests; provides the tool-name → PluginId map.
-    pub indexes: &'a Indexes,
+    pub indexes: Arc<RwLock<Indexes>>,
     /// In-memory registry of plugin instances.
-    pub registry: &'a PluginRegistry,
+    pub registry: Arc<RwLock<PluginRegistry>>,
 }
 
-impl<'a> ToolSummaryRouter<'a> {
+impl ToolSummaryRouter {
     /// Construct a router from references to the current indexes and registry.
-    pub fn new(indexes: &'a Indexes, registry: &'a PluginRegistry) -> Self {
+    pub fn new(indexes: Arc<RwLock<Indexes>>, registry: Arc<RwLock<PluginRegistry>>) -> Self {
         Self { indexes, registry }
     }
 
@@ -33,9 +37,15 @@ impl<'a> ToolSummaryRouter<'a> {
         name: &str,
         args: &serde_json::Value,
     ) -> Option<Vec<StyledSpan>> {
-        let pid = self.indexes.tool_summaries.get(name)?;
-        let handle = self.registry.get(pid)?;
-        let plugin = handle.lock().await;
+        let indexes_guard = self.indexes.read().await;
+        let registry_guard = self.registry.read().await;
+        let pid = indexes_guard.tool_summaries.get(name)?;
+        let handle = registry_guard.get(pid)?;
+        // Non-blocking: this runs on the GUI paint thread via `build_model`.
+        // A blocking acquire here can wedge the winit loop (see the matching
+        // note in `slots::SlotRouter::render`). Skip the summary this frame if
+        // the plugin is momentarily locked.
+        let plugin = handle.try_lock().ok()?;
         plugin.summarize_tool_call(name, args)
     }
 
@@ -43,9 +53,12 @@ impl<'a> ToolSummaryRouter<'a> {
     /// Returns `None` if no plugin claims the name or the plugin returns
     /// `None` (e.g. parse failure on `result_text`).
     pub async fn summarize_result(&self, name: &str, result_text: &str) -> Option<Vec<StyledSpan>> {
-        let pid = self.indexes.tool_summaries.get(name)?;
-        let handle = self.registry.get(pid)?;
-        let plugin = handle.lock().await;
+        let indexes_guard = self.indexes.read().await;
+        let registry_guard = self.registry.read().await;
+        let pid = indexes_guard.tool_summaries.get(name)?;
+        let handle = registry_guard.get(pid)?;
+        // Non-blocking (see `summarize_call` / `slots::SlotRouter::render`).
+        let plugin = handle.try_lock().ok()?;
         plugin.summarize_tool_result(name, result_text)
     }
 }
@@ -119,7 +132,10 @@ mod tests {
             result_text: "1.2 KiB".into(),
         })]);
         let idx = Indexes::build(&reg).await.unwrap();
-        let router = ToolSummaryRouter::new(&idx, &reg);
+        let router = ToolSummaryRouter::new(
+            std::sync::Arc::new(tokio::sync::RwLock::new(idx)),
+            std::sync::Arc::new(tokio::sync::RwLock::new(reg)),
+        );
 
         let call = router
             .summarize_call("read_file", &serde_json::json!({"path": "src/main.rs"}))
@@ -138,7 +154,10 @@ mod tests {
     async fn router_returns_none_for_unclaimed_tool() {
         let reg = PluginRegistry::from_plugins(vec![]);
         let idx = Indexes::build(&reg).await.unwrap();
-        let router = ToolSummaryRouter::new(&idx, &reg);
+        let router = ToolSummaryRouter::new(
+            std::sync::Arc::new(tokio::sync::RwLock::new(idx)),
+            std::sync::Arc::new(tokio::sync::RwLock::new(reg)),
+        );
         assert!(
             router
                 .summarize_call("unknown_tool", &serde_json::json!({}))

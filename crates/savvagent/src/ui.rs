@@ -94,17 +94,51 @@ pub async fn compute_home_frame_data(app: &crate::app::App, area: Rect) -> HomeF
     let footer_center = router.render("home.footer.center", full_row).await;
     let footer_right = router.render("home.footer.right", full_row).await;
 
-    // Pre-render tool-call summaries. Iterates app.entries once; one
-    // ToolEntryRender per Entry::Tool. Locks the owning plugin briefly per
-    // call (twice when there's a result_text). Falls back to json_spans
-    // when no plugin claims the tool name.
-    //
-    // The registry and index read-locks (`reg_guard`/`idx_guard`) remain
-    // held across the entire loop; write-lock waiters (e.g. `/connect`)
-    // will block until the loop completes.
-    let tool_router = crate::plugin::tool_summaries::ToolSummaryRouter::new(&idx_guard, &reg_guard);
+    // The registry and index read-locks (`reg_guard`/`idx_guard`) are
+    // dropped here so write-lock waiters (e.g. `/connect` while a screen
+    // is open) are not blocked by the tool-summary loop.
+    drop(reg_guard);
+    drop(idx_guard);
+
+    let tool_entries = compute_tool_entries(
+        &app.entries,
+        app.plugin_indexes.as_ref().cloned(),
+        app.plugin_registry.as_ref().cloned(),
+    )
+    .await;
+
+    HomeFrameData {
+        banner,
+        tips,
+        footer_left,
+        footer_center,
+        footer_right,
+        tool_entries,
+    }
+}
+
+/// Compute `ToolEntryRender`s for every `Entry::Tool` in `entries` by
+/// asking the plugin registry for its tool-summary router. Passed cloned
+/// `Arc<RwLock<...>>` handles instead of `&RwLockReadGuard` so the
+/// caller (compute_home_frame_data) can drop its guards before this
+/// long-running loop. No-op when either handle is `None` (e.g. plugin
+/// runtime not installed).
+async fn compute_tool_entries(
+    entries: &[Entry],
+    plugin_indexes: Option<std::sync::Arc<tokio::sync::RwLock<crate::plugin::manifests::Indexes>>>,
+    plugin_registry: Option<
+        std::sync::Arc<tokio::sync::RwLock<crate::plugin::registry::PluginRegistry>>,
+    >,
+) -> Vec<ToolEntryRender> {
+    let (Some(reg_handle), Some(idx_handle)) = (plugin_registry, plugin_indexes) else {
+        return Vec::new();
+    };
+    let tool_router = crate::plugin::tool_summaries::ToolSummaryRouter::new(
+        idx_handle.clone(),
+        reg_handle.clone(),
+    );
     let mut tool_entries: Vec<ToolEntryRender> = Vec::new();
-    for entry in &app.entries {
+    for entry in entries {
         let crate::app::Entry::Tool {
             name,
             args,
@@ -141,15 +175,7 @@ pub async fn compute_home_frame_data(app: &crate::app::App, area: Rect) -> HomeF
             result_spans,
         });
     }
-
-    HomeFrameData {
-        banner,
-        tips,
-        footer_left,
-        footer_center,
-        footer_right,
-        tool_entries,
-    }
+    tool_entries
 }
 
 pub fn render(app: &mut App, frame: &mut Frame, frame_data: &HomeFrameData) {

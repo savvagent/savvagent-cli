@@ -576,6 +576,12 @@ pub enum CommandSelection {
 /// TUI app state.
 pub struct App {
     pub input_textarea: TextArea<'static>,
+    /// Text staged by [`App::prefill_input`] for a front-end whose prompt
+    /// buffer lives outside `App` (the egui shell's `SavvagentApp::prompt`).
+    /// The egui frame drains this into its prompt each frame; the ratatui TUI
+    /// ignores it (it reads `input_textarea` directly). `Some` only between a
+    /// palette prefill and the next frame that consumes it.
+    pub pending_prefill: Option<String>,
     pub input_mode: InputMode,
     pub model: String,
     pub transcript_dir: PathBuf,
@@ -987,6 +993,7 @@ impl App {
 
         let mut app = Self {
             input_textarea: make_input_textarea(Vec::<String>::new()),
+            pending_prefill: None,
             input_mode: InputMode::Editing,
             model,
             transcript_dir,
@@ -2015,6 +2022,8 @@ impl App {
     /// (e.g. `/view`, `/edit`) so the user can complete the line via the
     /// `@` file picker instead of executing the command with no args.
     pub fn prefill_input(&mut self, text: String) {
+        // Bridge for out-of-`App` prompt buffers (egui's `SavvagentApp::prompt`).
+        self.pending_prefill = Some(text.clone());
         self.input_textarea = make_input_textarea(vec![text]);
         let row = self.input_textarea.lines().len().saturating_sub(1) as u16;
         let col = self

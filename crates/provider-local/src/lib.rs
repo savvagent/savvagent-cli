@@ -142,6 +142,13 @@ impl OllamaProviderBuilder {
         }
         let http = reqwest::Client::builder()
             .timeout(self.timeout)
+            // Bound the TCP connect independently of the request timeout. When
+            // Ollama isn't running and the port *drops* packets (rather than
+            // refusing the connection), a bare connect can hang for the OS TCP
+            // timeout — tens of seconds. `connect_timeout` caps that so the
+            // health probe / `list_models` fail fast instead of stalling any
+            // caller (the GUI bootstrap in particular).
+            .connect_timeout(Duration::from_secs(2))
             .build()
             .map_err(|e| BuildError::HttpClient(e.to_string()))?;
         Ok(OllamaProvider {
@@ -166,6 +173,7 @@ impl ProviderHandler for OllamaProvider {
         let resp = self
             .http
             .get(&url)
+            .timeout(Duration::from_secs(3))
             .send()
             .await
             .map_err(map_reqwest_error)?;

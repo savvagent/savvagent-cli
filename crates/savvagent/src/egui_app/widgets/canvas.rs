@@ -247,7 +247,7 @@ pub fn paint(
             // iteration so we re-enter freshly each dispatch.
             let _guard = rt.enter();
             let host_slot = host_slot.clone();
-            let dirty = futures::executor::block_on(crate::canvas_input::handle_canvas_mouse(
+            let dirty = crate::egui_app::block_on_ui(crate::canvas_input::handle_canvas_mouse(
                 app, &host_slot, id, mouse,
             ));
             if dirty {
@@ -275,7 +275,7 @@ pub fn paint(
         for portable in keys {
             let host_slot = host_slot.clone();
             let dirty =
-                futures::executor::block_on(crate::canvas_input::handle_focused_canvas_key(
+                crate::egui_app::block_on_ui(crate::canvas_input::handle_focused_canvas_key(
                     app,
                     &host_slot,
                     id,

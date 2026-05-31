@@ -181,7 +181,49 @@ fn paint_prompt(state: &mut SavvagentApp, ctx: &egui::Context) {
             // Keep typing without re-clicking the field.
             resp.request_focus();
         }
+
+        // `/` on an empty prompt opens the command palette — the egui
+        // equivalent of the TUI's `OnHome` `/` keybinding (which the egui
+        // shell doesn't route through the plugin `KeybindingRouter`). The
+        // typed `/` is cleared and `pending_open_palette` tells the next
+        // frame's async pass to emit `Effect::OpenScreen { id: "palette" }`.
+        // `paint_prompt` only runs when no screen is open, so no extra guard.
+        if palette_trigger(&state.prompt) {
+            state.prompt.clear();
+            state.pending_open_palette = true;
+            ctx.request_repaint();
+        }
+
+        // `@` opens the file picker to browse for a path — the egui
+        // equivalent of the ratatui prompt's `@`-opens-explorer affordance
+        // (main.rs's `KeyCode::Char('@')` arm). Unlike `/`, `@` is valid
+        // mid-prompt (e.g. `explain @foo`), so we trigger on the keystroke,
+        // not on buffer contents. The typed `@` stays in the buffer as the
+        // splice marker; `paint`'s `take_picked` → `splice_at_reference`
+        // replaces it with the chosen `@<path>`. Cancelling leaves the bare
+        // `@` for the user to edit or delete.
+        if resp.has_focus() && typed_at_marker(ui) {
+            state.file_picker.open();
+        }
     });
+}
+
+/// Whether the current prompt buffer should open the command palette.
+/// Fires only when the user has typed exactly `/` into an otherwise-empty
+/// prompt — a `/` after other text is a literal slash, not a trigger.
+fn palette_trigger(prompt: &str) -> bool {
+    prompt == "/"
+}
+
+/// Whether the user typed `@` this frame (a text-input event for `@`).
+/// Used to open the file picker from the prompt, mirroring the ratatui
+/// `@`-opens-explorer keybinding.
+fn typed_at_marker(ui: &egui::Ui) -> bool {
+    ui.input(|i| {
+        i.events
+            .iter()
+            .any(|e| matches!(e, egui::Event::Text(t) if t == "@"))
+    })
 }
 
 /// Bottom panel (above the prompt): plugin tips followed by the three footer
@@ -367,5 +409,29 @@ fn paint_tool(
             spans: result_spans.clone(),
         };
         ui.label(styled_line_to_job(&result_line, palette, FONT_SIZE));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::palette_trigger;
+
+    #[test]
+    fn lone_slash_triggers_palette() {
+        assert!(palette_trigger("/"));
+    }
+
+    #[test]
+    fn empty_prompt_does_not_trigger() {
+        assert!(!palette_trigger(""));
+    }
+
+    #[test]
+    fn slash_with_text_does_not_trigger() {
+        // The user is typing/filtering — a `/cmd` partial or a `/` mid-text
+        // is a literal slash, not a palette-open request.
+        assert!(!palette_trigger("/co"));
+        assert!(!palette_trigger("fix bug in a/b"));
+        assert!(!palette_trigger(" /"));
     }
 }

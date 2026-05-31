@@ -1063,9 +1063,7 @@ async fn run_slash(
         _ => return Err("plugin runtime not installed".into()),
     };
     let effs = {
-        let reg_guard = reg.read().await;
-        let idx_guard = idx.read().await;
-        let router = SlashRouter::new(&idx_guard, &reg_guard);
+        let router = SlashRouter::new(idx.clone(), reg.clone());
         router
             .dispatch(&name, args)
             .await
