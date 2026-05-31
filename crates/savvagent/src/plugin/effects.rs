@@ -1283,6 +1283,12 @@ mod tests {
             &["/view ".to_string()],
             "PrefillInput must install the literal text as a single line"
         );
+        assert_eq!(
+            app.pending_prefill.as_deref(),
+            Some("/view "),
+            "PrefillInput must also stage the text on the pending_prefill bridge \
+             that the egui prompt drains"
+        );
     }
 
     /// Stack effect recurses through children in order; results are applied

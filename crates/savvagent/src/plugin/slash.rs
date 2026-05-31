@@ -38,7 +38,8 @@ impl std::fmt::Display for SlashError {
 impl std::error::Error for SlashError {}
 
 impl SlashRouter {
-    /// Construct a router backed by the given index and registry snapshots.
+    /// Construct a router over shared `Arc<RwLock<..>>` handles to the index
+    /// and registry; each is read-locked fresh per `resolve`/`dispatch` call.
     pub fn new(indexes: Arc<RwLock<Indexes>>, registry: Arc<RwLock<PluginRegistry>>) -> Self {
         Self { indexes, registry }
     }

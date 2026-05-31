@@ -8,12 +8,14 @@
 //! Linux; submodules are added by later foundation tasks.
 //!
 //! This front-end reuses the exact host/turn machinery the ratatui TUI drives
-//! in `run_app`: the same `bootstrap_app_and_host`, the same `WorkerMsg`
-//! channel, the same turn-id counters, and the same pub(crate) leaf helpers
-//! (`translate_turn_event_to_host_event`, `create_canvas_renderer`,
-//! `auto_export_canvas`, `save_transcript_now`, `current_host`). The only
-//! difference is the shell: egui paints synchronously each frame instead of
-//! ratatui's blocking `run_app` event loop.
+//! in `run_app`: the same `WorkerMsg` channel, the same turn-id counters, and
+//! the same pub(crate) leaf helpers (`translate_turn_event_to_host_event`,
+//! `create_canvas_renderer`, `auto_export_canvas`, `save_transcript_now`,
+//! `current_host`). Bootstrap is split for the GUI — `bootstrap_host_only`
+//! runs the network half off the UI thread and `build_app_with_host` builds
+//! the `App` on it — whereas the TUI calls `bootstrap_app_and_host` straight
+//! through. The other difference is the shell: egui paints synchronously each
+//! frame instead of ratatui's blocking `run_app` event loop.
 //!
 //! ## Async inside a synchronous paint pass
 //!
@@ -47,9 +49,10 @@ use crate::{
 };
 use render_model::{RenderModel, RenderModelCache, build_model};
 
-/// What [`bootstrap_app_and_host`] hands back — the seed for a
-/// [`SavvagentApp`]. Produced off the UI thread so a hanging provider probe
-/// (e.g. Ollama on a dropped `localhost:11434`) can never freeze the window.
+/// What `build_app_with_host` returns — the seed for a [`SavvagentApp`]. The
+/// network half (`bootstrap_host_only`) runs off the UI thread so a hanging
+/// provider probe (e.g. Ollama on a dropped `localhost:11434`) can't freeze
+/// the window; this `App` half is then built on the UI thread.
 type BootOutput = (App, HostSlot, std::path::PathBuf, ToolBins);
 
 /// Logical monospace columns the slot/render-model builder lays out against.
@@ -144,11 +147,12 @@ pub struct SavvagentApp {
 }
 
 impl SavvagentApp {
-    /// Build the running front-end from a completed [`bootstrap_app_and_host`]
-    /// result. Synchronous and non-blocking: bootstrap (which touches the
-    /// network — provider health probes / `list_models`) has already happened
-    /// off the UI thread inside [`GuiApp`], so this only wires up the worker
-    /// channel and the empty render cache. The UI thread never blocks here.
+    /// Build the running front-end from a completed `build_app_with_host`
+    /// result. Synchronous and non-blocking: the network half of bootstrap
+    /// (provider health probes / `list_models`, via `bootstrap_host_only`) has
+    /// already happened off the UI thread inside [`GuiApp`], so this only wires
+    /// up the worker channel and the empty render cache. The UI thread never
+    /// blocks here.
     fn from_boot(boot: BootOutput, rt: Handle) -> Self {
         let (app, host_slot, project_root, tool_bins) = boot;
         let (worker_tx, worker_rx) = mpsc::channel::<WorkerMsg>(128);
@@ -446,10 +450,11 @@ impl SavvagentApp {
 
 impl SavvagentApp {
     /// One paint pass for the *running* (post-bootstrap) front-end. Driven by
-    /// [`GuiApp::update`] once `bootstrap_app_and_host` has completed off the
-    /// UI thread. Formerly the `eframe::App::update` body; the eframe trait now
-    /// lives on [`GuiApp`] so the window can open and stay responsive while the
-    /// (network-touching) bootstrap runs in the background.
+    /// [`GuiApp::update`] once the host half (`bootstrap_host_only`) has
+    /// completed off the UI thread and `build_app_with_host` has built the
+    /// `App` on it. Formerly the `eframe::App::update` body; the eframe trait
+    /// now lives on [`GuiApp`] so the window can open and stay responsive while
+    /// the (network-touching) host build runs in the background.
     fn frame(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // 0. Drain any prompt prefill staged by `apply_effects` last frame
         //    (the command palette emits `Effect::PrefillInput { "/cmd " }` for
@@ -630,7 +635,8 @@ impl SavvagentApp {
 
 /// The eframe application. A thin lifecycle wrapper around [`SavvagentApp`]
 /// whose sole job is to keep the window responsive while the network-touching
-/// [`bootstrap_app_and_host`] runs **off the UI thread**.
+/// host build (`bootstrap_host_only`) runs **off the UI thread** (the `App`
+/// half, `build_app_with_host`, is then built on the UI thread).
 ///
 /// The previous design `block_on`'d bootstrap inside the eframe creation
 /// closure, so a hanging provider probe (Ollama on a dropped

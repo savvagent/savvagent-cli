@@ -4,7 +4,10 @@
 //! The caller (the TUI's `compute_home_frame_data`) falls back to
 //! `savvagent_plugin::styled::json_spans` when the router returns `None`.
 
+use std::sync::Arc;
+
 use savvagent_plugin::StyledSpan;
+use tokio::sync::RwLock;
 
 use crate::plugin::manifests::Indexes;
 use crate::plugin::registry::PluginRegistry;
@@ -12,10 +15,6 @@ use crate::plugin::registry::PluginRegistry;
 /// Routes a tool name to its owning plugin (via `Indexes::tool_summaries`)
 /// and forwards summary requests. Asynchronous because plugins live behind
 /// `Arc<tokio::sync::Mutex<dyn Plugin>>` in the registry.
-use std::sync::Arc;
-
-use tokio::sync::RwLock;
-
 pub struct ToolSummaryRouter {
     /// Index over enabled-plugin manifests; provides the tool-name → PluginId map.
     pub indexes: Arc<RwLock<Indexes>>,
@@ -24,14 +23,16 @@ pub struct ToolSummaryRouter {
 }
 
 impl ToolSummaryRouter {
-    /// Construct a router from references to the current indexes and registry.
+    /// Construct a router over shared `Arc<RwLock<..>>` handles to the indexes
+    /// and registry; each is read-locked fresh per summary call.
     pub fn new(indexes: Arc<RwLock<Indexes>>, registry: Arc<RwLock<PluginRegistry>>) -> Self {
         Self { indexes, registry }
     }
 
     /// Look up the owning plugin for `name` and call `summarize_tool_call`.
-    /// Returns `None` if no plugin claims the name or the plugin returns
-    /// `None` for these args.
+    /// Returns `None` if no plugin claims the name, the plugin returns `None`
+    /// for these args, OR the plugin is momentarily locked (see the `try_lock`
+    /// note below) — the caller falls back to raw rendering in every case.
     pub async fn summarize_call(
         &self,
         name: &str,
@@ -45,20 +46,33 @@ impl ToolSummaryRouter {
         // A blocking acquire here can wedge the winit loop (see the matching
         // note in `slots::SlotRouter::render`). Skip the summary this frame if
         // the plugin is momentarily locked.
-        let plugin = handle.try_lock().ok()?;
+        let Ok(plugin) = handle.try_lock() else {
+            tracing::trace!(
+                tool = name,
+                "tool-summary plugin busy; skipping call summary this frame"
+            );
+            return None;
+        };
         plugin.summarize_tool_call(name, args)
     }
 
     /// Look up the owning plugin for `name` and call `summarize_tool_result`.
-    /// Returns `None` if no plugin claims the name or the plugin returns
-    /// `None` (e.g. parse failure on `result_text`).
+    /// Returns `None` if no plugin claims the name, the plugin returns `None`
+    /// (e.g. parse failure on `result_text`), OR the plugin is momentarily
+    /// locked — the caller falls back to raw rendering in every case.
     pub async fn summarize_result(&self, name: &str, result_text: &str) -> Option<Vec<StyledSpan>> {
         let indexes_guard = self.indexes.read().await;
         let registry_guard = self.registry.read().await;
         let pid = indexes_guard.tool_summaries.get(name)?;
         let handle = registry_guard.get(pid)?;
         // Non-blocking (see `summarize_call` / `slots::SlotRouter::render`).
-        let plugin = handle.try_lock().ok()?;
+        let Ok(plugin) = handle.try_lock() else {
+            tracing::trace!(
+                tool = name,
+                "tool-summary plugin busy; skipping result summary this frame"
+            );
+            return None;
+        };
         plugin.summarize_tool_result(name, result_text)
     }
 }
