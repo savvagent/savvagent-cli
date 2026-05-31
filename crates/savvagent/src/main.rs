@@ -207,7 +207,21 @@ async fn main() -> Result<()> {
 /// build). Carries no `App` (which is `!Send`), so it can be produced on a
 /// background Tokio worker and handed back to the UI thread — see the GUI's
 /// `GuiApp` bootstrap in `egui_app`.
-pub(crate) type HostBoot = Option<(Arc<Host>, String, Option<&'static str>, Vec<String>)>;
+/// The `Send` result of the network half of bootstrap, handed back from the
+/// background Tokio worker to the UI thread. A named struct (rather than a bare
+/// 4-tuple) so the two `String`/`Vec<String>`-family members can't be
+/// transposed at a decode site.
+pub(crate) struct HostBoot {
+    /// The started provider-pool host.
+    pub host: Arc<Host>,
+    /// Model id to show in the header for the initial active provider.
+    pub header_model: String,
+    /// `&'static` id of the initial active provider, if one connected.
+    pub provider_id: Option<&'static str>,
+    /// One-shot startup notes (timeouts, build failures, routing parse errors)
+    /// to surface once `App` exists.
+    pub startup_notes: Vec<String>,
+}
 
 /// Resolve the bundled tool binaries. Cheap, local, and `Send`.
 pub(crate) fn build_tool_bins() -> ToolBins {
@@ -227,7 +241,7 @@ pub(crate) async fn bootstrap_host_only(
     project_root: PathBuf,
     tool_bins: ToolBins,
     config_file: config_file::ConfigFile,
-) -> HostBoot {
+) -> Option<HostBoot> {
     bootstrap_pool_host(&project_root, &tool_bins, &config_file).await
 }
 
@@ -249,16 +263,20 @@ pub(crate) async fn bootstrap_app_and_host() -> Result<(App, HostSlot, std::path
 /// happens here — only local manifest/plugin work — so it is safe to run on
 /// the GUI's UI thread without freezing the window.
 pub(crate) async fn build_app_with_host(
-    initial: HostBoot,
+    initial: Option<HostBoot>,
     project_root: std::path::PathBuf,
     tool_bins: ToolBins,
 ) -> Result<(App, HostSlot, std::path::PathBuf, ToolBins)> {
     let (header_model, initial_provider, startup_notes) = match &initial {
-        Some((_, model, id, notes)) => (model.clone(), *id, notes.clone()),
+        Some(boot) => (
+            boot.header_model.clone(),
+            boot.provider_id,
+            boot.startup_notes.clone(),
+        ),
         None => ("(disconnected)".to_string(), None, Vec::new()),
     };
 
-    let host_slot: HostSlot = Arc::new(RwLock::new(initial.map(|(h, _, _, _)| h)));
+    let host_slot: HostSlot = Arc::new(RwLock::new(initial.map(|boot| boot.host)));
 
     let transcript_dir = transcript_dir();
 
@@ -421,7 +439,7 @@ async fn bootstrap_pool_host(
     project_root: &Path,
     tool_bins: &ToolBins,
     config_file: &config_file::ConfigFile,
-) -> Option<(Arc<Host>, String, Option<&'static str>, Vec<String>)> {
+) -> Option<HostBoot> {
     // Legacy MCP-over-HTTP debug path. When this env var is set the host
     // connects to a remote provider binary instead of using the in-process
     // pool. No pool, no policy, no timeout wrapping.
@@ -431,7 +449,12 @@ async fn bootstrap_pool_host(
         match start_host_remote(url, model.clone(), project_root.to_path_buf(), tool_bins).await {
             Ok(host) => {
                 let notes = host.take_startup_notes();
-                return Some((host, model, None, notes));
+                return Some(HostBoot {
+                    host,
+                    header_model: model,
+                    provider_id: None,
+                    startup_notes: notes,
+                });
             }
             Err(e) => {
                 eprintln!("warning: SAVVAGENT_PROVIDER_URL set but connect failed: {e:#}");
@@ -627,7 +650,12 @@ async fn bootstrap_pool_host(
             deferred_notes.extend(host.take_startup_notes());
             let host_arc = Arc::new(host);
             host_arc.wire_self_arc();
-            Some((host_arc, initial_model, initial_provider_id, deferred_notes))
+            Some(HostBoot {
+                host: host_arc,
+                header_model: initial_model,
+                provider_id: initial_provider_id,
+                startup_notes: deferred_notes,
+            })
         }
         Err(e) => {
             eprintln!("warning: pool host start failed: {e:#}");

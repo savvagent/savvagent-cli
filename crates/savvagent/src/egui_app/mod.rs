@@ -461,7 +461,7 @@ impl SavvagentApp {
         //    arg-requiring slashes). `prefill_input` writes the ratatui
         //    textarea AND this bridge field; the egui prompt lives on
         //    `self.prompt`, so we move it across here.
-        if let Some(text) = self.app.pending_prefill.take() {
+        if let Some(text) = self.app.take_pending_prefill() {
             self.prompt = text;
         }
 
@@ -649,7 +649,7 @@ enum Boot {
     /// `Send` data — no `App`). `project_root`/`tool_bins` are kept on the UI
     /// thread so it can build the `!Send` `App` once the host arrives.
     Pending {
-        rx: tokio::sync::oneshot::Receiver<crate::HostBoot>,
+        rx: tokio::sync::oneshot::Receiver<Option<crate::HostBoot>>,
         project_root: std::path::PathBuf,
         tool_bins: ToolBins,
     },
@@ -704,10 +704,21 @@ impl GuiApp {
     }
 }
 
-impl eframe::App for GuiApp {
-    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
-        // Advance the boot state machine. While pending, poll the oneshot
-        // without blocking and keep repainting so we notice completion.
+impl GuiApp {
+    /// Advance the boot state machine and hand back the running front-end once
+    /// bootstrap has settled. While the host build is still in flight — or if
+    /// it failed — this paints the splash and returns `None`, so the caller
+    /// only ever touches a live `SavvagentApp`.
+    ///
+    /// The "`Boot::Pending` never escapes this function" invariant is expressed
+    /// in control flow rather than a runtime `unreachable!`: the empty-channel
+    /// case returns early, and every other `Pending` outcome transitions
+    /// `self.boot` to `Running`/`Failed` before the final match. The residual
+    /// `Pending` arm therefore needs no panic — it simply paints nothing and
+    /// resolves on the next frame.
+    fn poll_boot(&mut self, ctx: &egui::Context) -> Option<&mut SavvagentApp> {
+        // While pending, poll the oneshot without blocking and keep repainting
+        // so we notice completion.
         if let Boot::Pending {
             rx,
             project_root,
@@ -739,16 +750,28 @@ impl eframe::App for GuiApp {
                 Err(TryRecvError::Empty) => {
                     paint_boot_splash(ctx, None);
                     ctx.request_repaint(); // keep polling the oneshot
-                    return;
+                    return None;
                 }
             }
         }
 
         match &mut self.boot {
-            Boot::Running(app) => app.frame(ctx, frame),
-            Boot::Failed(msg) => paint_boot_splash(ctx, Some(msg)),
-            // Set to Running/Failed just above; never observed Pending here.
-            Boot::Pending { .. } => unreachable!("Pending is handled and returns above"),
+            Boot::Running(app) => Some(app),
+            Boot::Failed(msg) => {
+                paint_boot_splash(ctx, Some(msg));
+                None
+            }
+            // Settled to Running/Failed by the block above (or returned early
+            // while empty); a stray Pending just paints nothing this frame.
+            Boot::Pending { .. } => None,
+        }
+    }
+}
+
+impl eframe::App for GuiApp {
+    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        if let Some(app) = self.poll_boot(ctx) {
+            app.frame(ctx, frame);
         }
     }
 }

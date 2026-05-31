@@ -12,6 +12,13 @@ use crate::plugin::registry::PluginRegistry;
 /// the call. Re-entrancy depth enforcement is handled upstream in
 /// `apply_effects` via `MAX_RUNSLASH_DEPTH`; `SlashRouter` is a pure
 /// resolver + single-shot dispatcher.
+///
+/// Lock-acquisition order (shared with
+/// [`crate::plugin::tool_summaries::ToolSummaryRouter`]): always lock `indexes`
+/// **before** `registry`. Both routers acquire the same two `RwLock`s;
+/// acquiring them in a consistent order forestalls a lock-ordering inversion
+/// between them. (`dispatch` locks `indexes` via `resolve` and releases it
+/// before taking `registry`; `ToolSummaryRouter` holds both guards at once.)
 pub struct SlashRouter {
     indexes: Arc<RwLock<Indexes>>,
     registry: Arc<RwLock<PluginRegistry>>,

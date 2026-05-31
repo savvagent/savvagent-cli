@@ -1284,10 +1284,15 @@ mod tests {
             "PrefillInput must install the literal text as a single line"
         );
         assert_eq!(
-            app.pending_prefill.as_deref(),
+            app.take_pending_prefill().as_deref(),
             Some("/view "),
             "PrefillInput must also stage the text on the pending_prefill bridge \
              that the egui prompt drains"
+        );
+        assert_eq!(
+            app.take_pending_prefill(),
+            None,
+            "take_pending_prefill is one-shot: draining the bridge leaves it empty",
         );
     }
 

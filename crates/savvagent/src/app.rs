@@ -578,10 +578,12 @@ pub struct App {
     pub input_textarea: TextArea<'static>,
     /// Text staged by [`App::prefill_input`] for a front-end whose prompt
     /// buffer lives outside `App` (the egui shell's `SavvagentApp::prompt`).
-    /// The egui frame drains this into its prompt each frame; the ratatui TUI
-    /// ignores it (it reads `input_textarea` directly). `Some` only between a
-    /// palette prefill and the next frame that consumes it.
-    pub pending_prefill: Option<String>,
+    /// The egui frame drains this into its prompt each frame via
+    /// [`App::take_pending_prefill`]; the ratatui TUI ignores it (it reads
+    /// `input_textarea` directly). `Some` only between a palette prefill and
+    /// the next frame that consumes it. Private so the one-shot drain is the
+    /// only way out of the bridge.
+    pending_prefill: Option<String>,
     pub input_mode: InputMode,
     pub model: String,
     pub transcript_dir: PathBuf,
@@ -2034,6 +2036,14 @@ impl App {
             .unwrap_or(0) as u16;
         self.input_textarea
             .move_cursor(tui_textarea::CursorMove::Jump(row, col));
+    }
+
+    /// Drain the one-shot prompt-prefill bridge staged by [`App::prefill_input`].
+    /// Returns `Some(text)` exactly once per prefill; subsequent calls return
+    /// `None` until the next prefill. The egui frame calls this each paint to
+    /// move staged text into its out-of-`App` prompt buffer.
+    pub fn take_pending_prefill(&mut self) -> Option<String> {
+        self.pending_prefill.take()
     }
 
     /// Set the active theme by slug. Unknown slugs are surfaced as a

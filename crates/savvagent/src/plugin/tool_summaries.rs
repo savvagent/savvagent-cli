@@ -15,11 +15,17 @@ use crate::plugin::registry::PluginRegistry;
 /// Routes a tool name to its owning plugin (via `Indexes::tool_summaries`)
 /// and forwards summary requests. Asynchronous because plugins live behind
 /// `Arc<tokio::sync::Mutex<dyn Plugin>>` in the registry.
+///
+/// Lock-acquisition order (shared with [`crate::plugin::slash::SlashRouter`]):
+/// always lock `indexes` **before** `registry`. Both routers acquire the same
+/// two `RwLock`s. Acquiring them in a consistent order forestalls a lock-ordering
+/// inversion between them. (`ToolSummaryRouter` holds both guards at once;
+/// `SlashRouter` acquires `indexes` then releases it before `registry`.)
 pub struct ToolSummaryRouter {
     /// Index over enabled-plugin manifests; provides the tool-name → PluginId map.
-    pub indexes: Arc<RwLock<Indexes>>,
+    indexes: Arc<RwLock<Indexes>>,
     /// In-memory registry of plugin instances.
-    pub registry: Arc<RwLock<PluginRegistry>>,
+    registry: Arc<RwLock<PluginRegistry>>,
 }
 
 impl ToolSummaryRouter {
