@@ -32,6 +32,10 @@ name = "savvagent-tool-grep"
 path = "src/bin/savvagent-tool-grep.rs"
 
 [[bin]]
+name = "savvagent-tool-web"
+path = "src/bin/savvagent-tool-web.rs"
+
+[[bin]]
 name = "savvagent-anthropic"
 path = "src/bin/savvagent-anthropic.rs"
 
@@ -58,6 +62,7 @@ tool-fs = { workspace = true }
 tool-lsp = { workspace = true }
 tool-bash = { workspace = true }
 tool-grep = { workspace = true }
+tool-web = { workspace = true }
 async-trait.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
@@ -116,3 +121,52 @@ serial_test = "3"
 tempfile = "3"
 tokio = { version = "1.52", features = ["test-util"] }
 httpmock = "0.7"
+
+# `.deb` packaging via `cargo deb` (https://github.com/kornelski/cargo-deb).
+# Not part of the `cargo-dist` release pipeline above (dist doesn't build
+# deb/rpm); a separate `.github/workflows/package-linux.yml` job runs
+# `cargo deb` against the same release build and uploads the artifact to
+# the GitHub Release cargo-dist already created for the tag.
+[package.metadata.deb]
+name = "savvagent"
+maintainer = "Rob Hicks"
+copyright = "2024-2026, Rob Hicks"
+license-file = ["../../LICENSE", "0"]
+extended-description = """\
+A fast, MCP-first terminal coding agent. Ships the savvagent TUI plus its \
+bundled stdio MCP tool servers (fs, bash, grep, lsp, web) and standalone \
+provider shims (anthropic, gemini, openai)."""
+depends = "$auto"
+section = "utils"
+priority = "optional"
+assets = [
+    ["../../target/release/savvagent", "usr/bin/savvagent", "755"],
+    ["../../target/release/savvagent-tool-fs", "usr/bin/savvagent-tool-fs", "755"],
+    ["../../target/release/savvagent-tool-bash", "usr/bin/savvagent-tool-bash", "755"],
+    ["../../target/release/savvagent-tool-grep", "usr/bin/savvagent-tool-grep", "755"],
+    ["../../target/release/savvagent-tool-lsp", "usr/bin/savvagent-tool-lsp", "755"],
+    ["../../target/release/savvagent-tool-web", "usr/bin/savvagent-tool-web", "755"],
+    ["../../target/release/savvagent-anthropic", "usr/bin/savvagent-anthropic", "755"],
+    ["../../target/release/savvagent-gemini", "usr/bin/savvagent-gemini", "755"],
+    ["../../target/release/savvagent-openai", "usr/bin/savvagent-openai", "755"],
+    ["../../README.md", "usr/share/doc/savvagent/README.md", "644"],
+]
+
+# `.rpm` packaging via `cargo generate-rpm`
+# (https://github.com/cat-in-136/cargo-generate-rpm). Same binaries as the
+# deb package above; kept in sync manually since neither tool shares config.
+[package.metadata.generate-rpm]
+name = "savvagent"
+license = "AGPL-3.0-or-later"
+assets = [
+    { source = "../../target/release/savvagent", dest = "/usr/bin/savvagent", mode = "755" },
+    { source = "../../target/release/savvagent-tool-fs", dest = "/usr/bin/savvagent-tool-fs", mode = "755" },
+    { source = "../../target/release/savvagent-tool-bash", dest = "/usr/bin/savvagent-tool-bash", mode = "755" },
+    { source = "../../target/release/savvagent-tool-grep", dest = "/usr/bin/savvagent-tool-grep", mode = "755" },
+    { source = "../../target/release/savvagent-tool-lsp", dest = "/usr/bin/savvagent-tool-lsp", mode = "755" },
+    { source = "../../target/release/savvagent-tool-web", dest = "/usr/bin/savvagent-tool-web", mode = "755" },
+    { source = "../../target/release/savvagent-anthropic", dest = "/usr/bin/savvagent-anthropic", mode = "755" },
+    { source = "../../target/release/savvagent-gemini", dest = "/usr/bin/savvagent-gemini", mode = "755" },
+    { source = "../../target/release/savvagent-openai", dest = "/usr/bin/savvagent-openai", mode = "755" },
+    { source = "../../README.md", dest = "/usr/share/doc/savvagent/README.md", mode = "644" },
+]

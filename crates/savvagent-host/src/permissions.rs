@@ -459,6 +459,20 @@ impl PermissionPolicy {
             "run" => Verdict::Ask {
                 summary: command_summary(args).unwrap_or_else(|| "run".into()),
             },
+            "web_fetch" => Verdict::Ask {
+                summary: args
+                    .get("url")
+                    .and_then(|v| v.as_str())
+                    .map(|u| format!("web_fetch: {u}"))
+                    .unwrap_or_else(|| "web_fetch".into()),
+            },
+            "web_search" => Verdict::Ask {
+                summary: args
+                    .get("query")
+                    .and_then(|v| v.as_str())
+                    .map(|q| format!("web_search: {q}"))
+                    .unwrap_or_else(|| "web_search".into()),
+            },
             other => Verdict::Ask {
                 summary: format!("{other}({})", short_args(args)),
             },

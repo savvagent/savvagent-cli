@@ -132,6 +132,7 @@ pub(crate) fn register_builtins(
         Box::new(builtin::tool_fs_summary::ToolFsSummaryPlugin::new()),
         Box::new(builtin::tool_grep_summary::ToolGrepSummaryPlugin::new()),
         Box::new(builtin::tool_task_summary::ToolTaskSummaryPlugin::new()),
+        Box::new(builtin::tool_web_summary::ToolWebSummaryPlugin::new()),
         Box::new(builtin::view_file::ViewFilePlugin::new()),
         Box::new(builtin::html_canvas::HtmlCanvasPlugin::new()),
     ];

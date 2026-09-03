@@ -8,6 +8,23 @@ boundary changes and PATCH captures fixes).
 
 ## [Unreleased]
 
+### Added
+
+- **Web tools (`tool-web`).** New stdio MCP server exposing `web_fetch`
+  and `web_search`, bundled as the `savvagent-tool-web` binary.
+  `web_fetch` is SSRF-guarded (blocks loopback/private/link-local/
+  multicast/CGNAT ranges and IPv4-mapped IPv6 addresses, revalidates
+  every redirect hop, restricts to `http`/`https`) and converts HTML
+  responses to plain text. `web_search` supports the Brave Search API
+  (`SAVVAGENT_BRAVE_API_KEY` / `BRAVE_API_KEY`) or a self-hosted
+  SearXNG instance (`SAVVAGENT_SEARXNG_URL`); returns a clear
+  "not configured" error otherwise. Both tools default to `Ask`
+  permission. Ships with a TUI transcript-summary plugin.
+- **Linux packaging.** `cargo-deb` and `cargo-generate-rpm` metadata
+  added for the `savvagent` crate, plus a `package-linux.yml` workflow
+  that builds `.deb`/`.rpm` artifacts and uploads them to the GitHub
+  Release after the existing cargo-dist `Release` workflow completes.
+
 ## 0.18.0 - 2026-05-26
 
 ### Added

@@ -1,0 +1,31 @@
+[package]
+name = "tool-web"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Web search and web fetch as a stdio MCP server (web_search, web_fetch)"
+
+[lib]
+name = "tool_web"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow.workspace = true
+rmcp.workspace = true
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+reqwest = { workspace = true, features = ["json", "query"] }
+html2text = "0.13"
+url = "2"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+axum = { workspace = true, features = ["json"] }
+serial_test = "3"

@@ -20,6 +20,7 @@
 //! - `SAVVAGENT_TOOL_BASH_BIN`  (default `savvagent-tool-bash` on $PATH)
 //! - `SAVVAGENT_TOOL_GREP_BIN`  (default `savvagent-tool-grep` on $PATH)
 //! - `SAVVAGENT_TOOL_LSP_BIN`   (default `savvagent-tool-lsp` on $PATH)
+//! - `SAVVAGENT_TOOL_WEB_BIN`   (default `savvagent-tool-web` on $PATH)
 
 #![allow(clippy::collapsible_if)] // pre-existing debt; many sites under rustc 1.95 new lint
 
@@ -117,6 +118,7 @@ pub(crate) struct ToolBins {
     bash: Option<PathBuf>,
     grep: Option<PathBuf>,
     lsp: Option<PathBuf>,
+    web: Option<PathBuf>,
 }
 
 impl ToolBins {
@@ -127,6 +129,7 @@ impl ToolBins {
             self.bash.as_deref(),
             self.grep.as_deref(),
             self.lsp.as_deref(),
+            self.web.as_deref(),
         ]
         .into_iter()
         .flatten()
@@ -230,6 +233,7 @@ pub(crate) fn build_tool_bins() -> ToolBins {
         bash: locate_bundled_bin("savvagent-tool-bash", "SAVVAGENT_TOOL_BASH_BIN"),
         grep: locate_bundled_bin("savvagent-tool-grep", "SAVVAGENT_TOOL_GREP_BIN"),
         lsp: locate_bundled_bin("savvagent-tool-lsp", "SAVVAGENT_TOOL_LSP_BIN"),
+        web: locate_bundled_bin("savvagent-tool-web", "SAVVAGENT_TOOL_WEB_BIN"),
     }
 }
 
@@ -414,6 +418,9 @@ pub(crate) async fn build_app_with_host(
     }
     if tool_bins.lsp.is_none() {
         app.push_note(rust_i18n::t!("errors.tool-lsp-not-found").to_string());
+    }
+    if tool_bins.web.is_none() {
+        app.push_note(rust_i18n::t!("errors.tool-web-not-found").to_string());
     }
 
     Ok((app, host_slot, project_root, tool_bins))

@@ -11,12 +11,13 @@ how to extend it. End users wanting to install Savvagent can skip to
 
 Precompiled binaries for Linux (x86_64 / aarch64), macOS (Apple Silicon),
 and Windows (x86_64) are published to GitHub Releases on every tag. Each
-release ships one archive per platform containing seven binaries — the
-`savvagent` TUI plus the three bundled tool servers (`savvagent-tool-fs`,
-`savvagent-tool-bash`, `savvagent-tool-grep`) and three standalone
-provider MCP servers (`savvagent-anthropic`, `savvagent-gemini`,
-`savvagent-openai`) — installed to your Cargo bin directory. Local
-(Ollama) is linked into the TUI and has no standalone shim.
+release ships one archive per platform containing nine binaries — the
+`savvagent` TUI plus five bundled tool servers (`savvagent-tool-fs`,
+`savvagent-tool-bash`, `savvagent-tool-grep`, `savvagent-tool-lsp`,
+`savvagent-tool-web`) and three standalone provider MCP servers
+(`savvagent-anthropic`, `savvagent-gemini`, `savvagent-openai`) —
+installed to your Cargo bin directory. Local (Ollama) is linked into the
+TUI and has no standalone shim.
 
 **Linux / macOS** (one-liner):
 
@@ -64,6 +65,7 @@ The workspace is a small set of focused crates:
 | [`crates/tool-fs`](crates/tool-fs) | `read_file` / `write_file` / `list_dir` / `glob` / `insert` / `replace` / `multi_edit` library plus `tool_fs::run` (the entry point the `savvagent-tool-fs` shim calls). |
 | [`crates/tool-bash`](crates/tool-bash) | Sandboxed `bash` execution. The tool with the trickiest spawn lifecycle — see `savvagent-host::tools` for the lazy-spawn + `allow_net` resolver. |
 | [`crates/tool-grep`](crates/tool-grep) | `ripgrep`-style search. |
+| [`crates/tool-web`](crates/tool-web) | `web_fetch` (SSRF-guarded HTTP/HTTPS fetch with HTML-to-text conversion) and `web_search` (Brave Search API or self-hosted SearXNG backend). |
 
 Every provider and every tool is "just" an MCP-shaped library that *can* be
 wrapped in a binary. The TUI links providers in-process by default and
@@ -847,6 +849,9 @@ args = []
 | `SAVVAGENT_TOOL_FS_BIN` | `savvagent` | `savvagent-tool-fs` (PATH) | Path to the fs tool binary. |
 | `SAVVAGENT_TOOL_BASH_BIN` | `savvagent` | `savvagent-tool-bash` (PATH) | Path to the bash tool binary. |
 | `SAVVAGENT_TOOL_GREP_BIN` | `savvagent` | `savvagent-tool-grep` (PATH) | Path to the grep tool binary. |
+| `SAVVAGENT_TOOL_WEB_BIN` | `savvagent` | `savvagent-tool-web` (PATH) | Path to the web tool binary. |
+| `SAVVAGENT_BRAVE_API_KEY` / `BRAVE_API_KEY` | `savvagent-tool-web` | (unset) | API key for `web_search` via the Brave Search API. |
+| `SAVVAGENT_SEARXNG_URL` | `savvagent-tool-web` | (unset) | Base URL of a self-hosted SearXNG instance, used for `web_search` if no Brave key is set. |
 | `SAVVAGENT_NO_UPDATE_CHECK` | `savvagent` | (unset) | When set, disables the launch-time and periodic (2-hour) version check, and the `/update` slash command. CLI equivalent: `--no-update-check`. |
 | `ANTHROPIC_API_KEY` | `savvagent-anthropic` | — | Read at server start. In-process flow gets it from `/connect`. |
 | `ANTHROPIC_BASE_URL` | `savvagent-anthropic` | `https://api.anthropic.com` | For local mocks. |
