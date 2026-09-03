@@ -21,6 +21,7 @@
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
+use futures::StreamExt;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use url::Url;
@@ -30,6 +31,13 @@ use crate::WebToolError;
 /// Default cap on returned characters. Overridable per call via
 /// [`FetchInput::max_chars`].
 pub const DEFAULT_MAX_CHARS: usize = 50_000;
+
+/// Hard cap on response body bytes read from the wire, applied
+/// regardless of `max_chars`. Protects against unbounded/streamed
+/// responses (memory-exhaustion DoS) from a malicious or compromised
+/// server — `max_chars` only truncates *after* the body is read, so it
+/// cannot bound memory usage on its own.
+const MAX_BODY_BYTES: usize = 10 * 1024 * 1024;
 
 /// Wall-clock timeout for the HTTP request, including redirects.
 const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
@@ -96,10 +104,16 @@ pub async fn run(input: FetchInput) -> Result<FetchOutput, WebToolError> {
         .and_then(|v| v.to_str().ok())
         .map(str::to_string);
 
-    let body = resp
-        .text()
-        .await
-        .map_err(|e| WebToolError::Network(format!("reading response body failed: {e}")))?;
+    if let Some(len) = resp.content_length()
+        && len > MAX_BODY_BYTES as u64
+    {
+        return Err(WebToolError::InvalidArgument(format!(
+            "response too large: content-length {len} bytes exceeds the \
+             {MAX_BODY_BYTES}-byte limit"
+        )));
+    }
+
+    let body = read_body_capped(resp).await?;
 
     let is_html = content_type
         .as_deref()
@@ -121,6 +135,26 @@ pub async fn run(input: FetchInput) -> Result<FetchOutput, WebToolError> {
         content,
         truncated,
     })
+}
+
+/// Reads `resp`'s body as a stream, aborting with an error the moment
+/// [`MAX_BODY_BYTES`] is exceeded rather than buffering the whole
+/// response first. This bounds memory usage even when the server lies
+/// about (or omits) `Content-Length`.
+async fn read_body_capped(resp: reqwest::Response) -> Result<String, WebToolError> {
+    let mut buf = Vec::new();
+    let mut stream = resp.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk
+            .map_err(|e| WebToolError::Network(format!("reading response body failed: {e}")))?;
+        if buf.len() + chunk.len() > MAX_BODY_BYTES {
+            return Err(WebToolError::InvalidArgument(format!(
+                "response exceeded the {MAX_BODY_BYTES}-byte limit while streaming"
+            )));
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    Ok(String::from_utf8_lossy(&buf).into_owned())
 }
 
 fn truncate_chars(s: &str, max_chars: usize) -> (String, bool) {
@@ -213,12 +247,41 @@ fn is_blocked_v6(ip: Ipv6Addr) -> bool {
     if let Some(v4) = ip.to_ipv4_mapped() {
         return is_blocked_v4(v4);
     }
+    // Other IPv6 forms that embed an IPv4 address (NAT64 well-known
+    // prefix, 6to4) must also be unwrapped and checked, or a DNS
+    // response can smuggle a blocked v4 address past the plain v6
+    // predicates below.
+    if let Some(v4) = embedded_ipv4(ip) {
+        return is_blocked_v4(v4);
+    }
     let segments = ip.segments();
     // fe80::/10 — link-local.
     let link_local = (segments[0] & 0xffc0) == 0xfe80;
     // fc00::/7 — unique local addresses (the IPv6 analog of RFC 1918).
     let unique_local = (segments[0] & 0xfe00) == 0xfc00;
     link_local || unique_local
+}
+
+/// Extracts an embedded IPv4 address from IPv6 transition mechanisms
+/// other than the standard `::ffff:a.b.c.d` mapped form (already handled
+/// by [`Ipv6Addr::to_ipv4_mapped`]):
+///
+/// - NAT64 / DNS64 well-known prefix `64:ff9b::/96` (RFC 6052)
+/// - 6to4 `2002::/16` (RFC 3056), where the next 32 bits are the IPv4
+///   address
+fn embedded_ipv4(ip: Ipv6Addr) -> Option<Ipv4Addr> {
+    let s = ip.segments();
+    if s[0] == 0x0064 && s[1] == 0xff9b && s[2] == 0 && s[3] == 0 && s[4] == 0 && s[5] == 0 {
+        return Some(segments_to_ipv4(s[6], s[7]));
+    }
+    if s[0] == 0x2002 {
+        return Some(segments_to_ipv4(s[1], s[2]));
+    }
+    None
+}
+
+fn segments_to_ipv4(hi: u16, lo: u16) -> Ipv4Addr {
+    Ipv4Addr::new((hi >> 8) as u8, hi as u8, (lo >> 8) as u8, lo as u8)
 }
 
 #[cfg(test)]
@@ -241,6 +304,19 @@ mod tests {
         assert!(is_blocked_addr("fe80::1".parse().unwrap()));
         // IPv4-mapped private address must also be blocked.
         assert!(is_blocked_addr("::ffff:10.0.0.1".parse().unwrap()));
+    }
+
+    #[test]
+    fn blocks_nat64_and_6to4_embedded_v4() {
+        // 64:ff9b::7f00:1 embeds 127.0.0.1 via the NAT64 well-known prefix.
+        assert!(is_blocked_addr("64:ff9b::7f00:1".parse().unwrap()));
+        // 64:ff9b::a9fe:a9fe embeds 169.254.169.254 (cloud metadata IP).
+        assert!(is_blocked_addr("64:ff9b::a9fe:a9fe".parse().unwrap()));
+        // 2002:7f00:1:: is the 6to4 form of 127.0.0.1.
+        assert!(is_blocked_addr("2002:7f00:1::".parse().unwrap()));
+        // Public addresses embedded the same way must still pass.
+        assert!(!is_blocked_addr("64:ff9b::0101:0101".parse().unwrap()));
+        assert!(!is_blocked_addr("2002:0101:0101::".parse().unwrap()));
     }
 
     #[test]
