@@ -1,9 +1,5 @@
 name: Release-plz
 
-permissions:
-  contents: write
-  pull-requests: write
-
 on:
   push:
     branches:
@@ -23,6 +19,9 @@ jobs:
     name: Release-plz PR
     runs-on: ubuntu-latest
     if: github.repository_owner == 'savvagent'
+    permissions:
+      contents: write
+      pull-requests: write
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -47,6 +46,9 @@ jobs:
     name: Release-plz release
     runs-on: ubuntu-latest
     if: github.repository_owner == 'savvagent'
+    permissions:
+      contents: write
+      pull-requests: read
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
