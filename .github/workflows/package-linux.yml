@@ -56,8 +56,16 @@ jobs:
       - name: Build .deb package
         run: cargo deb -p savvagent --no-build
 
+      # Unlike `cargo deb -p`, `cargo-generate-rpm`'s `-p <name>` does not
+      # resolve the crate through workspace metadata: it joins the name
+      # onto the current directory (`./<name>/Cargo.toml`), which only
+      # works for flat single-level workspaces. Since this crate lives at
+      # `crates/savvagent`, invoke it from that directory instead, pointing
+      # `--target-dir` back at the workspace's shared `target/` so it picks
+      # up the release binary built above.
       - name: Build .rpm package
-        run: cargo generate-rpm -p savvagent
+        run: cargo generate-rpm --target-dir ../../target
+        working-directory: crates/savvagent
 
       - name: Verify tag matches a real GitHub Release
         run: gh release view "$TAG" --repo "${{ github.repository }}"
