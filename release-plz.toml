@@ -1,0 +1,34 @@
+[workspace]
+# Crates are internal MCP tool servers / apps, not published to crates.io.
+publish = false
+# We've never published to crates.io, so release-plz must derive the
+# "current released version" from git tags (e.g. v0.16.1) instead of the
+# registry. Without this, an unpublished crate looks like it has no prior
+# release at all.
+git_only = true
+# Explicit naming — matches the existing `vX.Y.Z` tag convention already
+# used by this repo (and required by `.github/workflows/release.yml`'s
+# tag-trigger glob) rather than release-plz's package-count-dependent
+# default.
+git_tag_name = "v{{ version }}"
+git_release_name = "v{{ version }}"
+pr_name = "chore: release v{{ version }}"
+# Every crate shares one workspace version (`version.workspace = true`),
+# so a single tag/release covers the whole repo.
+pr_branch_prefix = "release-plz-"
+# Avoid releasing on *every* push to main. With this off, `release-plz
+# release` only tags/publishes when the merged commit came from a
+# `release-plz-*` branch (i.e. the release PR itself was merged), which
+# avoids racing a fast squash-merge against an in-flight release job.
+release_always = false
+
+# Test fixtures under crates/*/tests/fixtures are never published and use
+# their own hardcoded `version = "0.0.0"`; exclude them from version bumps,
+# changelogs, and tags so they don't get treated as independent packages.
+[[package]]
+name = "resource-tool"
+release = false
+
+[[package]]
+name = "fake-lsp"
+release = false

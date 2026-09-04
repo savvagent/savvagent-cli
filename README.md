@@ -23,17 +23,17 @@ TUI and has no standalone shim.
 
 ```bash
 curl --proto '=https' --tlsv1.2 -LsSf \
-  https://github.com/robhicks/savvagent-rs/releases/latest/download/savvagent-installer.sh | sh
+  https://github.com/savvagent/savvagent-cli/releases/latest/download/savvagent-installer.sh | sh
 ```
 
 **Windows** (PowerShell):
 
 ```powershell
-powershell -ExecutionPolicy ByPass -c "irm https://github.com/robhicks/savvagent-rs/releases/latest/download/savvagent-installer.ps1 | iex"
+powershell -ExecutionPolicy ByPass -c "irm https://github.com/savvagent/savvagent-cli/releases/latest/download/savvagent-installer.ps1 | iex"
 ```
 
 **Manual:** download the matching `savvagent-<target>.tar.gz` (or `.zip`
-on Windows) from the [Releases page](https://github.com/robhicks/savvagent-rs/releases),
+on Windows) from the [Releases page](https://github.com/savvagent/savvagent-cli/releases),
 unpack it, and put the binaries on your `$PATH`. Each archive ships with a
 `.sha256` next to it for verification.
 
@@ -592,6 +592,42 @@ SAVVAGENT_PROVIDER_URL=http://127.0.0.1:8787/mcp cargo run -p savvagent
 When `SAVVAGENT_PROVIDER_URL` is set the TUI uses the MCP client path
 instead of the in-process bridge — useful for debugging the wire protocol
 or pointing at a third-party MCP provider.
+
+## Releases
+
+Versioning and changelog generation are automated with
+[release-plz](https://release-plz.dev) (`release-plz.toml`,
+`.github/workflows/release-plz.yml`):
+
+1. Every push to `main` runs `release-plz release-pr`, which opens or
+   updates a `chore: release vX.Y.Z` pull request. It computes the next
+   [SemVer](https://semver.org) bump and changelog entry from
+   [Conventional Commits](https://www.conventionalcommits.org) merged
+   since the last release — `fix:` → patch, `feat:` → minor, `!` or
+   `BREAKING CHANGE:` footer → major.
+2. Merging that PR (still subject to branch protection — one approval,
+   or an admin bypass) updates `workspace.package.version` in `Cargo.toml`
+   and `CHANGELOG.md` on `main`.
+3. The same workflow then runs `release-plz release`, which tags the
+   merge commit `vX.Y.Z` and creates a GitHub Release. That tag push is
+   what triggers the existing `.github/workflows/release.yml` cargo-dist
+   pipeline, building and publishing the installable binaries.
+
+All workspace crates share one lockstep version, so a single release PR
+covers the whole repo; the two test-fixture crates under
+`tests/fixtures/` are excluded via `release-plz.toml`. Nothing is
+published to crates.io. Use Conventional Commit prefixes (`feat:`,
+`fix:`, `docs:`, `chore:`, etc.) in commit subjects so the automation
+picks the correct version bump.
+
+The workflow authenticates with a `RELEASE_PLZ_TOKEN` repo secret (a
+PAT or GitHub App token) rather than the default `GITHUB_TOKEN`.
+GitHub does not cascade further workflow runs from events triggered by
+the default token, so using it would silently prevent both `ci.yml`
+from running on the release PR and `release.yml` from firing when the
+`vX.Y.Z` tag is pushed — defeating the point of the automation. The
+token needs `contents: read/write` and `pull requests: read/write` on
+this repository.
 
 ## Architecture in five sentences
 

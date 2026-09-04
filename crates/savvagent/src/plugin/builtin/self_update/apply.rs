@@ -28,8 +28,8 @@ use semver::Version;
 
 use super::UpdateState;
 
-const REPO_OWNER: &str = "robhicks";
-const REPO_NAME: &str = "savvagent-rs";
+const REPO_OWNER: &str = "savvagent";
+const REPO_NAME: &str = "savvagent-cli";
 
 #[cfg(target_os = "windows")]
 const INSTALLER_FILENAME: &str = "savvagent-installer.ps1";
@@ -237,8 +237,10 @@ mod tests {
     fn installer_url_targets_the_correct_release_asset() {
         let url = installer_url(&Version::parse("0.13.0").unwrap());
         assert!(
-            url.contains("/releases/download/v0.13.0/"),
-            "url should pin to the requested tag: {url}"
+            url.starts_with(
+                "https://github.com/savvagent/savvagent-cli/releases/download/v0.13.0/"
+            ),
+            "url should target the savvagent/savvagent-cli release for the requested tag: {url}"
         );
         assert!(
             url.ends_with(INSTALLER_FILENAME),

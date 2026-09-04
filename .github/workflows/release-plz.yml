@@ -1,0 +1,75 @@
+name: Release-plz
+
+on:
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: release-plz-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # Opens/updates the "chore: release vX.Y.Z" PR that bumps
+  # `workspace.package.version` and prepends a changelog entry generated
+  # from Conventional Commits since the last release tag. Merging that PR
+  # (which still requires a human approval or admin bypass, per branch
+  # protection) is what actually creates the `vX.Y.Z` tag in the job below.
+  #
+  # Uses a PAT (`RELEASE_PLZ_TOKEN`) rather than the default GITHUB_TOKEN:
+  # GitHub does not cascade further workflow runs from events caused by
+  # the default token, so a PR opened with GITHUB_TOKEN would never
+  # trigger ci.yml, and (more importantly) a tag pushed with it in the
+  # `release` job below would never trigger the tag-based release.yml
+  # cargo-dist pipeline. The PAT needs `contents: read/write` and
+  # `pull requests: read/write` on this repo.
+  release-pr:
+    name: Release-plz PR
+    runs-on: ubuntu-latest
+    if: github.repository_owner == 'savvagent'
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.RELEASE_PLZ_TOKEN }}
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Run release-plz release-pr
+        uses: release-plz/action@v0.5
+        with:
+          command: release-pr
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
+
+  # Tags + creates the GitHub release once the release PR above has been
+  # merged into main. `release_always = false` in release-plz.toml means
+  # this only acts when the merged branch was `release-plz-*`, so it's a
+  # no-op on ordinary feature-branch merges. Creating the `vX.Y.Z` tag
+  # here is what triggers the existing cargo-dist pipeline in
+  # `.github/workflows/release.yml` — which, per the note above, requires
+  # the tag to be pushed with the PAT rather than the default token.
+  release:
+    name: Release-plz release
+    runs-on: ubuntu-latest
+    if: github.repository_owner == 'savvagent'
+    permissions:
+      contents: write
+      pull-requests: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.RELEASE_PLZ_TOKEN }}
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Run release-plz release
+        uses: release-plz/action@v0.5
+        with:
+          command: release
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
