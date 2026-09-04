@@ -620,6 +620,15 @@ published to crates.io. Use Conventional Commit prefixes (`feat:`,
 `fix:`, `docs:`, `chore:`, etc.) in commit subjects so the automation
 picks the correct version bump.
 
+The workflow authenticates with a `RELEASE_PLZ_TOKEN` repo secret (a
+PAT or GitHub App token) rather than the default `GITHUB_TOKEN`.
+GitHub does not cascade further workflow runs from events triggered by
+the default token, so using it would silently prevent both `ci.yml`
+from running on the release PR and `release.yml` from firing when the
+`vX.Y.Z` tag is pushed — defeating the point of the automation. The
+token needs `contents: read/write` and `pull requests: read/write` on
+this repository.
+
 ## Architecture in five sentences
 
 `Host` (in `savvagent-host`) owns a `ToolRegistry` and a
