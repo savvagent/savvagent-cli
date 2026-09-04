@@ -219,7 +219,7 @@ mod tests {
             ))),
         );
         // Non-provider plugins from PR 1..PR 5 + themes (PR 6) + plugins-manager (PR 8)
-        // + migration-picker (Task 9).
+        // + migration-picker (Task 9) + tool-web-summary (web tools).
         let plugin_ids: Vec<_> = set
             .plugins
             .iter()
@@ -251,6 +251,7 @@ mod tests {
             "internal:tool-fs-summary",
             "internal:tool-grep-summary",
             "internal:tool-task-summary",
+            "internal:tool-web-summary",
             "internal:user-agents",
             "internal:user-slash-commands",
             "internal:view-file",
@@ -261,7 +262,7 @@ mod tests {
                 "missing non-provider plugin id: {expected}"
             );
         }
-        assert_eq!(set.plugins.len(), 29);
+        assert_eq!(set.plugins.len(), 30);
 
         // `internal:user-hooks` lives in `hook_entries`, not the `plugins`
         // Vec. The dual-Arc HookEntry pattern means it still appears in
@@ -310,15 +311,16 @@ mod tests {
         // html-canvas adds 1 more, bringing non-provider count to 27;
         // sub-project C (user-agents) adds 1 more, bringing non-provider count to 28;
         // tool-task-summary adds 1 more, bringing non-provider count to 29;
+        // tool-web-summary adds 1 more, bringing non-provider count to 30;
         // sub-project B (user-hooks) moves to `hook_entries` (not counted
         // in the plugins Vec) but still surfaces in the registry's plugins
         // map via the dual-Arc HookEntry, contributing 1 more registry
-        // entry; total registry size is 29 + 4 + 1 = 34.
+        // entry; total registry size is 30 + 4 + 1 = 35.
         let reg = PluginRegistry::new(set);
         assert_eq!(
             reg.len(),
-            34,
-            "registry should have 29 non-provider + 4 provider + 1 hook plugin"
+            35,
+            "registry should have 30 non-provider + 4 provider + 1 hook plugin"
         );
         assert_eq!(
             reg.provider_count(),

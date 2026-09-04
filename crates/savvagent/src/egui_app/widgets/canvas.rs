@@ -93,7 +93,8 @@ pub(super) fn frame_to_color_image(frame: &Frame) -> Option<egui::ColorImage> {
     }
     let mut rgba = frame.bytes.clone();
     if matches!(frame.format, PixelFormat::Bgra8) {
-        for px in rgba.chunks_exact_mut(4) {
+        let (chunks, _) = rgba.as_chunks_mut::<4>();
+        for px in chunks {
             px.swap(0, 2);
         }
     }
