@@ -94,7 +94,7 @@ fn paint_screen_overlay(state: &mut SavvagentApp, ctx: &egui::Context, palette: 
         ui.set_clip_rect(geom.outer);
         let frame = egui::Frame::popup(ui.style())
             .fill(palette_bg(palette))
-            .stroke(egui::Stroke::new(1.0, palette_border(palette)));
+            .stroke(egui::Stroke::new(1.0_f32, palette_border(palette)));
         frame.show(ui, |ui| {
             ui.set_width(geom.outer.width());
             ui.set_height(geom.outer.height());

@@ -91,7 +91,7 @@ pub fn styled_span_to_format(
         ..Default::default()
     };
     if underline {
-        fmt.underline = egui::Stroke::new(1.0, color);
+        fmt.underline = egui::Stroke::new(1.0_f32, color);
     }
     (span.text.clone(), fmt)
 }

@@ -92,7 +92,7 @@ mod tests {
         assert!(
             matches!(&effs[0], Effect::SaveTranscript { path } if path == "/tmp/x.json"),
             "expected SaveTranscript {{ path: /tmp/x.json }}, got {:?}",
-            &effs[0]
+            effs[0]
         );
     }
 }

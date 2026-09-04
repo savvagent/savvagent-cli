@@ -358,6 +358,7 @@ tool-bash-not-found  = "नोट: savvagent-tool-bash नहीं मिला
 tool-fs-not-found    = "नोट: savvagent-tool-fs नहीं मिला — fs टूल निष्क्रिय। `cargo build` चलाएं या SAVVAGENT_TOOL_FS_BIN सेट करें।"
 tool-grep-not-found  = "नोट: savvagent-tool-grep नहीं मिला — खोज निष्क्रिय। `cargo build` चलाएं या SAVVAGENT_TOOL_GREP_BIN सेट करें।"
 tool-lsp-not-found   = "नोट: savvagent-tool-lsp नहीं मिला — LSP टूल निष्क्रिय। `cargo build` चलाएं या SAVVAGENT_TOOL_LSP_BIN सेट करें।"
+tool-web-not-found   = "नोट: savvagent-tool-web नहीं मिला — web_fetch/web_search निष्क्रिय। `cargo build` चलाएं या SAVVAGENT_TOOL_WEB_BIN सेट करें।"
 
 # TODO: translate routing.* keys (Phase 5)
 [routing]

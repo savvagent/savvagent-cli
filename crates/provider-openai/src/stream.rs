@@ -599,7 +599,7 @@ mod tests {
                 assert_eq!(name, "ls");
                 assert_eq!(input["path"], "/tmp");
             }
-            _ => panic!("expected tool_use, got {:?}", &out.content[0]),
+            _ => panic!("expected tool_use, got {:?}", out.content[0]),
         }
     }
 

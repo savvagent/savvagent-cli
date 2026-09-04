@@ -167,7 +167,8 @@ fn frame_to_dynamic_image(frame: &savvagent_plugin::Frame) -> Option<image::Dyna
     }
     let mut bytes = frame.bytes.clone();
     if matches!(frame.format, PixelFormat::Bgra8) {
-        for px in bytes.chunks_exact_mut(4) {
+        let (chunks, _) = bytes.as_chunks_mut::<4>();
+        for px in chunks {
             px.swap(0, 2);
         }
     }
