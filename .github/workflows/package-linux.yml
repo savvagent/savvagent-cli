@@ -19,23 +19,33 @@ on:
   workflow_run:
     workflows: ["Release"]
     types: [completed]
+  # Lets a maintainer manually (re)build and upload the .deb/.rpm for an
+  # existing release, e.g. after fixing a bug in this workflow without
+  # re-running the whole (slow, multi-platform) Release workflow.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag to build and upload packages for (e.g. v0.19.0)"
+        required: true
+        type: string
 
 permissions:
   contents: write
 
 jobs:
   package-linux:
-    if: github.event.workflow_run.conclusion == 'success'
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-22.04
     env:
-      # The tag that triggered the upstream Release workflow. For a tag
-      # push, `head_branch` on the `workflow_run` event is the tag name
-      # itself (GitHub doesn't set `head_ref` for tag builds).
-      TAG: ${{ github.event.workflow_run.head_branch }}
+      # For a workflow_run event, the tag that triggered the upstream
+      # Release workflow: `head_branch` on that event is the tag name
+      # itself for a tag push (GitHub doesn't set `head_ref` for tag
+      # builds). For a manual workflow_dispatch, use the provided input.
+      TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.event.workflow_run.head_branch }}
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.workflow_run.head_sha }}
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.event.workflow_run.head_sha }}
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
