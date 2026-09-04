@@ -8,11 +8,11 @@
 use async_trait::async_trait;
 use std::time::Duration;
 
-/// URL of the canonical CHANGELOG.md. Streams from `master` so the
+/// URL of the canonical CHANGELOG.md. Streams from `main` so the
 /// viewer always reflects the most recent release — including entries
 /// for versions the user hasn't installed yet.
 pub const CHANGELOG_URL: &str =
-    "https://raw.githubusercontent.com/robhicks/savvagent-rs/master/CHANGELOG.md";
+    "https://raw.githubusercontent.com/savvagent/savvagent-cli/main/CHANGELOG.md";
 
 /// User-Agent value sent with the request. Includes the running binary
 /// version so request logs identify the caller cohort, mirroring the
@@ -58,17 +58,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn url_targets_raw_master_branch() {
+    fn url_targets_raw_main_branch() {
         // Regression guard: pinning to a tag would freeze the viewer at
         // the build's commit and stop users from seeing entries for
         // versions they haven't installed yet.
         assert!(
-            CHANGELOG_URL.starts_with("https://raw.githubusercontent.com/robhicks/savvagent-rs/"),
+            CHANGELOG_URL.starts_with("https://raw.githubusercontent.com/savvagent/savvagent-cli/"),
             "URL must hit raw.githubusercontent.com: {CHANGELOG_URL}"
         );
         assert!(
-            CHANGELOG_URL.ends_with("/master/CHANGELOG.md"),
-            "URL must reference master/CHANGELOG.md: {CHANGELOG_URL}"
+            CHANGELOG_URL.ends_with("/main/CHANGELOG.md"),
+            "URL must reference main/CHANGELOG.md: {CHANGELOG_URL}"
         );
     }
 

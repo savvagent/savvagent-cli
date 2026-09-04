@@ -28,7 +28,7 @@ default-members = ["crates/savvagent"]
 version = "0.18.0"
 edition = "2024"
 license = "AGPL-3.0-or-later"
-repository = "https://github.com/robhicks/savvagent-rs"
+repository = "https://github.com/savvagent/savvagent-cli"
 rust-version = "1.89"
 
 [workspace.dependencies]

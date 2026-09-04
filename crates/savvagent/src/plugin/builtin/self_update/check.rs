@@ -17,7 +17,8 @@ use super::InstallMethod;
 
 /// GitHub repo to query for releases. Hardcoded — the plugin only
 /// targets this project's official release feed.
-const RELEASES_API_URL: &str = "https://api.github.com/repos/robhicks/savvagent-rs/releases/latest";
+const RELEASES_API_URL: &str =
+    "https://api.github.com/repos/savvagent/savvagent-cli/releases/latest";
 
 /// User-Agent value GitHub requires on the releases endpoint. Includes
 /// the running binary version so request logs at GitHub identify the

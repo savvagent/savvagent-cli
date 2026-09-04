@@ -78,7 +78,7 @@ Passthrough is likely disabled. Add `set -g allow-passthrough on` to
 `~/.tmux.conf` and reload. See the Tmux section above.
 
 **Images render glitched or torn outside tmux.**
-File a bug at <https://github.com/robhicks/savvagent-rs/issues> with
+File a bug at <https://github.com/savvagent/savvagent-cli/issues> with
 your terminal name and version.
 
 **Render is blocky or wrong colours in a sixel terminal.**

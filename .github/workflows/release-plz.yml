@@ -1,0 +1,62 @@
+name: Release-plz
+
+permissions:
+  contents: write
+  pull-requests: write
+
+on:
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: release-plz-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # Opens/updates the "chore: release vX.Y.Z" PR that bumps
+  # `workspace.package.version` and prepends a changelog entry generated
+  # from Conventional Commits since the last release tag. Merging that PR
+  # (which still requires a human approval or admin bypass, per branch
+  # protection) is what actually creates the `vX.Y.Z` tag in the job below.
+  release-pr:
+    name: Release-plz PR
+    runs-on: ubuntu-latest
+    if: github.repository_owner == 'savvagent'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Run release-plz release-pr
+        uses: release-plz/action@v0.5
+        with:
+          command: release-pr
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # Tags + creates the GitHub release once the release PR above has been
+  # merged into main. `release_always = false` in release-plz.toml means
+  # this only acts when the merged branch was `release-plz-*`, so it's a
+  # no-op on ordinary feature-branch merges. Creating the `vX.Y.Z` tag
+  # here is what triggers the existing cargo-dist pipeline in
+  # `.github/workflows/release.yml`.
+  release:
+    name: Release-plz release
+    runs-on: ubuntu-latest
+    if: github.repository_owner == 'savvagent'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Run release-plz release
+        uses: release-plz/action@v0.5
+        with:
+          command: release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
