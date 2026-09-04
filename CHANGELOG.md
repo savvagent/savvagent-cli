@@ -6,6 +6,30 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 (pre-1.0: `0.MINOR.PATCH`, where MINOR captures features + breaking
 boundary changes and PATCH captures fixes).
 
+## [Unreleased]
+
+## 0.19.1 - 2026-09-04
+
+### Fixed
+
+- **Linux `.rpm` packaging.** `package-linux.yml` ran `cargo generate-rpm -p
+  savvagent` from the workspace root, but unlike `cargo deb -p`,
+  cargo-generate-rpm's `-p <name>` doesn't resolve the crate through
+  workspace metadata — it joins the name onto the current directory, which
+  fails since this crate lives at `crates/savvagent`. This caused the
+  v0.19.0 release to ship without `.deb`/`.rpm` assets. Now runs from
+  `crates/savvagent` with an explicit `--target-dir` pointing at the
+  workspace's shared `target/`.
+
+### Added
+
+- **Manual re-run support for Linux packaging.** `package-linux.yml` now
+  also accepts a `workflow_dispatch` trigger (with a `tag` input), so the
+  `.deb`/`.rpm` build+upload can be re-run for an existing release without
+  re-running the entire multi-platform `Release` workflow.
+- **`RELEASING.md`** documenting the manual release process to use while
+  release-plz's automation is blocked by an upstream bug.
+
 ## 0.19.0 - 2026-09-04
 
 ### Added
