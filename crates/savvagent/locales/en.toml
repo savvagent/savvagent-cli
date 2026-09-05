@@ -236,6 +236,7 @@ section-prompt    = "Prompt"
 section-cursor    = "Cursor"
 section-editing   = "Editing"
 section-history   = "Undo / Redo"
+section-mouse     = "Mouse"
 section-plugins   = "Plugin bindings"
 
 [picker.prompt-keybindings.row]
@@ -263,6 +264,7 @@ tab                 = "Insert tab"
 undo                = "Undo last edit"
 redo                = "Redo last undone edit"
 recall-prompt       = "Recall previous / next prompt (Up at empty input; then Up/Down to browse)"
+mouse-capture       = "Hold Shift while dragging/clicking to bypass mouse capture and use native terminal text selection + copy"
 
 [picker.editor-keybindings]
 modal-title       = "Editor Keybindings"
@@ -302,6 +304,7 @@ mouse-drag             = "Extend selection"
 mouse-word             = "Select word"
 mouse-line             = "Select line"
 note-ctrl-c-quits      = "Ctrl+C quits savvagent globally — fires before the editor sees it, so copy via Ctrl+C does not work inside the viewer/editor."
+note-shift-drag-copy   = "Hold Shift while dragging/clicking to bypass mouse capture for native terminal text selection + copy (same as the main conversation log)"
 
 [prompt.api-key]
 paste-new              = "Paste your %{env} key"

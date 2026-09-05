@@ -232,6 +232,7 @@ section-prompt    = "प्रॉम्प्ट"
 section-cursor    = "कर्सर"
 section-editing   = "संपादन"
 section-history   = "पूर्ववत करें / पुनः करें"
+section-mouse     = "माउस"
 section-plugins   = "Plugin बाइंडिंग"
 
 [picker.prompt-keybindings.row]
@@ -259,6 +260,7 @@ tab                 = "टैब डालें"
 undo                = "अंतिम संपादन पूर्ववत करें"
 redo                = "पूर्ववत किया गया संपादन पुनः लागू करें"
 recall-prompt       = "Recall previous / next prompt (Up at empty input; then Up/Down to browse)"
+mouse-capture       = "माउस कैप्चर को बायपास करने और टर्मिनल की नेटिव टेक्स्ट चयन + कॉपी का उपयोग करने के लिए ड्रैग/क्लिक करते समय Shift दबाए रखें"
 
 [picker.editor-keybindings]
 modal-title       = "एडिटर कीबाइंडिंग"
@@ -298,6 +300,7 @@ mouse-drag             = "चयन बढ़ाएं"
 mouse-word             = "शब्द चुनें"
 mouse-line             = "पंक्ति चुनें"
 note-ctrl-c-quits      = "Ctrl+C वैश्विक रूप से savvagent से बाहर निकलता है — एडिटर से पहले संसाधित होता है, इसलिए व्यूअर/एडिटर में Ctrl+C से कॉपी काम नहीं करती।"
+note-shift-drag-copy   = "माउस कैप्चर को बायपास करने और टर्मिनल की नेटिव टेक्स्ट चयन + कॉपी का उपयोग करने के लिए ड्रैग/क्लिक करते समय Shift दबाए रखें (मुख्य बातचीत लॉग की तरह ही)"
 
 [prompt.api-key]
 paste-new              = "अपनी %{env} कुंजी पेस्ट करें"

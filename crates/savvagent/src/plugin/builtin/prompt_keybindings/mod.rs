@@ -103,6 +103,7 @@ pub fn build_prompt_keybindings_screen(
         section("picker.prompt-keybindings.section-cursor", cursor_rows()),
         section("picker.prompt-keybindings.section-editing", editing_rows()),
         section("picker.prompt-keybindings.section-history", history_rows()),
+        section("picker.prompt-keybindings.section-mouse", mouse_rows()),
     ];
     if !plugin_rows.is_empty() {
         sections.push(KeybindingSection {
@@ -194,6 +195,18 @@ fn history_rows() -> Vec<KeybindingRow> {
     ]
 }
 
+/// Mouse capture is enabled on a best-effort basis at startup (see
+/// `crates/savvagent/src/tui.rs`'s `EnableMouseCapture` call, which logs a
+/// warning and continues if the terminal doesn't support it). When it's on,
+/// it suppresses the terminal's native click-drag text selection everywhere
+/// in the app; Shift bypasses it for native selection/copy.
+fn mouse_rows() -> Vec<KeybindingRow> {
+    vec![row(
+        "Shift+drag / Shift+click",
+        "picker.prompt-keybindings.row.mouse-capture",
+    )]
+}
+
 fn row(chord: &str, description_key: &str) -> KeybindingRow {
     KeybindingRow {
         chord: chord.to_string(),
@@ -232,7 +245,7 @@ mod tests {
     #[test]
     fn populated_screen_includes_static_sections() {
         let s = build_prompt_keybindings_screen(vec![]);
-        // 4 static sections × (header + blank + N rows) + 3 inter-section blanks.
+        // 5 static sections × (header + blank + N rows) + 4 inter-section blanks.
         assert!(
             s.line_count() > 20,
             "expected populated content; got {} lines",

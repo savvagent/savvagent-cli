@@ -183,10 +183,13 @@ fn mouse_rows() -> Vec<KeybindingRow> {
 /// sees the key, so the editor's copy binding is shadowed; we surface
 /// this so users aren't surprised when Ctrl+C exits the TUI mid-edit.
 fn notes_rows() -> Vec<KeybindingRow> {
-    vec![row(
-        "Ctrl+C",
-        "picker.editor-keybindings.row.note-ctrl-c-quits",
-    )]
+    vec![
+        row("Ctrl+C", "picker.editor-keybindings.row.note-ctrl-c-quits"),
+        row(
+            "Shift+drag / Shift+click",
+            "picker.editor-keybindings.row.note-shift-drag-copy",
+        ),
+    ]
 }
 
 fn row(chord: &str, description_key: &str) -> KeybindingRow {

@@ -8,6 +8,15 @@ boundary changes and PATCH captures fixes).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Shift+drag mouse-capture bypass undiscoverable in-app.** Mouse capture
+  (needed for scroll-wheel handling) suppresses native terminal click-drag
+  text selection; the only workaround — holding Shift while
+  dragging/clicking — was documented solely in the README. The
+  `/prompt-keybindings` and `/editor-keybindings` help screens now each
+  surface this caveat directly.
+
 ## 0.19.2 - 2026-09-04
 
 ### Fixed
