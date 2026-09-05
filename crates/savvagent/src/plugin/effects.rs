@@ -2227,6 +2227,11 @@ mod tests {
         for name in ["view", "edit"] {
             assert_eq!(by_name.get(name), None, "/{name} should be absent");
         }
+        assert!(
+            !by_name.values().any(|&needs_arg| needs_arg),
+            "no plugin-owned palette command should have needs_arg=true \
+             now that /view and /edit are gone: {by_name:?}"
+        );
     }
 
     /// Regression test for the `/connect` picker only showing Ollama.
