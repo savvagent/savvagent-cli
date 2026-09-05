@@ -19,10 +19,9 @@ pub mod home_footer;
 /// Tips widget: one-line hint above the prompt; switches text after Connect.
 pub mod home_tips;
 
-/// Scrollable, sectioned keybindings help screen reused by the
-/// `prompt-keybindings` and `editor-keybindings` plugins. Owns the
-/// rendering / scrolling logic so the per-plugin modules just
-/// supply their section data.
+/// Scrollable, sectioned keybindings help screen used by the
+/// `prompt-keybindings` plugin. Owns the rendering / scrolling logic
+/// so the per-plugin modules just supply their section data.
 pub mod keybindings_view;
 
 /// `/prompt-keybindings` slash + viewer modal listing the keybindings

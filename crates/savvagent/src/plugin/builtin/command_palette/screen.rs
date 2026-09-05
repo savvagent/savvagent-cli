@@ -277,10 +277,10 @@ mod tests {
         // Alphabetically sorted — matches apply_effects::open_screen ordering.
         PaletteScreen::with_commands(vec![
             cmd("clear", false),
-            cmd("edit", true),
+            cmd("model", true),
             cmd("quit", false),
             cmd("theme", false),
-            cmd("view", true),
+            cmd("use", true),
         ])
     }
 
@@ -309,14 +309,14 @@ mod tests {
         assert_eq!(p.cursor, 0);
     }
 
-    /// Selecting a `needs_arg` command (e.g. `/view`) must seed the
-    /// textarea with `"/view "` rather than firing the slash with empty
-    /// args (which would error out with "usage: /view <path>"). Regression
+    /// Selecting a `needs_arg` command (e.g. `/model`) must seed the
+    /// textarea with `"/model "` rather than firing the slash with empty
+    /// args (which would error out with "usage: /model <id>"). Regression
     /// test for hotfix bug #1.
     #[tokio::test]
     async fn enter_on_needs_arg_command_emits_prefill_not_runslash() {
         let mut p = fixture();
-        for ch in "view".chars() {
+        for ch in "model".chars() {
             p.on_key(key(KeyCodePortable::Char(ch))).await.unwrap();
         }
         let effs = p.on_key(key(KeyCodePortable::Enter)).await.unwrap();
@@ -324,7 +324,7 @@ mod tests {
             Some(Effect::Stack(children)) => {
                 assert!(matches!(children[0], Effect::CloseScreen));
                 match &children[1] {
-                    Effect::PrefillInput { text } => assert_eq!(text, "/view "),
+                    Effect::PrefillInput { text } => assert_eq!(text, "/model "),
                     other => panic!("expected PrefillInput, got {other:?}"),
                 }
             }
