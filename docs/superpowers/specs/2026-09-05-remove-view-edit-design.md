@@ -48,9 +48,13 @@ to all three commands and their exclusively-supporting code.
   `ScreenArgs::EditFile` (`crates/savvagent-plugin/src/effect.rs`,
   `crates/savvagent-plugin/src/types.rs`), and their corresponding match
   arms in `crates/savvagent-plugin-wasm/src/adapter/interactive.rs`.
-- Remove the `themes/editor_theme.rs` (ratatui) and
-  `egui_app/widgets/editor_theme.rs` (egui) theme-builder files (each is
-  used exclusively by the code editor being removed) and the
+- Remove `themes/editor_theme.rs`'s (ratatui) `build_editor_theme`/
+  `color_to_hex`/`indexed_to_hex` functions and their tests, and remove
+  `egui_app/widgets/editor_theme.rs` (egui) in full — both are used
+  exclusively by the code editor being removed. **Exception:** `themes/
+  editor_theme.rs`'s `xterm_256_rgb` helper is NOT editor-exclusive — see
+  Premise corrections below — and must be relocated, not deleted, before
+  the rest of the file is removed. Also remove the
   `editor_theme_for_active`/`borrow_editor_theme`/`language_for_path`
   helpers in `app.rs` (used exclusively by `load_file_into_editor`/`open_file`).
 - Remove the now-orphaned `Command` entries for `/view` and `/edit` in
@@ -151,6 +155,21 @@ entries from that dead list (per the issue and the "no dead code" AC) but
 does **not** attempt a broader cleanup of the rest of that legacy apparatus
 — that is out of scope for this issue and would be its own follow-up.
 
+Finally, `crates/savvagent/src/plugin/builtin/themes/editor_theme.rs` is
+**not** exclusively editor-support code, despite its name and module
+placement. Its `xterm_256_rgb` function (an xterm-256-to-RGB lookup table)
+is imported directly by `crates/savvagent/src/egui_app/convert.rs` —
+production code that maps every `ratatui::style::Color` the egui frontend
+renders (conversation log, screens, everything) to an `egui::Color32`, not
+just code-editor syntax colors. The file's own doc comment even calls this
+out: "Single source of truth shared with the egui sink." Deleting the whole
+file, as an unqualified reading of "editor theme" would suggest, would break
+`egui_app/convert.rs`'s color resolution entirely. This spec corrects the
+scope: only `build_editor_theme`, `color_to_hex`, `indexed_to_hex`, and
+their editor-specific tests are removed; `xterm_256_rgb` must be relocated
+into `egui_app/convert.rs` (its sole remaining caller) as a private helper
+before the rest of the file is deleted.
+
 ## Architecture
 
 No architectural surface is added; this is a subtractive change across the
@@ -180,7 +199,6 @@ touches those surfaces.
 - `crates/savvagent/src/plugin/builtin/edit_file/mod.rs`
 - `crates/savvagent/src/plugin/builtin/edit_file/screen.rs`
 - `crates/savvagent/src/plugin/builtin/editor_keybindings/mod.rs`
-- `crates/savvagent/src/plugin/builtin/themes/editor_theme.rs`
 - `crates/savvagent/src/egui_app/widgets/editor.rs`
 - `crates/savvagent/src/egui_app/widgets/editor_theme.rs`
 
@@ -211,13 +229,24 @@ touches those surfaces.
   `EditorKeybindingsPlugin`/`ViewFilePlugin` registration calls (~110-111,
   136); the "PR 4 adds: view-file, edit-file" comment (~72-73); the
   `register_builtins_pr8_complete` test's expected-id list (remove
-  `internal:edit-file`, `internal:editor-keybindings`, `internal:view-file`)
-  and expected count (30 → 27).
+  `internal:edit-file`, `internal:editor-keybindings`, `internal:view-file`),
+  expected count (30 → 27), and the separate registry-size assertion
+  (`reg.len()`, 35 → 32 — a distinct assertion from the plugin-id count,
+  easy to miss).
 - `crates/savvagent/src/plugin/builtin/mod.rs` — the `pub mod edit_file;`,
   `pub mod editor_keybindings;`, `pub mod view_file;` declarations and their
   doc-comment mentions.
 - `crates/savvagent/src/plugin/builtin/themes/mod.rs` — the
   `pub mod editor_theme;` declaration.
+- `crates/savvagent/src/plugin/builtin/themes/editor_theme.rs` — remove
+  `build_editor_theme`, `color_to_hex`, `indexed_to_hex`, and their tests.
+  **Relocate `xterm_256_rgb` to `crates/savvagent/src/egui_app/convert.rs`**
+  (as a private helper, its sole remaining caller) before deleting the rest
+  of the file — see Premise corrections.
+- `crates/savvagent/src/egui_app/convert.rs` — gains the relocated
+  `xterm_256_rgb` helper; update its `use
+  crate::plugin::builtin::themes::editor_theme::xterm_256_rgb;` import to
+  reference the function's new local definition instead.
 - `crates/savvagent/src/egui_app/mod.rs` — the `editor_buffer` field
   (~126-131) and its initializer; `save_editor_buffer` (~347-364); the
   marker-screen sync/`Ctrl-S`-interception block (~531-590).
