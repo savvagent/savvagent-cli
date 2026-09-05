@@ -101,8 +101,10 @@ task tool:
     - Does a task changing a public interface (SPP wire format, tool schema, plugin ABI, slash
       command, env var, on-disk format) call out whether it's additive or breaking, per
       Non-Negotiable Rule 6?
-    - Does the final task bump workspace.package.version + workspace.dependencies versions in
-      Cargo.toml and add the CHANGELOG.md entry, per this skill's release requirement?
+    - Does the final task **note** (not perform) that a dedicated release PR will bump
+      `workspace.package.version` + `workspace.dependencies` versions in `Cargo.toml` and add the
+      `CHANGELOG.md` entry after this PR merges, per `RELEASING.md` / Phase 4 step 12 — this plan's
+      own final task should not duplicate that work unless this plan *is* the release PR?
 
     Only flag issues that would cause an implementer to build the wrong thing or get stuck.
 
