@@ -756,7 +756,8 @@ cd .claude/worktrees/release-vX.Y.Z
 7. **Verify the release:** `gh release view vX.Y.Z` — confirm all expected platform
    archives/installers plus `.deb`/`.rpm` are attached.
 
-**Capture `T_pipeline_start`** at the tag push, and hold the release version for the Phase 6 summary.
+**Capture `T_release_start = now`** at the tag push (ISO-8601 with offset), and hold the release
+version for the Phase 6 summary.
 
 ### Step 13: Clean up + record-as-shipped
 
@@ -869,7 +870,7 @@ Spec: docs/superpowers/specs/<slug>-design.md
 Plan: docs/superpowers/plans/<slug>.md
 Tasks completed: N / N
 Commits: <count>
-Timeline: <T_impl_start → T_review_start → T_pipeline_start → T_verify_start, or "n/a">
+Timeline: <T_impl_start → T_review_start → T_pipeline_start → T_release_start → T_verify_start, or "n/a">
 
 Out-of-band applied: <list, or "none">
 
