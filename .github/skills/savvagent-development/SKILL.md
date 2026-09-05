@@ -43,8 +43,9 @@ the assumption, continue. Escalate only on true blockers. "Should I continue?" i
 condition.
 
 **Green tests are not the same as work-done.** `cargo test --workspace` does not validate that the
-TUI actually spawns `savvagent-tool-fs` at runtime (a `cargo build` of the whole workspace is a
-prerequisite even for TUI-only work), that a plugin example (`examples/plugin-hello-*`) still loads,
+TUI actually spawns `savvagent-tool-fs` at runtime (a `cargo build` is a
+prerequisite even for TUI-only work, since that binary is a `[[bin]]` target inside
+`crates/savvagent` itself), that a plugin example (`examples/plugin-hello-*`) still loads,
 that the cross-platform release binaries built by `cargo-dist` still work, or that a released crate
 version is installable. Whatever this change touches, verify it explicitly (Phase 5).
 
@@ -191,7 +192,7 @@ has more than a one-sentence AC → STOP. Write the spec. The fast-path is for g
 | Plan format            | Read a recent plan under `docs/superpowers/plans/` first and match it: a `# <slug> Implementation Plan` title, a **Goal** paragraph, **Architecture**, **Tech Stack**, a `**Spec:**` line pointing at the committed design doc, a **File Map** (or "File structure"), then one `## Task N: <name>` per task with `- [ ]` steps in failing-test-first order, exact file paths, exact commands, and a final format-and-commit step. Existing plans vary on extras (some add `**Dependency:**`/`**Depends on:**` lines for cross-plan ordering) — this skill additionally asks for `**Release line:**` and `**Branch:**` lines (see Phase 2 step 5) to make the mandatory release-cut (Non-Negotiable Rule 8) traceable; add them even though not every pre-existing plan carries them. |
 | Record-as-shipped      | On completion, flip the spec's `> **Status:**` to IMPLEMENTED and tick the plan's remaining `- [ ]` boxes, then commit as `docs: record <…> as shipped`. There is no archive directory — do not move the files.                                                                                                          |
 | Conventions of record  | [`CLAUDE.md`](../../../CLAUDE.md) at the repo root is the load-bearing document — read it before any non-trivial change, and treat it as outranking anything here that has drifted. `PRD.md` is the vision/scope of record, `crates/savvagent-protocol/SPEC.md` is the wire-format spec of record, `README.md` documents developer-facing conventions. Docs can still lag the code. Read the code. |
-| Build                  | `cargo build` builds everything (required even for TUI-only work, because the TUI spawns `savvagent-tool-fs` at runtime). `cargo run -p savvagent` runs the TUI.                                                                                                                                                          |
+| Build                  | `cargo build` (bare) only builds `crates/savvagent` (the workspace's `default-members`), but that crate's own `[[bin]]` targets include `savvagent-tool-fs`, so a bare `cargo build` is still required for TUI-only work (the TUI spawns that binary at runtime). To build the whole workspace, matching CI, use `cargo build --workspace --all-targets`. `cargo run -p savvagent` runs the TUI.                                                                                                                                                          |
 | Test command           | `cargo test --workspace` (from the root). Per crate: `cargo test -p savvagent-host`, `cargo test -p savvagent-host -- name::of::test` for a single test. Headless smoke test: `cargo run -p savvagent-host --example headless -- "list my Cargo.toml"` (needs a provider — see README "Running providers as standalone MCP servers"). No database, no external services — tests are self-contained.                                                                                                             |
 | Lint / format          | `cargo fmt --all --check` and `cargo clippy --workspace --all-targets` (CI runs with `RUSTFLAGS=-D warnings`). `bacon` (default job `check`), `bacon clippy-all` (clippy across the workspace), `bacon test` for continuous local checking.                                                                              |
 | Linux system deps      | `libdbus-1-dev` (keyring's secret-service backend) and `libfontconfig1-dev` + `pkg-config` (Blitz, pulled in by `savvagent-canvas` and `savvagent` via the `internal:html-canvas` built-in plugin) — neither is preinstalled on the GitHub `ubuntu-latest` runner image; install both before `cargo build`/`test`/`clippy` on a fresh Linux box.                                                                                                                                                                     |
@@ -735,7 +736,7 @@ cd .claude/worktrees/release-vX.Y.Z
    features/breaking changes, PATCH = fixes).
 3. **Validate locally:**
    ```bash
-   cargo fmt --all -- --check
+   cargo fmt --all --check
    cargo clippy --workspace --all-targets
    cargo test --workspace
    ```
