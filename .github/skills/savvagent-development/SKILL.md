@@ -188,7 +188,7 @@ has more than a one-sentence AC → STOP. Write the spec. The fast-path is for g
 | AI attribution         | **Never.** No `Co-Authored-By`, no "Generated with", no `🤖`/AI credit markers in commits, PR bodies, comments, or docs — direct work or subagent work (Non-Negotiable Rule 3).                                                                                                                                            |
 | Spec storage           | **Repo file, committed.** `docs/superpowers/specs/YYYY-MM-DD-<slug>-design.md` — never a tracker comment, never uncommitted.                                                                                                                                                                                              |
 | Plan storage           | **Repo file, committed.** `docs/superpowers/plans/YYYY-MM-DD-<slug>.md` — same rule.                                                                                                                                                                                                                                       |
-| Plan format            | Read a recent plan under `docs/superpowers/plans/` first and match it: a `# <slug> Implementation Plan` title, a **Goal** paragraph, **Architecture**, **Tech Stack**, a `**Spec:**` line pointing at the committed design doc, a `**Release line:**` line naming the next version, a `**Branch:**` line, a **File Map**, then one `## Task N: <name>` per task with `- [ ]` steps in failing-test-first order, exact file paths, exact commands, and a final format-and-commit step.                              |
+| Plan format            | Read a recent plan under `docs/superpowers/plans/` first and match it: a `# <slug> Implementation Plan` title, a **Goal** paragraph, **Architecture**, **Tech Stack**, a `**Spec:**` line pointing at the committed design doc, a **File Map** (or "File structure"), then one `## Task N: <name>` per task with `- [ ]` steps in failing-test-first order, exact file paths, exact commands, and a final format-and-commit step. Existing plans vary on extras (some add `**Dependency:**`/`**Depends on:**` lines for cross-plan ordering) — this skill additionally asks for `**Release line:**` and `**Branch:**` lines (see Phase 2 step 5) to make the mandatory release-cut (Non-Negotiable Rule 8) traceable; add them even though not every pre-existing plan carries them. |
 | Record-as-shipped      | On completion, flip the spec's `> **Status:**` to IMPLEMENTED and tick the plan's remaining `- [ ]` boxes, then commit as `docs: record <…> as shipped`. There is no archive directory — do not move the files.                                                                                                          |
 | Conventions of record  | [`CLAUDE.md`](../../../CLAUDE.md) at the repo root is the load-bearing document — read it before any non-trivial change, and treat it as outranking anything here that has drifted. `PRD.md` is the vision/scope of record, `crates/savvagent-protocol/SPEC.md` is the wire-format spec of record, `README.md` documents developer-facing conventions. Docs can still lag the code. Read the code. |
 | Build                  | `cargo build` builds everything (required even for TUI-only work, because the TUI spawns `savvagent-tool-fs` at runtime). `cargo run -p savvagent` runs the TUI.                                                                                                                                                          |
@@ -275,13 +275,16 @@ record. `T_*` timestamps are still captured at phase boundaries to feed it.
 ## Phase 0 — Pre-flight (fresh context)
 
 Intake reads ("what does this work want?") get corrupted by prior conversation cruft — stale paths,
-abandoned plans, half-finished refactors. This CLI has no `/clear`-and-reinvoke primitive within a
-session, so the only fresh-context mechanism is dispatching isolated subagents via the `task` tool
-(see "How dispatch works in this environment" below) — every reviewer, critique, and implementer
-step in this skill runs as its own `task` dispatch specifically so it gets a clean context window
-built from a self-contained prompt, not from whatever has accumulated in the orchestrating session.
-The orchestrating session itself stays fresh by never doing the reviewing/implementing work inline —
-it reads sources, writes the spec/plan, dispatches, and aggregates results.
+abandoned plans, half-finished refactors. **Note:** `README.md`'s `/clear` documents a slash command
+in the *savvagent product being developed* (resets its own TUI conversation) — it is not a tool
+available to the orchestrating agent running this skill. This orchestrating CLI has no
+`/clear`-and-reinvoke primitive of its own within a session, so the only fresh-context mechanism
+available to it is dispatching isolated subagents via the `task` tool (see "How dispatch works in
+this environment" below) — every reviewer, critique, and implementer step in this skill runs as its
+own `task` dispatch specifically so it gets a clean context window built from a self-contained
+prompt, not from whatever has accumulated in the orchestrating session. The orchestrating session
+itself stays fresh by never doing the reviewing/implementing work inline — it reads sources, writes
+the spec/plan, dispatches, and aggregates results.
 
 **Not clean context for a dispatched subagent:** a prompt that says "read the plan file" or "see
 above" instead of pasting the actual text inline. Every dispatch prompt must be self-contained —
@@ -326,7 +329,7 @@ being committed, etc.
 This skill is written for the GitHub Copilot CLI's `task` tool, not Claude Code's `Agent` tool —
 there is no `subagent_type` catalog with `rust-pro` / `architect-reviewer` / `security-auditor` /
 `code-reviewer` names. Every dispatch in this skill maps to a `task` tool call with one of this
-CLI's six `agent_type`s (`explore`, `task`, `general-purpose`, `rubber-duck`, `code-review`,
+CLI's seven `agent_type`s (`explore`, `task`, `general-purpose`, `rubber-duck`, `code-review`,
 `security-review`, `research`). Use this table everywhere `agent-prompts.md` says
 "`subagent_type: X`" in the original template shape:
 
@@ -354,15 +357,16 @@ raise `reasoning_effort` to `"high"`/`"xhigh"`) so the dispatch inherits strong 
 inline; a dispatched agent has no access to this session's context or files it hasn't been told
 about explicitly (it does have full repo filesystem/tool access, but not this conversation's memory).
 
-**The security-review dispatch has a mandatory output contract** (from this CLI's own tool
-definitions): after it completes, findings must be presented as a table using the severity emoji
-(🔴 CRITICAL / 🟠 HIGH / 🟡 MEDIUM / ⚪ LOW), and the generic contract then calls for `ask_user` to
-offer follow-up actions. **This skill overrides the follow-up-question step for autonomy:** present
-the table as specified, but instead of blocking on `ask_user`, auto-resolve per the Phase 4 step 8
-fix-loop rule below (Critical/High → fix now and re-review; Medium/Low → log in the per-task ledger
-and continue) so a fully autonomous run never stalls waiting on a human. If you are running this
-skill in guided/interactive mode with a human present, the `ask_user` step may be used as written
-instead.
+**The security-review dispatch has a mandatory output contract** (defined in the orchestrating
+Copilot CLI's own system instructions for its `security-review` agent type — not something visible
+by reading this repo, so don't expect to find it in a repo file): after it completes, findings must
+be presented as a table using the severity emoji (🔴 CRITICAL / 🟠 HIGH / 🟡 MEDIUM / ⚪ LOW), and the
+generic contract then calls for `ask_user` to offer follow-up actions. **This skill overrides the
+follow-up-question step for autonomy:** present the table as specified, but instead of blocking on
+`ask_user`, auto-resolve per the Phase 4 step 8 fix-loop rule below (Critical/High → fix now and
+re-review; Medium/Low → log in the per-task ledger and continue) so a fully autonomous run never
+stalls waiting on a human. If you are running this skill in guided/interactive mode with a human
+present, the `ask_user` step may be used as written instead.
 
 **There is no in-session equivalent of "a subagent cannot recursively dispatch further subagents."**
 Every `task` dispatch in this CLI is issued by the top-level orchestrating session, never by another
@@ -453,10 +457,12 @@ Write the plan in this repository's established format — read a recent plan un
 - **Spec:** line pointing at the committed design spec — "read it first. This plan implements it
   exactly."
 - **Release line:** the next `vX.Y.Z` this work ships as (per the SemVer convention in
-  `CHANGELOG.md`)
-- **Branch:** the branch name this plan lands on
-- **File Map** — grouped by **New crate/files** and **Modified files**, each with a one-line
-  responsibility
+  `CHANGELOG.md`). Not every pre-existing plan has this line — this skill adds it so the mandatory
+  release-cut (Non-Negotiable Rule 8) is traceable back to the plan that necessitated it.
+- **Branch:** the branch name this plan lands on. Same rationale — add it even if the plan you used
+  as a template didn't have one.
+- **File Map** (or "File structure") — grouped by **New crate/files** and **Modified files**, each
+  with a one-line responsibility
 - One `## Task N: <name>` per task, listing **Files:** (Create/Modify), then `- [ ]` steps in
   **failing-test-first order**: write failing test → run → implement → run → commit. Include exact
   file paths, exact commands (`cargo test -p savvagent-host`, `cargo test -p savvagent-host -- <test
