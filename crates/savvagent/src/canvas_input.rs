@@ -64,9 +64,9 @@ pub(crate) fn cycle_index(current: Option<u32>, len: usize, delta: i32) -> Optio
 /// Apply the effects a canvas renderer emitted in response to an input
 /// event:
 ///
-/// * `OpenUrl { SystemBrowser }` shells out to the OS opener (`xdg-open` /
-///   `open` / `start`); failures are warn-only so a missing opener never
-///   crashes the TUI.
+/// * `OpenUrl { SystemBrowser }` shells out to [`App::url_opener`] (the OS
+///   opener — `xdg-open` / `open` / `start`); failures are warn-only so a
+///   missing opener never crashes the TUI.
 /// * `OpenUrl { ContinueConversation }` stages the URL into the prompt
 ///   editor and notes it, leaving the user to review and submit.
 ///
@@ -81,14 +81,10 @@ pub(crate) async fn apply_canvas_effects(
         match effect {
             savvagent_plugin::Effect::OpenUrl { url, target } => match target {
                 savvagent_plugin::UrlTarget::SystemBrowser => {
-                    let opener = if cfg!(target_os = "macos") {
-                        "open"
-                    } else if cfg!(target_os = "windows") {
-                        "start"
-                    } else {
-                        "xdg-open"
-                    };
-                    match tokio::process::Command::new(opener).arg(&url).spawn() {
+                    match tokio::process::Command::new(&app.url_opener)
+                        .arg(&url)
+                        .spawn()
+                    {
                         Ok(_) => {
                             app.push_note(format!("Opening {url} in browser"));
                         }
@@ -449,32 +445,61 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn open_url_system_browser_pushes_note_or_warn_on_failure() {
-        // The opener (xdg-open / open / start) may or may not be on PATH
-        // in CI; the function pushes a Note in either branch (success or
-        // failure). The test only asserts that *some* Note mentioning
-        // the URL exists — it doesn't predict which branch ran.
+    /// Drive the `SystemBrowser` arm with `opener` and return the notes it
+    /// pushed.
+    ///
+    /// Every caller MUST pass an opener that is not a real browser launcher:
+    /// `apply_canvas_effects` spawns it for real, so a default-constructed
+    /// `App` here would open a window on the developer's desktop on every
+    /// `cargo test` — and on every file save under `bacon test`.
+    async fn notes_from_system_browser_open(opener: &str, url: &str) -> Vec<String> {
         let mut app = build_app();
+        app.url_opener = opener.to_string();
         let hs = empty_host_slot();
-        let url = "https://z.example".to_string();
         apply_canvas_effects(
             &mut app,
             &hs,
             vec![Effect::OpenUrl {
-                url: url.clone(),
+                url: url.to_string(),
                 target: UrlTarget::SystemBrowser,
             }],
         )
         .await;
-        let has_note = app.entries.iter().any(|e| match e {
-            Entry::Note(s) => s.contains(&url),
-            _ => false,
-        });
+        app.entries
+            .iter()
+            .filter_map(|e| match e {
+                Entry::Note(s) => Some(s.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A path that cannot exist, so `spawn` is guaranteed to fail and the
+    /// warn-only branch runs without touching the real system.
+    const MISSING_OPENER: &str = "/nonexistent/savvagent-test-url-opener";
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn open_url_system_browser_notes_success() {
+        // `/bin/true` accepts the URL argument and exits 0 — a real spawn
+        // with no side effect, which is what the success branch needs.
+        let url = "https://z.example";
+        let notes = notes_from_system_browser_open("/bin/true", url).await;
+        assert_eq!(
+            notes,
+            vec![format!("Opening {url} in browser")],
+            "success branch should push exactly the 'Opening' note",
+        );
+    }
+
+    #[tokio::test]
+    async fn open_url_system_browser_notes_failure() {
+        let url = "https://z.example";
+        let notes = notes_from_system_browser_open(MISSING_OPENER, url).await;
+        assert_eq!(notes.len(), 1, "expected exactly one Note; got {notes:?}");
         assert!(
-            has_note,
-            "expected a Note mentioning the URL (success or failure branch); got {:?}",
-            app.entries,
+            notes[0].starts_with(&format!("Failed to open {url}: ")),
+            "failure branch should push a 'Failed to open' note; got {notes:?}",
         );
     }
 
