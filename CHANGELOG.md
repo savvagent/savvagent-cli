@@ -8,6 +8,17 @@ boundary changes and PATCH captures fixes).
 
 ## [Unreleased]
 
+## 0.20.1 - 2026-09-05
+
+### Changed
+
+- **Documented the `.claude/skills/` convention.** `CLAUDE.md` now specifies that repo-authored,
+  project-specific Claude Code skills (e.g. `rust-engineer`) are committed under
+  `.claude/skills/<name>/SKILL.md`, while personal/generic Claude Code skills stay outside the repo
+  in the contributor's home directory. Any tracker-related skill must defer to this repo's GitHub
+  Issues convention, never JIRA. (#23, shipped in the v0.20.0 tag but missing from that release's
+  changelog entry.)
+
 ## 0.20.0 - 2026-09-05
 
 ### Changed
