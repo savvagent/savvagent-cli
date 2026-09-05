@@ -7,6 +7,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 boundary changes and PATCH captures fixes).
 
 ## [Unreleased]
+
+## 0.21.0 - 2026-09-05
+
 ### Removed
 
 - `/view`, `/edit`, and `/editor-keybindings`, plus the built-in TUI/GUI file viewer-editor paths that existed solely to support them.
