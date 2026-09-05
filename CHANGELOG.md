@@ -8,6 +8,8 @@ boundary changes and PATCH captures fixes).
 
 ## [Unreleased]
 
+## 0.19.3 - 2026-09-05
+
 ### Fixed
 
 - **Shift+drag mouse-capture bypass undiscoverable in-app.** Mouse capture
