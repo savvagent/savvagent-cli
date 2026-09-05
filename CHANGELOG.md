@@ -8,6 +8,28 @@ boundary changes and PATCH captures fixes).
 
 ## [Unreleased]
 
+## 0.20.0 - 2026-09-05
+
+### Changed
+
+- **The `/` command palette is now an inline overlay above the prompt.**
+  It rendered as a `CenteredModal` — a floating box in the middle of the
+  terminal — and is now a `BottomSheet` anchored directly above the prompt
+  textarea, matching the inline `/`-list UX of Copilot CLI, Claude Code,
+  and OpenCode. The input row stays visible immediately below the list.
+  Because the sheet is fixed-height, the command rows are windowed around
+  the cursor with an "N more above/below" hint, so the 30+ builtin
+  commands stay fully navigable.
+
+### Fixed
+
+- **Plugin screen overlays overflowed their own rect in the egui
+  frontend.** Overlays are laid out on a monospace row grid, but the egui
+  frontend added its default inter-widget spacing to every rendered line
+  and sized the popup's content box to the full outer rect — ignoring the
+  frame's inner margin — so the bottom rows of a tall screen were
+  silently clipped away by the overlay's own clip rect.
+
 ## 0.19.3 - 2026-09-05
 
 ### Fixed
