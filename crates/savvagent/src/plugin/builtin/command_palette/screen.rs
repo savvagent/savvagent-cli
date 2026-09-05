@@ -309,10 +309,10 @@ mod tests {
         assert_eq!(p.cursor, 0);
     }
 
-    /// Selecting a `needs_arg` command (e.g. `/view`) must seed the
-    /// textarea with `"/view "` rather than firing the slash with empty
-    /// args (which would error out with "usage: /view <path>"). Regression
-    /// test for hotfix bug #1.
+    /// Selecting a `needs_arg` command must seed the textarea with
+    /// `"/<name> "` rather than firing the slash with empty args (which
+    /// would error out with "usage: /<name> <arg>"). Regression test for
+    /// hotfix bug #1.
     #[tokio::test]
     async fn enter_on_needs_arg_command_emits_prefill_not_runslash() {
         let mut p = fixture();

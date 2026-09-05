@@ -95,8 +95,9 @@ pub enum Effect {
     ClearLog,
     /// Replace the prompt textarea contents with `text` and position the
     /// cursor at the end. Used by the command palette to seed an in-progress
-    /// slash command (e.g. `"/view "`) so the user can complete it via the
-    /// `@` file picker rather than have it fire immediately with no args.
+    /// slash command that requires an argument, so the user can complete it
+    /// (e.g. via the `@` file picker) rather than have it fire immediately
+    /// with no args.
     PrefillInput {
         /// The literal text to install in the textarea (no trailing newline).
         text: String,

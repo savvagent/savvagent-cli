@@ -658,9 +658,7 @@ async fn open_screen(app: &mut App, id: &str, args: ScreenArgs) -> Result<(), St
     } else if id == crate::plugin::builtin::prompt_keybindings::SCREEN_ID {
         // Build the dynamic plugin-contributed section from the live
         // keybinding index so new plugin-supplied bindings show up
-        // without anyone having to update the static help text. (The
-        // editor-keybindings screen has no plugin extension surface,
-        // so it falls through to the normal `create_screen` path.)
+        // without anyone having to update the static help text.
         let layout = {
             let plugin = handle.lock().await;
             let manifest = plugin.manifest();

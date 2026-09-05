@@ -1,4 +1,5 @@
-//! Transcript picker — Enter opens via `/view <path>` for v0.9.
+//! Transcript picker — lists saved transcripts; full transcript-replay into
+//! the log is deferred to a later milestone (see module doc below).
 
 use async_trait::async_trait;
 use savvagent_plugin::{
@@ -6,9 +7,12 @@ use savvagent_plugin::{
     TextMods, ThemeColor, TranscriptHandle,
 };
 
-/// Fullscreen-modal picker that lists saved transcripts and lets the user
-/// open one via `/view <path>` (v0.9). Full transcript-replay into the log
-/// is deferred to a later milestone.
+/// Fullscreen-modal picker that lists saved transcripts. Enter currently
+/// closes the picker and surfaces a note that full transcript replay isn't
+/// implemented yet — it used to bridge through the now-removed `/view`
+/// slash command (removed alongside `/edit`/`/editor-keybindings`), which
+/// never had a role beyond a placeholder for this milestone anyway. Full
+/// transcript-replay into the log is deferred to a later milestone.
 #[derive(Debug)]
 pub struct ResumePickerScreen {
     items: Vec<TranscriptHandle>,
@@ -64,14 +68,15 @@ impl Screen for ResumePickerScreen {
                 Ok(vec![])
             }
             KeyCodePortable::Enter => {
-                let Some(h) = self.items.get(self.cursor) else {
+                if self.items.get(self.cursor).is_none() {
                     return Ok(vec![Effect::CloseScreen]);
                 };
                 Ok(vec![Effect::Stack(vec![
                     Effect::CloseScreen,
-                    Effect::RunSlash {
-                        name: "view".into(),
-                        args: vec![h.id.clone()],
+                    Effect::PushNote {
+                        line: StyledLine::plain(
+                            rust_i18n::t!("notes.transcript-view-unavailable").to_string(),
+                        ),
                     },
                 ])])
             }
@@ -119,7 +124,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn enter_routes_to_view_with_path() {
+    async fn enter_closes_and_notes_replay_unavailable() {
         let mut s = ResumePickerScreen::new(vec![TranscriptHandle {
             id: "transcript-x.json".into(),
             label: "transcript-x.json".into(),
@@ -127,13 +132,21 @@ mod tests {
         }]);
         let effs = s.on_key(key(KeyCodePortable::Enter)).await.unwrap();
         match &effs[0] {
-            Effect::Stack(children) => match &children[1] {
-                Effect::RunSlash { name, args } => {
-                    assert_eq!(name, "view");
-                    assert_eq!(args[0], "transcript-x.json");
+            Effect::Stack(children) => {
+                assert!(matches!(children[0], Effect::CloseScreen));
+                match &children[1] {
+                    Effect::PushNote { line } => {
+                        let joined: String = line.spans.iter().map(|s| s.text.clone()).collect();
+                        assert!(
+                            joined.contains(
+                                rust_i18n::t!("notes.transcript-view-unavailable").as_ref()
+                            ),
+                            "expected transcript-view-unavailable note, got: {joined}"
+                        );
+                    }
+                    _ => panic!(),
                 }
-                _ => panic!(),
-            },
+            }
             _ => panic!(),
         }
     }

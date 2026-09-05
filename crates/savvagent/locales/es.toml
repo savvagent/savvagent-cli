@@ -96,6 +96,7 @@ use-no-host                   = "No host is connected."
 use-invalid-id                = "'%{id}' is not a valid provider id."
 use-not-connected             = "Provider '%{name}' is not connected. Use /connect %{name} first."
 use-switched                  = "Switched active provider to %{name}. History preserved; new turns route here by default."
+transcript-view-unavailable   = "Ver transcripciones guardadas aún no es compatible."
 
 [bash]
 net-allowed-once              = "bash red: permitido una vez"

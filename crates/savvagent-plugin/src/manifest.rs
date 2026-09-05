@@ -89,8 +89,8 @@ pub struct SlashSpec {
     /// `true` if invoking the slash with no argument is a usage error.
     ///
     /// When `true`, the command palette prefills `"/<name> "` into the
-    /// textarea on selection so the user can complete the command (e.g.
-    /// `/view <path>`) rather than firing it immediately. When `false`,
+    /// textarea on selection so the user can complete the command with its
+    /// required argument rather than firing it immediately. When `false`,
     /// the palette dispatches the slash on selection — used by slashes
     /// whose no-arg behavior is meaningful (`/connect`, `/theme`,
     /// `/save`, `/language`, …).

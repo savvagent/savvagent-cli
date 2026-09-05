@@ -407,7 +407,7 @@ pub struct Command {
     pub name: String,
     /// One-liner shown in the palette.
     pub description: String,
-    /// `true` for commands that take an argument (e.g. `/view <path>`). When
+    /// `true` for commands that take an argument. When
     /// the user picks one of these from the palette we prefill the prompt
     /// instead of executing it; commands without args run on Enter.
     pub needs_arg: bool,
