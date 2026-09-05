@@ -38,9 +38,9 @@ interface, no behavior change; see PR body).
 
 - Modify: `CLAUDE.md`
 
-- [ ] Confirm current state (failing-first sanity check): `grep -n "claude/skills" CLAUDE.md` returns
+- [x] Confirm current state (failing-first sanity check): `grep -n "claude/skills" CLAUDE.md` returns
       nothing today — the gap issue #23 describes.
-- [ ] Add a new `## Claude Code skills` section to `CLAUDE.md` (after "Persistence", the current last
+- [x] Add a new `## Claude Code skills` section to `CLAUDE.md` (after "Persistence", the current last
       section) covering:
       - `.claude/skills/<name>/SKILL.md` is for repo-authored, project-specific skills (e.g.
         `rust-engineer`, `tui-engineer`) — committed, same status as `.github/skills/`.
@@ -54,12 +54,12 @@ interface, no behavior change; see PR body).
         purpose, the `.github/skills/` skill (this repo's own, e.g. `savvagent-development`'s
         ticket-creation conventions) governs for this repo; the Claude Code skill's generic guidance
         yields.
-- [ ] Re-run `grep -n "claude/skills" CLAUDE.md` to confirm the new section is present and readable.
-- [ ] Public-interface check: none — docs only, no SPP/tool/plugin/slash-command/on-disk-format
+- [x] Re-run `grep -n "claude/skills" CLAUDE.md` to confirm the new section is present and readable.
+- [x] Public-interface check: none — docs only, no SPP/tool/plugin/slash-command/on-disk-format
       change.
-- [ ] Host-swap / `RwLock` check: not applicable — no code touched.
-- [ ] `ProgressDispatcher` check: not applicable — no streaming provider path touched.
-- [ ] Format and commit: `git commit -m "docs: document .claude/skills convention"`.
+- [x] Host-swap / `RwLock` check: not applicable — no code touched.
+- [x] `ProgressDispatcher` check: not applicable — no streaming provider path touched.
+- [x] Format and commit: `git commit -m "docs: document .claude/skills convention"`.
 
 ## Task 2 (release, not part of this PR): cut v0.19.4
 
