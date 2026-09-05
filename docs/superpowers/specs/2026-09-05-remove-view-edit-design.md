@@ -1,7 +1,7 @@
 # Remove `/view` and `/edit` slash commands — design
 
 Date: 2026-09-05
-Status: pending review
+Status: approved for planning
 Related: `savvagent/savvagent-cli#22`
 
 ## Problem
@@ -65,15 +65,27 @@ informative rather than cascading):
 
 1. **`savvagent-plugin` (plugin ABI):** remove `ScreenArgs::ViewFile { path }` and
    `ScreenArgs::EditFile { path }` variants and their `screen_id()` arms
-   (`crates/savvagent-plugin/src/types.rs`) and the associated tests. This is the one genuinely
-   **breaking plugin-ABI change** here — see "Public-interface changes" below.
+   (`crates/savvagent-plugin/src/types.rs`), and the `Effect::SaveActiveFile` variant (its `Debug`
+   arm and any tests) in `crates/savvagent-plugin/src/effect.rs` — `SaveActiveFile` exists solely to
+   let the `edit-file` screen request a save-on-Ctrl-S and has no purpose once that screen is gone.
+   Remove the associated tests for all three. This is the breaking plugin-ABI change here — see
+   "Public-interface changes" below.
 2. **`savvagent-plugin-wasm`:** remove the two `ScreenArgs::ViewFile`/`EditFile` match arms in the
-   JSON bridge (`crates/savvagent-plugin-wasm/src/adapter/interactive.rs`) and their test fixtures.
+   host→WASM JSON projection (`crates/savvagent-plugin-wasm/src/adapter/interactive.rs`, used when
+   the host hands a `ScreenArgs` to a WASM-implemented screen at creation time — **not** a
+   guest-to-host request path; see the corrected "Public-interface changes" note below) and their
+   test fixtures.
 3. **Built-in plugins:** delete `crates/savvagent/src/plugin/builtin/view_file/`,
    `.../edit_file/`, and `.../editor_keybindings/` wholesale (each is a self-contained
    `mod.rs`/`screen.rs` pair; `editor_keybindings` is `mod.rs` only). Remove their `pub mod`
-   declarations and plugin-registration entries in
-   `crates/savvagent/src/plugin/builtin/mod.rs`.
+   declarations in `crates/savvagent/src/plugin/builtin/mod.rs`, and — this is the file that
+   actually constructs and registers them, not `builtin/mod.rs` — remove the
+   `Box::new(builtin::edit_file::EditFilePlugin::new())`,
+   `Box::new(builtin::editor_keybindings::EditorKeybindingsPlugin::new())`, and
+   `Box::new(builtin::view_file::ViewFilePlugin::new())` entries from the plugin vec built in
+   `crates/savvagent/src/plugin/mod.rs::register_builtins`, and update that function's tests (at
+   least `register_builtins_pr8_complete` and any other test asserting the exact builtin-plugin
+   count or ID list) to drop the three removed IDs and decrement the expected count.
 4. **`App` (TUI) state, `crates/savvagent/src/app.rs`:**
    - Remove the `/view`/`/edit` `Command` entries in `refresh_commands`.
    - Remove `InputMode::ViewingFile`/`InputMode::EditingFile` variants and their `#[allow(dead_code)]`
@@ -128,6 +140,11 @@ informative rather than cascading):
     two table rows).
 11. **CHANGELOG.md:** add a `### Removed` entry under `[Unreleased]` naming the breaking plugin-ABI
     change explicitly (see below).
+12. **`PRD.md`:** update the "TUI editor widget" open-question entry (`PRD.md`'s risks/open-questions
+    section, currently reads "`ratatui-code-editor` remains for the in-TUI viewer/editor;
+    consolidating onto a single widget is a future cleanup") — it is present-tense product direction
+    that becomes false once this ships. Revise to reflect that the in-TUI viewer/editor was removed
+    (not consolidated) rather than deleting the historical record outright.
 
 ## Scope
 
@@ -136,11 +153,11 @@ informative rather than cascading):
   exists solely to support them, in both the TUI and GUI (egui) frontends.
 - Removing the dead legacy `InputMode::ViewingFile`/`EditingFile` path (already unreachable before
   this change).
-- Removing `ScreenArgs::ViewFile`/`EditFile` from the plugin ABI (`savvagent-plugin`) and their
-  wasm-adapter JSON bridge arms.
+- Removing `ScreenArgs::ViewFile`/`EditFile` and `Effect::SaveActiveFile` from the plugin ABI
+  (`savvagent-plugin`) and their wasm-adapter JSON bridge arms.
 - Removing the `ratatui-code-editor` dependency (and `egui_code_editor` if confirmed orphaned) once
   no code references it.
-- Updating README and locale files to match.
+- Updating README, `PRD.md`, and locale files to match.
 - A `CHANGELOG.md` entry documenting the removal as a breaking (removed-feature) change.
 
 **Out:**
@@ -154,15 +171,23 @@ informative rather than cascading):
 
 ## Public-interface changes
 
-**Breaking.** `ScreenArgs::ViewFile { path: String }` and `ScreenArgs::EditFile { path: String }` are
-part of the plugin ABI (`savvagent-plugin`, consumed by WASM plugins via the JSON bridge in
-`savvagent-plugin-wasm`'s `interactive.rs` adapter as `{"kind": "view-file", "path": ...}` /
-`{"kind": "edit-file", ...}`). Removing these variants is a breaking change under Non-Negotiable Rule
-6: a third-party plugin that constructs `ScreenArgs::ViewFile`/`EditFile` (directly in a native Rust
-plugin, or via the WASM JSON shape) to ask the runtime to open one of these screens will get
-`PluginError::ScreenNotFound` after this change (the screen ids `"view-file"`/`"edit-file"` no
-longer exist) instead of a compile error (native plugins) or a silent no-op (WASM plugins, which
-communicate via JSON and have no compile-time check). This must be:
+**Breaking.** `ScreenArgs::ViewFile { path: String }`, `ScreenArgs::EditFile { path: String }`, and
+`Effect::SaveActiveFile` are part of the plugin ABI (`savvagent-plugin`). The JSON projection in
+`savvagent-plugin-wasm`'s `interactive.rs` adapter serializes a `ScreenArgs` **from host to a
+WASM-implemented screen at screen-creation time** (`{"kind": "view-file", "path": ...}` /
+`{"kind": "edit-file", ...}`) — it is not a guest-to-host request channel; a WASM plugin cannot ask
+the runtime to open a screen by sending this JSON shape (guest-issued `OpenScreen` effects are
+converted with `ScreenArgs::None` regardless, per `convert.rs`). Removing these three ABI items is a
+breaking change under Non-Negotiable Rule 6 with two distinct real-world impacts:
+- A **native Rust plugin** that references `ScreenArgs::ViewFile`/`EditFile`/`Effect::SaveActiveFile`
+  in its own source fails to **compile** against the new `savvagent-plugin` version.
+- An **external WASM plugin** that previously implemented a screen expecting to receive the
+  `"view-file"`/`"edit-file"` JSON `kind` at creation time will simply never receive it again — those
+  runtime screen ids no longer exist, so nothing ever asks the plugin to create a screen for them.
+  This is a silent behavior change (a dead code path in the plugin, not a crash) rather than an error
+  surfaced to the plugin.
+
+This must be:
 - named explicitly in this spec (done, here) and the plan,
 - flagged explicitly to the architecture reviewer in Phase 4 step 8,
 - called out in `CHANGELOG.md` under a `### Removed` heading with a one-line migration note ("no
@@ -221,12 +246,12 @@ picker and `/prompt-keybindings` screen fully intact.
 
 ## Error Handling & Edge Cases
 
-- A third-party WASM plugin still sending `{"kind": "view-file", ...}`/`{"kind": "edit-file", ...}`
-  after this ships: the JSON bridge in `interactive.rs` will fail to deserialize that `kind` into any
-  remaining `ScreenArgs` variant (or, if the bridge has a catch-all, the resulting `OpenScreen` effect
-  will resolve to `PluginError::ScreenNotFound("view-file")` at the runtime's `open_screen`
-  pre-flight) — this is the intended, documented breaking-change behavior, not a bug to guard
-  against with a compatibility shim.
+- A native plugin still referencing the removed `ScreenArgs::ViewFile`/`EditFile`/
+  `Effect::SaveActiveFile` items fails to compile against the new `savvagent-plugin` — the intended,
+  documented breaking-change behavior.
+- An external WASM plugin that implements a screen keyed on the `"view-file"`/`"edit-file"` JSON
+  `kind` simply stops being invoked (the runtime never creates those screens again) — a silent
+  behavior change, not a crash; no compatibility shim is added (see "Public-interface changes").
 - Nothing else reads `"view-file"`/`"edit-file"` as bare strings outside the code being deleted
   (confirmed via repo-wide grep during investigation) — no shim needed elsewhere.
 
