@@ -739,9 +739,12 @@ own PR:
 ```bash
 cd <main-checkout-root>
 git checkout main && git pull --ff-only
-git worktree add .claude/worktrees/release-vX.Y.Z -b release/vX.Y.Z origin/main
-cd .claude/worktrees/release-vX.Y.Z
+git worktree add .claude/worktrees/release-X-Y-Z -b release/X-Y-Z origin/main
+cd .claude/worktrees/release-X-Y-Z
 ```
+
+`X-Y-Z` is the dashed form of the version (dots aren't valid in a `<kebab-slug>` — e.g. `v0.20.0`
+becomes `release/0-20-0`, not `release/v0.20.0`).
 
 1. **Bump the version.** In the root `Cargo.toml`, update `workspace.package.version` and every
    internal `workspace.dependencies` entry's `version` field to match. Run `cargo check --workspace`
@@ -783,7 +786,7 @@ cd <main-checkout-root>
 git checkout main && git pull --ff-only
 git branch -d <branch>                              # -D only if force needed and intentional
 git worktree remove .claude/worktrees/<branch>       # required — worktrees live inside the repo
-git worktree remove .claude/worktrees/release-vX.Y.Z
+# e.g. for the release worktree above: git worktree remove .claude/worktrees/release-X-Y-Z
 ```
 
 **Record-as-shipped (mandatory, do not skip):** in a fresh worktree off the updated `main` — the
