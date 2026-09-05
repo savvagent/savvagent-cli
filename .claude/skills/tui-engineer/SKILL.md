@@ -25,7 +25,7 @@ When invoked:
 ## Layout & responsiveness
 
 - Prefer `Layout::default().constraints([...]).split(area)` over manual arithmetic; recompute on every draw rather than caching split rects.
-- Use `Constraint::Min`/`Constraint::Fill` for the primary content area and `Constraint::Length`(fixed chrome (status bars, input boxes) so small terminals degrade gracefully instead of panicking on subtraction overflow.
+- Use `Constraint::Min`/`Constraint::Fill` for the primary content area and `Constraint::Length(n)` for fixed chrome (status bars, input boxes) so small terminals degrade gracefully instead of panicking on subtraction overflow.
 - Test at minimum-supported terminal size (commonly 80×24) explicitly — off-by-one constraint math is the most common source of TUI panics.
 - For scrollable content (chat transcripts, logs), track a `scroll_offset` in state and clamp it against content length + viewport height on every draw, not just on scroll-key events (content can grow while the user is idle).
 
@@ -38,9 +38,9 @@ When invoked:
 
 ## Async integration (tokio + crossterm)
 
-- Use `crossterm::event::EventStream` (the `futures`-stream adapter) inside a `tokio::select!` alongside channels from background tasks, rather than polling `event::poll` in a blocking loop, so the UI stays responsive while awaiting provider/tool responses.
-- Keep the `tokio::select!` arms small: on each event, update state and set a dirty flag, then fall through to a single `if dirty { terminal.draw(...) }` — don't scatter `terminal.draw()` calls across arms.
-- When a shared handle (host, session, connection) can be swapped at runtime, clone the `Arc` under a brief read lock and drop the guard before any `.await` — never hold a lock across an await point in the event-handling path (this is a documented gotcha in this repo's `Host` swap pattern; see `crates/savvagent/src/app.rs` / `tui.rs`).
+- Prefer `crossterm::event::EventStream` (the `futures`-stream adapter) inside a `tokio::select!` alongside channels from background tasks over a short-timeout `event::poll` + `event::read` loop, so the UI stays responsive while awaiting provider/tool responses without an artificial poll interval. **Note:** this repo's current main loop (`crates/savvagent/src/main.rs`) uses `event::poll(Duration::from_millis(50))` + `event::read()` and an unconditional `terminal.draw()` every iteration, not yet the `EventStream`/dirty-flag pattern below — treat the following as the target discipline for new/refactored code, not a description of what's there today.
+- Where a dirty-flag redraw is in place (or being introduced), keep `tokio::select!` arms small: on each event, update state and set a dirty flag, then fall through to a single `if dirty { terminal.draw(...) }` — don't scatter `terminal.draw()` calls across arms.
+- When a shared handle (host, session, connection) can be swapped at runtime, clone the `Arc` under a brief read lock and drop the guard before any `.await` — never hold a lock across an await point in the event-handling path. This repo's own instance is the `HostSlot` type alias (`Arc<RwLock<Option<Arc<Host>>>>`) and its `current_host()` accessor, both in `crates/savvagent/src/main.rs`; `tui.rs` owns only terminal init/restore, not the host slot.
 - Debounce high-frequency producers (streaming provider tokens, fast log tails) into batched state updates before triggering a redraw — redrawing per-token instead of per-tick causes visible flicker and wastes CPU.
 
 ## Accessibility & keyboard-first design
@@ -67,6 +67,6 @@ When invoked:
 
 ## Project-specific notes (savvagent-cli)
 
-- The `Host` is held as `Arc<RwLock<Option<Arc<Host>>>>`; per-turn workers clone the `Arc<Host>` under a brief read lock and drop the guard before any `.await` (`crates/savvagent/src/app.rs`, `tui.rs`). Follow this pattern for any new code that reads shared host/session state from the input loop.
-- Canvas/plugin screens emit `Effect`s that `apply_canvas_effects` (`crates/savvagent/src/canvas_input.rs`) interprets — prefer adding new interactive behavior as an `Effect` variant handled centrally, rather than reaching into `App` state directly from a screen.
-- Tests that spawn real subprocesses (e.g. system URL openers) must use a guaranteed-safe, cross-platform command (see the `open_url_system_browser_notes_success`/`_failure` tests) — never hardcode a platform-specific absolute path like `/bin/true` (macOS ships it under `/usr/bin`); resolve via `PATH` instead.
+- The active host is held as `HostSlot = Arc<RwLock<Option<Arc<Host>>>>` (`crates/savvagent/src/main.rs`); its `current_host()` accessor clones the inner `Arc<Host>` under a brief read lock and drops the guard before any `.await`. Follow this pattern for any new code that reads shared host/session state from the input loop; `tui.rs` is terminal init/restore only and doesn't hold this state.
+- `Effect`s (`crates/savvagent-plugin/src/effect.rs`) are the central vocabulary for plugin/screen-driven side effects, but two separate dispatchers interpret them: `apply_canvas_effects` (`crates/savvagent/src/canvas_input.rs`) handles only `Effect::OpenUrl` and `Effect::Stack` for canvas-originated effects (everything else is logged and ignored there), while general plugin-screen effects are dispatched through `crates/savvagent/src/plugin/effects.rs`. When adding new interactive behavior, add an `Effect` variant and wire it into the dispatcher that actually owns its surface (canvas vs. plugin screen) rather than reaching into `App` state directly from a screen.
+- Tests that spawn real subprocesses (e.g. system URL openers) must resolve the command via `PATH` rather than hardcoding a platform-specific absolute path like `/bin/true` (macOS ships it under `/usr/bin`) — see the `open_url_system_browser_notes_success`/`_failure` tests in `crates/savvagent/src/canvas_input.rs` for the pattern (the success-path test itself is Unix-oriented; the invariant to preserve is "resolve via `PATH`," not "pick one literal command that works on every OS").
