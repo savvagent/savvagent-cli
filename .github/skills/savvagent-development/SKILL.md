@@ -223,7 +223,7 @@ explains the reasoning behind each — read it, and treat the list here as the c
 3. **The host-swap `RwLock` rule is never violated.** The TUI keeps the active host as
    `Arc<RwLock<Option<Arc<Host>>>>`. Per-turn worker tasks clone the `Arc<Host>` under a brief read
    lock and **drop the guard before any `.await`** — never hold the `RwLock` across an await.
-   `/connect` swaps the slot atomically. See `crates/savvagent/src/app.rs` and `tui.rs`.
+   `/connect` swaps the slot atomically. See `crates/savvagent/src/app.rs` and `crates/savvagent/src/tui.rs`.
 4. **The provider transport split is a hard boundary.** In-process (`InProcessProviderClient`) is the
    default; MCP-over-HTTP (`rmcp`'s Streamable HTTP transport) is opt-in, selected only when
    `SAVVAGENT_PROVIDER_URL` is set. `Host` only ever sees `Box<dyn ProviderClient>` and must never
@@ -491,7 +491,7 @@ Every task MUST include:
   slash command, env var, on-disk format) — additive changes get a one-line CHANGELOG note; breaking
   changes get the full treatment from Non-Negotiable Rule 6
 - **A step verifying the host-swap `RwLock` rule** whenever the task touches `crates/savvagent/src/app.rs`
-  or `tui.rs` — no `.await` may execute while the read guard is held
+  or `crates/savvagent/src/tui.rs` — no `.await` may execute while the read guard is held
 - **A step preserving the `ProgressDispatcher` forwarder-abort pattern** whenever the task adds or
   modifies a streaming provider path
 - The repo's actual test + lint commands for the TDD steps
@@ -816,7 +816,7 @@ Track the run by ID, never "the latest run" — a teammate's merge seconds after
 
 CI does NOT apply these. Verify whatever the change touched, explicitly:
 
-- **TUI runtime wiring** — if `crates/savvagent/src/main.rs`, `app.rs`, or `tui.rs` changed:
+- **TUI runtime wiring** — if `crates/savvagent/src/main.rs`, `crates/savvagent/src/app.rs`, or `crates/savvagent/src/tui.rs` changed:
   `cargo build --workspace` (the TUI spawns `savvagent-tool-fs` at runtime and needs the binary to
   exist), then `cargo run -p savvagent` and exercise the changed surface manually.
 - **A new/changed provider** — if `crates/provider-*` changed: run the headless smoke test —

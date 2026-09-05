@@ -48,7 +48,7 @@ task tool:
     - The everything-is-MCP-shaped architecture: does the change respect the host/tool/provider
       crate boundaries, or does it try to put turn-loop logic in a tool, or provider-selection logic
       in a tool, or an HTTP/registry concept inside Host?
-    - The host-swap RwLock rule: if the change touches crates/savvagent/src/app.rs or tui.rs, does
+    - The host-swap RwLock rule: if the change touches crates/savvagent/src/app.rs or crates/savvagent/src/tui.rs, does
       the spec call out that no .await may execute while the Arc<RwLock<...>> read guard is held?
     - The rmcp ProgressDispatcher gotcha: if the change adds/touches a streaming provider path, does
       the spec call out the forwarder-abort requirement?
@@ -92,7 +92,7 @@ task tool:
     respects the repo-specific requirements above. In particular:
     - Does every task use the repo's real commands (cargo test -p <crate>, cargo test -p <crate> --
       <test name>, cargo clippy --workspace --all-targets, cargo fmt --all)?
-    - Does a task touching crates/savvagent/src/app.rs or tui.rs include an explicit step verifying
+    - Does a task touching crates/savvagent/src/app.rs or crates/savvagent/src/tui.rs include an explicit step verifying
       the host-swap RwLock rule (no .await under the read guard)?
     - Does a task adding/modifying a streaming provider path include a step preserving the
       ProgressDispatcher forwarder-abort pattern?
@@ -135,7 +135,7 @@ task tool:
 
     Run `cargo fmt --all` before every Rust commit. Tests are self-contained (no external services
     or database needed). Never add AI self-attribution to anything. If this task
-    touches crates/savvagent/src/app.rs or tui.rs, never hold the Arc<RwLock<Option<Arc<Host>>>> read
+    touches crates/savvagent/src/app.rs or crates/savvagent/src/tui.rs, never hold the Arc<RwLock<Option<Arc<Host>>>> read
     guard across an .await. If this task adds/touches a streaming provider path, abort the
     ProgressDispatcher forwarder task after the request future resolves.
 
