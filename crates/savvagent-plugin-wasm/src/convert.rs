@@ -906,14 +906,14 @@ mod tests {
     #[test]
     fn effect_run_slash_preserves_name_and_args() {
         let e = wit::Effect::RunSlash(wit::SlashCall {
-            name: "view".into(),
-            args: vec!["README.md".into()],
+            name: "bash".into(),
+            args: vec!["echo hi".into()],
         });
         let r = effect_from_wit(e).expect("conversion");
         match r {
             sp::Effect::RunSlash { name, args } => {
-                assert_eq!(name, "view");
-                assert_eq!(args, vec!["README.md".to_string()]);
+                assert_eq!(name, "bash");
+                assert_eq!(args, vec!["echo hi".to_string()]);
             }
             other => panic!("expected RunSlash, got {other:?}"),
         }

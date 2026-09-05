@@ -1,4 +1,5 @@
-//! Transcript picker — Enter opens via `/view <path>` for v0.9.
+//! Transcript picker — Enter resumes the selected transcript via
+//! `/resume <path>`.
 
 use async_trait::async_trait;
 use savvagent_plugin::{
@@ -7,8 +8,7 @@ use savvagent_plugin::{
 };
 
 /// Fullscreen-modal picker that lists saved transcripts and lets the user
-/// open one via `/view <path>` (v0.9). Full transcript-replay into the log
-/// is deferred to a later milestone.
+/// resume one via `/resume <path>`, replaying it into the conversation log.
 #[derive(Debug)]
 pub struct ResumePickerScreen {
     items: Vec<TranscriptHandle>,
@@ -70,7 +70,7 @@ impl Screen for ResumePickerScreen {
                 Ok(vec![Effect::Stack(vec![
                     Effect::CloseScreen,
                     Effect::RunSlash {
-                        name: "view".into(),
+                        name: "resume".into(),
                         args: vec![h.id.clone()],
                     },
                 ])])
@@ -119,7 +119,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn enter_routes_to_view_with_path() {
+    async fn enter_routes_to_resume_with_path() {
         let mut s = ResumePickerScreen::new(vec![TranscriptHandle {
             id: "transcript-x.json".into(),
             label: "transcript-x.json".into(),
@@ -129,7 +129,7 @@ mod tests {
         match &effs[0] {
             Effect::Stack(children) => match &children[1] {
                 Effect::RunSlash { name, args } => {
-                    assert_eq!(name, "view");
+                    assert_eq!(name, "resume");
                     assert_eq!(args[0], "transcript-x.json");
                 }
                 _ => panic!(),

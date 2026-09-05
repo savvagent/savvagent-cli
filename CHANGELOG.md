@@ -7,6 +7,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 boundary changes and PATCH captures fixes).
 
 ## [Unreleased]
+### Removed
+
+- `/view`, `/edit`, and `/editor-keybindings`, plus the built-in TUI/GUI file viewer-editor paths that existed solely to support them.
+- Breaking `savvagent-plugin` ABI removal of `ScreenArgs::ViewFile`, `ScreenArgs::EditFile`, and `Effect::SaveActiveFile`. No replacement — plugins should not ask the runtime to open a file-viewer/editor screen; if a plugin genuinely needs this, it should ship its own `Screen` implementation.
+- `ratatui-code-editor` and `egui_code_editor`, now that no built-in frontend uses the removed file viewer/editor surface.
 
 ## 0.20.2 - 2026-09-05
 

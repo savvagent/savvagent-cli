@@ -67,8 +67,8 @@ mod tests {
 
     #[test]
     fn invalid_args_renders() {
-        let e = PluginError::InvalidArgs("usage: /view <path>".to_string());
-        assert_eq!(format!("{e}"), "invalid args: usage: /view <path>");
+        let e = PluginError::InvalidArgs("usage: /bash <cmd>".to_string());
+        assert_eq!(format!("{e}"), "invalid args: usage: /bash <cmd>");
     }
 
     #[test]

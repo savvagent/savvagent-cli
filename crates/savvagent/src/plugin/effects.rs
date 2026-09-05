@@ -51,23 +51,7 @@ async fn apply_one(app: &mut App, eff: Effect, depth: u8) -> Result<(), String> 
         Effect::PushNote { line } => app.push_styled_note(line),
         Effect::OpenScreen { id, args } => open_screen(app, &id, args).await?,
         Effect::CloseScreen => {
-            // When the screen being popped owns an `App::editor`
-            // instance (view-file / edit-file), tear it down so the
-            // editor stops rendering and the file path slot clears.
-            // edit-file also gets a save-on-close to match the legacy
-            // `InputMode::EditingFile` behavior.
-            if let Some((popped, _)) = app.screen_stack.pop() {
-                let id = popped.id();
-                if id == "edit-file" {
-                    app.save_file();
-                }
-                if id == "view-file" || id == "edit-file" {
-                    app.clear_active_editor();
-                }
-            }
-        }
-        Effect::SaveActiveFile => {
-            app.save_file();
+            let _ = app.screen_stack.pop();
         }
         Effect::SetActiveTheme { slug, persist } => {
             app.set_active_theme_by_slug(slug);
@@ -610,22 +594,6 @@ async fn open_screen(app: &mut App, id: &str, args: ScreenArgs) -> Result<(), St
         },
         (_, other) => other,
     };
-    // Pre-flight side effects that must happen before the screen lands
-    // on the stack. view-file / edit-file load the target file into
-    // `App::editor` so `ui.rs` can render via ratatui-code-editor; if
-    // loading fails (file missing, I/O error) the marker screen is
-    // never pushed and the user just sees the styled note that
-    // `load_file_into_editor` already emitted.
-    let file_path = match (id, &args) {
-        ("view-file", ScreenArgs::ViewFile { path })
-        | ("edit-file", ScreenArgs::EditFile { path }) => Some(path.clone()),
-        _ => None,
-    };
-    if let Some(p) = &file_path {
-        if !app.load_file_into_editor(std::path::PathBuf::from(p)) {
-            return Ok(());
-        }
-    }
     let (reg, idx) = match (&app.plugin_registry, &app.plugin_indexes) {
         (Some(r), Some(i)) => (r.clone(), i.clone()),
         _ => return Err("plugin runtime not installed".into()),
@@ -690,9 +658,7 @@ async fn open_screen(app: &mut App, id: &str, args: ScreenArgs) -> Result<(), St
     } else if id == crate::plugin::builtin::prompt_keybindings::SCREEN_ID {
         // Build the dynamic plugin-contributed section from the live
         // keybinding index so new plugin-supplied bindings show up
-        // without anyone having to update the static help text. (The
-        // editor-keybindings screen has no plugin extension surface,
-        // so it falls through to the normal `create_screen` path.)
+        // without anyone having to update the static help text.
         let layout = {
             let plugin = handle.lock().await;
             let manifest = plugin.manifest();
@@ -1269,7 +1235,7 @@ mod tests {
         apply_effects(
             &mut app,
             vec![Effect::PrefillInput {
-                text: "/view ".into(),
+                text: "/bash ".into(),
             }],
         )
         .await
@@ -1277,12 +1243,12 @@ mod tests {
 
         assert_eq!(
             app.input_textarea.lines(),
-            &["/view ".to_string()],
+            &["/bash ".to_string()],
             "PrefillInput must install the literal text as a single line"
         );
         assert_eq!(
             app.take_pending_prefill().as_deref(),
-            Some("/view "),
+            Some("/bash "),
             "PrefillInput must also stage the text on the pending_prefill bridge \
              that the egui prompt drains"
         );
@@ -2255,14 +2221,17 @@ mod tests {
                 "/{name} must dispatch on selection (needs_arg=false)"
             );
         }
-        // Slashes that genuinely need an argument must prefill.
+        // `/view` and `/edit` were the only built-in plugin slashes that
+        // required an argument. After their removal, the plugin-owned
+        // palette set should contain no `requires_arg=true` commands.
         for name in ["view", "edit"] {
-            assert_eq!(
-                by_name.get(name).copied(),
-                Some(true),
-                "/{name} must prefill on selection (needs_arg=true)"
-            );
+            assert_eq!(by_name.get(name), None, "/{name} should be absent");
         }
+        assert!(
+            !by_name.values().any(|&needs_arg| needs_arg),
+            "no plugin-owned palette command should have needs_arg=true \
+             now that /view and /edit are gone: {by_name:?}"
+        );
     }
 
     /// Regression test for the `/connect` picker only showing Ollama.

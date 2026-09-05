@@ -95,8 +95,8 @@ pub enum Effect {
     ClearLog,
     /// Replace the prompt textarea contents with `text` and position the
     /// cursor at the end. Used by the command palette to seed an in-progress
-    /// slash command (e.g. `"/view "`) so the user can complete it via the
-    /// `@` file picker rather than have it fire immediately with no args.
+    /// slash command (e.g. `"/bash "`) so the user can complete it with the
+    /// intended arguments rather than have it fire immediately with no args.
     PrefillInput {
         /// The literal text to install in the textarea (no trailing newline).
         text: String,
@@ -114,11 +114,6 @@ pub enum Effect {
         /// Stable identifier of the provider whose key to collect.
         provider_id: ProviderId,
     },
-    /// Persist the currently-open file editor's buffer to disk. Emitted
-    /// by the `edit-file` screen plugin on Ctrl-S. The runtime resolves
-    /// the target path from `App::active_file_path` and the buffer from
-    /// `App::editor`; if neither is populated the effect is a no-op.
-    SaveActiveFile,
     /// Enable or disable a registered plugin by id. The runtime updates its
     /// enabled-set, rebuilds derived indexes, and (if the plugin is
     /// [`crate::manifest::PluginKind::Optional`]) persists the new state
@@ -307,7 +302,6 @@ impl std::fmt::Debug for Effect {
                 .debug_struct("PromptApiKey")
                 .field("provider_id", provider_id)
                 .finish(),
-            Effect::SaveActiveFile => f.write_str("SaveActiveFile"),
             Effect::TogglePlugin { id, enabled } => f
                 .debug_struct("TogglePlugin")
                 .field("id", id)
@@ -422,10 +416,10 @@ mod tests {
     #[test]
     fn prefill_input_carries_text() {
         let eff = Effect::PrefillInput {
-            text: "/view ".into(),
+            text: "/bash ".into(),
         };
         match eff {
-            Effect::PrefillInput { text } => assert_eq!(text, "/view "),
+            Effect::PrefillInput { text } => assert_eq!(text, "/bash "),
             _ => panic!("expected PrefillInput"),
         }
     }

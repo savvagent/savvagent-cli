@@ -329,69 +329,7 @@ pub fn render(app: &mut App, frame: &mut Frame, frame_data: &HomeFrameData) {
 
     // Screen-stack: if any screen is on top, paint it over the home chrome.
     if let Some((top_screen, layout)) = app.screen_stack.top() {
-        // view-file / edit-file are marker screens whose actual content
-        // lives in `App::editor` (ratatui-code-editor). Render the
-        // editor widget directly in a bordered popup with a title that
-        // matches the legacy `InputMode::ViewingFile`/`EditingFile`
-        // chrome. Other screens go through the styled-line render path.
-        let top_id = top_screen.id();
-        let is_file_screen = top_id == "view-file" || top_id == "edit-file";
-        if is_file_screen {
-            paint_file_screen(frame, area, app, palette, top_id == "edit-file");
-        } else {
-            paint_screen(frame, area, chunks[4].y, top_screen, layout, palette);
-        }
-    }
-
-    if matches!(
-        app.input_mode,
-        InputMode::ViewingFile | InputMode::EditingFile
-    ) {
-        if let Some(editor) = &app.editor {
-            let popup = centered_rect(80, 80, area);
-            frame.render_widget(Clear, popup);
-
-            let path_str = app
-                .active_file_path
-                .as_ref()
-                .map(|p| p.display().to_string())
-                .unwrap_or_default();
-            let (title, hint) = if matches!(app.input_mode, InputMode::EditingFile) {
-                (
-                    format!(" Editing: {path_str} "),
-                    " [Esc] Save & Close | [Enter] New Line ",
-                )
-            } else {
-                (
-                    format!(" Viewing: {path_str} "),
-                    " [Esc] Close | [j/k] Scroll ",
-                )
-            };
-
-            let block = Block::default()
-                .borders(Borders::ALL)
-                .title(Line::styled(title, palette.base_style().fg(palette.fg)))
-                .title_bottom(Line::from(hint).right_aligned());
-            let inner = popup.inner(Margin {
-                horizontal: 1,
-                vertical: 1,
-            });
-            frame.render_widget(block, popup);
-            frame.render_widget(editor, inner);
-        }
-    }
-
-    if matches!(app.input_mode, InputMode::EditingFile) {
-        if let Some(editor) = &app.editor {
-            let popup = centered_rect(80, 80, area);
-            let inner = popup.inner(Margin {
-                horizontal: 1,
-                vertical: 1,
-            });
-            if let Some((x, y)) = editor.get_visible_cursor(&inner) {
-                frame.set_cursor_position((x, y));
-            }
-        }
+        paint_screen(frame, area, chunks[4].y, top_screen, layout, palette);
     }
 
     if matches!(app.input_mode, InputMode::SelectingProvider) {
@@ -1145,75 +1083,6 @@ fn line_block(prefix: &str, text: &str, color: Color, palette: Palette) -> Line<
     ])
 }
 
-/// Paint a plugin-provided screen over `area`, using the screen's declared
-/// [`savvagent_plugin::ScreenLayout`] to position it.
-///
-/// For `CenteredModal`, the host draws the border and title so the
-/// screen's `render` output fills the inner content area.
-/// For `Fullscreen`, content fills the computed area directly.
-/// For `BottomSheet`, content is anchored directly above the prompt
-/// textarea (`input_top`) rather than the bottom of the whole terminal —
-/// this is the inline `/`-command-palette-style overlay: the input row
-/// stays visible immediately below the sheet instead of being covered.
-///
-/// Every layout punches a hole with [`Clear`] and then fills its region
-/// with `palette.base_style()` so the modal sits on a uniform theme
-/// background. Without that step the conversation log behind the modal
-/// would bleed through under any plugin span that only sets `fg` — which
-/// makes upstream themes (Solarized Light, Catppuccin Latte, Tokyo Night
-/// Day, …) look like floating text rather than a popup.
-/// Render the marker `view-file` / `edit-file` screen by drawing the
-/// ratatui-code-editor widget held in `App::editor` inside a bordered
-/// modal. Mirrors the legacy `InputMode::ViewingFile`/`EditingFile`
-/// chrome but is driven by the screen stack instead of the deprecated
-/// input-mode state machine.
-fn paint_file_screen(
-    f: &mut Frame,
-    area: Rect,
-    app: &crate::app::App,
-    palette: Palette,
-    edit: bool,
-) {
-    let popup = centered_rect(80, 80, area);
-    f.render_widget(Clear, popup);
-    f.buffer_mut().set_style(popup, palette.base_style());
-
-    let path_str = app
-        .active_file_path
-        .as_ref()
-        .map(|p| p.display().to_string())
-        .unwrap_or_default();
-    let (title_key, hint_key) = if edit {
-        ("picker.edit-file.modal-title", "picker.edit-file.tips")
-    } else {
-        ("picker.view-file.modal-title", "picker.view-file.tips")
-    };
-    let title = format!(" {}: {} ", rust_i18n::t!(title_key), path_str);
-    let hint = rust_i18n::t!(hint_key).to_string();
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(palette.border).bg(palette.bg))
-        .title(Line::styled(title, palette.base_style().fg(palette.fg)))
-        .title_bottom(Line::from(format!(" {hint} ")).right_aligned())
-        .style(palette.base_style());
-
-    let inner = popup.inner(Margin {
-        horizontal: 1,
-        vertical: 1,
-    });
-    f.render_widget(block, popup);
-
-    if let Some(editor) = &app.editor {
-        f.render_widget(editor, inner);
-        if edit {
-            if let Some((x, y)) = editor.get_visible_cursor(&inner) {
-                f.set_cursor_position((x, y));
-            }
-        }
-    }
-}
-
 /// Place a `BottomSheet` of `height` rows inside `area`, anchored so its
 /// bottom edge meets the top of the prompt textarea (`input_top`) rather
 /// than the bottom of the whole frame — the inline `/`-palette look, with
@@ -1231,6 +1100,23 @@ fn bottom_sheet_rect(area: Rect, input_top: u16, height: u16) -> Rect {
     Rect::new(area.x, bottom.saturating_sub(h), area.width, h)
 }
 
+/// Paint a plugin-provided screen over `area`, using the screen's declared
+/// [`savvagent_plugin::ScreenLayout`] to position it.
+///
+/// For `CenteredModal`, the host draws the border and title so the
+/// screen's `render` output fills the inner content area.
+/// For `Fullscreen`, content fills the computed area directly.
+/// For `BottomSheet`, content is anchored directly above the prompt
+/// textarea (`input_top`) rather than the bottom of the whole terminal —
+/// this is the inline `/`-command-palette-style overlay: the input row
+/// stays visible immediately below the sheet instead of being covered.
+///
+/// Every layout punches a hole with [`Clear`] and then fills its region
+/// with `palette.base_style()` so the modal sits on a uniform theme
+/// background. Without that step the conversation log behind the modal
+/// would bleed through under any plugin span that only sets `fg` — which
+/// makes upstream themes (Solarized Light, Catppuccin Latte, Tokyo Night
+/// Day, …) look like floating text rather than a popup.
 fn paint_screen(
     f: &mut Frame,
     area: Rect,

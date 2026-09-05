@@ -82,7 +82,6 @@ dirs.workspace = true
 # block_on panics inside the runtime).
 eframe.workspace = true
 egui.workspace = true
-egui_code_editor.workspace = true
 egui-file-dialog.workspace = true
 futures.workspace = true
 crossterm.workspace = true
@@ -94,7 +93,6 @@ rust-i18n.workspace = true
 tui-markdown.workspace = true
 tui-textarea.workspace = true
 ratatui-explorer.workspace = true
-ratatui-code-editor.workspace = true
 keyring.workspace = true
 reqwest.workspace = true
 self_update.workspace = true

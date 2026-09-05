@@ -216,7 +216,7 @@ M1–M9 are shipped. M7 (v0.2.0) added Layer-1 path containment, M8 (v0.3.0) the
 - Distributed via [`cargo-dist`](https://opensource.axo.dev/cargo-dist/): `.tar.xz` for Linux (x86_64 / aarch64) and macOS arm64, `.zip` for Windows x86_64, plus shell (`curl | sh`) and PowerShell (`irm | iex`) installers from GitHub Releases. Config in `[workspace.metadata.dist]`, workflow at `.github/workflows/release.yml`.
 - License: AGPL-3.0-or-later.
 - Crates.io publication remains deferred until there's an external consumer for the libraries.
-- TUI editor widget decision (see §9): `tui-textarea` for the prompt input; `ratatui-code-editor` retained for the in-TUI viewer/editor pending a future consolidation pass.
+- TUI editor widget decision (see §9): `tui-textarea` for the prompt input; `ratatui-code-editor` retained for the in-TUI viewer/editor pending a future consolidation pass. *(Superseded 2026-09: the viewer/editor path was removed rather than consolidated — see §9 "TUI editor widget".)*
 
 ### M7 · v0.2.0 — `tool-fs` Layer 1 path containment + `/connect` UX (✅ done)
 - `tool-fs` confines paths to `SAVVAGENT_TOOL_FS_ROOT` (set by the host to the project root); rejects `..`, symlink escapes, and out-of-root absolute paths. Closes the v0.1 §9 "Layer 1 path hygiene" gap.
@@ -283,7 +283,7 @@ For v0.1 release, "done" means:
 - **Project context format.** *Resolved in M9.* `SAVVAGENT.md` gains optional YAML front-matter for permission overrides; the body remains free-form Markdown injected into the system prompt. Front-matter parse errors fall back silently to "no front-matter" so a malformed file never blocks startup.
 - **Tool sandboxing layer status.** Layer 1 (path hygiene) ✅ landed in M7. Layer 2 (permission prompts) is the M9 deliverable. Layer 3 (OS-level isolation via bubblewrap / sandbox-exec) is deferred to v0.5+; the host already owns the tool spawn path, so wrapping it later is additive.
 - **Multi-client transport.** v0.1 has the TUI link the host as a library. If we ever add a desktop client, we'll need a real wire (websocket? ACP? gRPC?). Deferred — the host's Rust API is the boundary that matters today.
-- **TUI editor widget.** *Settled in M5/M6.* `tui-textarea` (the `tui-textarea-2` fork) is in for the prompt input. `ratatui-code-editor` remains for the in-TUI viewer/editor; consolidating onto a single widget is a future cleanup, not a release blocker.
+- **TUI editor widget.** *Settled in M5/M6; revised by the 2026-09 remove-view-edit cleanup.* `tui-textarea` (the `tui-textarea-2` fork) remains the prompt input. The separate in-TUI `/view`/`/edit` viewer/editor path that used `ratatui-code-editor` was removed instead of being consolidated, so there is no remaining editor-widget follow-up here.
 - **Context management / retrieval.** Long sessions and large repos will outgrow the model's context window; we'll need a strategy for selecting which transcript turns, files, and tool outputs to keep in-context. Candidate to evaluate: [`vecstore`](https://crates.io/crates/vecstore) — a pure-Rust embedded vector store that could back semantic recall over transcript history and project files. Decision deferred (post-M5); tradeoffs include embedding model choice (local vs. provider-hosted), index footprint, and whether retrieval lives in the host or behind an MCP tool server.
 
 ---

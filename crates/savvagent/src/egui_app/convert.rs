@@ -11,7 +11,7 @@ use savvagent_plugin::{
 };
 
 use crate::palette::Palette;
-use crate::plugin::builtin::themes::editor_theme::xterm_256_rgb;
+use crate::plugin::builtin::themes::xterm_colors::xterm_256_rgb;
 
 /// Resolve a [`ThemeColor`] (including semantic slots) to an egui [`Color32`].
 ///
