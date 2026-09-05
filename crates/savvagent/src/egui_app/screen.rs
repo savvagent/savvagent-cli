@@ -29,7 +29,8 @@ pub struct ModalGeometry {
 /// Mirrors the ratatui `paint_screen` sizing: percentage-of-area for
 /// CenteredModal (clamped to >= 20 cols / >= 5 rows), with the inner region =
 /// `outer.inner(Margin{h:2,v:1})` (the border overlaps the margin, not a second
-/// subtraction); Fullscreen = whole area; BottomSheet = bottom `height` rows.
+/// subtraction); Fullscreen = whole area; BottomSheet = bottom `height` rows,
+/// less the two rows the overlay spends on its separator + `tips()` chrome.
 pub fn modal_geometry(
     avail: Rect,
     layout: &ScreenLayout,
@@ -82,13 +83,21 @@ pub fn modal_geometry(
                 egui::pos2(avail.min.x, avail.max.y - h),
                 egui::vec2(avail.width(), h),
             );
+            // Unlike ratatui — which overpaints the sheet's last row with
+            // the screen's `tips()` — `paint_screen_overlay` draws a
+            // separator *and* the tips lines as extra widgets below the
+            // rendered lines, inside the same clipped `outer` rect. Hand
+            // the screen a region two rows shorter so those two rows of
+            // chrome have somewhere to go; otherwise the trailing lines
+            // (for the palette, the windowed cursor row) fall outside the
+            // clip rect and disappear.
             ModalGeometry {
                 outer,
                 region: Region {
                     x: 0,
                     y: 0,
                     width: cols(avail.width()),
-                    height: rows(h),
+                    height: rows(h).saturating_sub(2),
                 },
             }
         }
@@ -221,6 +230,34 @@ mod tests {
         assert_eq!(g.outer, avail);
         assert_eq!(g.region.width, 100); // 800/8
         assert_eq!(g.region.height, 50); // 800/16
+    }
+
+    #[test]
+    fn bottom_sheet_is_anchored_to_the_bottom_of_the_area() {
+        let avail = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 800.0));
+        let g = modal_geometry(avail, &ScreenLayout::BottomSheet { height: 12 }, GW, GH);
+        // 12 rows * 16pt = 192pt tall, flush with the bottom of `avail`.
+        assert!((g.outer.height() - 192.0).abs() < 0.5);
+        assert!((g.outer.max.y - avail.max.y).abs() < 0.5);
+        assert_eq!(g.outer.width(), avail.width());
+    }
+
+    #[test]
+    fn bottom_sheet_region_reserves_rows_for_the_separator_and_tips() {
+        let avail = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 800.0));
+        let g = modal_geometry(avail, &ScreenLayout::BottomSheet { height: 12 }, GW, GH);
+        // `paint_screen_overlay` draws a separator plus the screen's tips
+        // below the rendered lines inside the same clipped rect, so the
+        // screen gets 12 - 2 = 10 rows rather than all 12.
+        assert_eq!(g.region.height, 10);
+        assert_eq!(g.region.width, 100); // 800/8
+    }
+
+    #[test]
+    fn bottom_sheet_shorter_than_its_chrome_yields_an_empty_region() {
+        let avail = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 800.0));
+        let g = modal_geometry(avail, &ScreenLayout::BottomSheet { height: 1 }, GW, GH);
+        assert_eq!(g.region.height, 0);
     }
 
     #[test]

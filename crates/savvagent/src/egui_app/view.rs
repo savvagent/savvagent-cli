@@ -95,9 +95,18 @@ fn paint_screen_overlay(state: &mut SavvagentApp, ctx: &egui::Context, palette: 
         let frame = egui::Frame::popup(ui.style())
             .fill(palette_bg(palette))
             .stroke(egui::Stroke::new(1.0_f32, palette_border(palette)));
+        // `ModalGeometry::region` counts monospace rows, so one rendered
+        // line has to cost exactly one row here too. Two things would
+        // otherwise inflate it past `geom.outer` — which `set_clip_rect`
+        // then silently trims off the bottom: the frame's inner margin
+        // (sized *around* the content box), and egui's default 3pt
+        // `item_spacing.y` between every label, which alone adds ~18% to
+        // a stack of a dozen lines.
+        let margin = frame.inner_margin.sum();
         frame.show(ui, |ui| {
-            ui.set_width(geom.outer.width());
-            ui.set_height(geom.outer.height());
+            ui.spacing_mut().item_spacing.y = 0.0;
+            ui.set_width((geom.outer.width() - margin.x).max(0.0));
+            ui.set_height((geom.outer.height() - margin.y).max(0.0));
             if let Some(t) = &title {
                 ui.label(egui::RichText::new(t).strong());
                 ui.separator();
