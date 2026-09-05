@@ -481,10 +481,12 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn open_url_system_browser_notes_success() {
-        // `/bin/true` accepts the URL argument and exits 0 — a real spawn
-        // with no side effect, which is what the success branch needs.
+        // `true` accepts the URL argument and exits 0 — a real spawn with
+        // no side effect, which is what the success branch needs. Resolved
+        // via `PATH` rather than a hardcoded `/bin/true`, since macOS ships
+        // it under `/usr/bin`, not `/bin`.
         let url = "https://z.example";
-        let notes = notes_from_system_browser_open("/bin/true", url).await;
+        let notes = notes_from_system_browser_open("true", url).await;
         assert_eq!(
             notes,
             vec![format!("Opening {url} in browser")],
