@@ -8,6 +8,20 @@ boundary changes and PATCH captures fixes).
 
 ## [Unreleased]
 
+## 0.19.2 - 2026-09-04
+
+### Fixed
+
+- **`/update` false "already up to date" reports.** `UpdateState::Unknown`
+  (background check hasn't completed yet), `UpdateState::CheckFailed`
+  (network/parse error against the GitHub Releases API), and
+  `UpdateState::UpToDate` (genuinely current) were all collapsed into the
+  identical "Already on the latest version" note, so a check that was
+  still in progress or had silently failed was indistinguishable from a
+  real "up to date" result. `/update` now returns a distinct, accurate
+  message for each state, and the `home.banner` slot now surfaces a
+  visible notice when a periodic check fails instead of staying silent.
+
 ## 0.19.1 - 2026-09-04
 
 ### Fixed
