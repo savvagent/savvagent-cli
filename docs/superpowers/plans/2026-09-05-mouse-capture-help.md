@@ -40,9 +40,9 @@ files under `crates/savvagent/locales/`.
   row to the existing `notes_rows()`.
 - Modified: `crates/savvagent/locales/en.toml`, `es.toml`, `hi.toml`, `pt.toml` — new
   `picker.prompt-keybindings.row.mouse-capture` and
-  `picker.editor-keybindings.row.note-shift-drag-copy` keys (English row text authoritative; other
-  locales get an English placeholder with a `# TODO: translate` comment, matching this repo's
-  existing practice for locale gaps — see Task 1 note).
+  `picker.editor-keybindings.row.note-shift-drag-copy` keys, translated into each locale (not left
+  as English placeholders) since the surrounding rows in all four files are already fully
+  translated.
 
 ## Task 1: Add the Shift+drag/click caveat to both keybindings screens
 
@@ -65,8 +65,8 @@ files under `crates/savvagent/locales/`.
       `mouse-capture = "Hold Shift while dragging/clicking to bypass mouse capture and use native terminal text selection + copy"`.
       Under `[picker.editor-keybindings.row]`, add:
       `note-shift-drag-copy = "Hold Shift while dragging/clicking to bypass mouse capture for native terminal text selection + copy (same as the main conversation log)"`.
-- [x] Mirror both keys (verbatim English text, since these are UX-critical caveats and this repo has
-      no automated translation pipeline) into `es.toml`, `hi.toml`, and `pt.toml` in the same
+- [x] Mirror both keys, translated (not left as English placeholders — the surrounding rows in
+      `es.toml`, `hi.toml`, and `pt.toml` are already fully translated), into the same
       `[picker.prompt-keybindings.row]` / `[picker.editor-keybindings.row]` sections, preserving each
       file's existing key ordering/alignment style.
 - [x] In `crates/savvagent/src/plugin/builtin/prompt_keybindings/mod.rs`: add

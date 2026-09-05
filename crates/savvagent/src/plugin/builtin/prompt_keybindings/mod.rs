@@ -195,9 +195,11 @@ fn history_rows() -> Vec<KeybindingRow> {
     ]
 }
 
-/// Mouse capture is on globally (see `crates/savvagent/src/tui.rs`), which
-/// suppresses the terminal's native click-drag text selection everywhere in
-/// the app. Shift bypasses it for native selection/copy.
+/// Mouse capture is enabled on a best-effort basis at startup (see
+/// `crates/savvagent/src/tui.rs`'s `EnableMouseCapture` call, which logs a
+/// warning and continues if the terminal doesn't support it). When it's on,
+/// it suppresses the terminal's native click-drag text selection everywhere
+/// in the app; Shift bypasses it for native selection/copy.
 fn mouse_rows() -> Vec<KeybindingRow> {
     vec![row(
         "Shift+drag / Shift+click",
