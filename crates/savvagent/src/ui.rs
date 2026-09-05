@@ -1083,23 +1083,6 @@ fn line_block(prefix: &str, text: &str, color: Color, palette: Palette) -> Line<
     ])
 }
 
-/// Paint a plugin-provided screen over `area`, using the screen's declared
-/// [`savvagent_plugin::ScreenLayout`] to position it.
-///
-/// For `CenteredModal`, the host draws the border and title so the
-/// screen's `render` output fills the inner content area.
-/// For `Fullscreen`, content fills the computed area directly.
-/// For `BottomSheet`, content is anchored directly above the prompt
-/// textarea (`input_top`) rather than the bottom of the whole terminal —
-/// this is the inline `/`-command-palette-style overlay: the input row
-/// stays visible immediately below the sheet instead of being covered.
-///
-/// Every layout punches a hole with [`Clear`] and then fills its region
-/// with `palette.base_style()` so the modal sits on a uniform theme
-/// background. Without that step the conversation log behind the modal
-/// would bleed through under any plugin span that only sets `fg` — which
-/// makes upstream themes (Solarized Light, Catppuccin Latte, Tokyo Night
-/// Day, …) look like floating text rather than a popup.
 /// Place a `BottomSheet` of `height` rows inside `area`, anchored so its
 /// bottom edge meets the top of the prompt textarea (`input_top`) rather
 /// than the bottom of the whole frame — the inline `/`-palette look, with
@@ -1117,6 +1100,23 @@ fn bottom_sheet_rect(area: Rect, input_top: u16, height: u16) -> Rect {
     Rect::new(area.x, bottom.saturating_sub(h), area.width, h)
 }
 
+/// Paint a plugin-provided screen over `area`, using the screen's declared
+/// [`savvagent_plugin::ScreenLayout`] to position it.
+///
+/// For `CenteredModal`, the host draws the border and title so the
+/// screen's `render` output fills the inner content area.
+/// For `Fullscreen`, content fills the computed area directly.
+/// For `BottomSheet`, content is anchored directly above the prompt
+/// textarea (`input_top`) rather than the bottom of the whole terminal —
+/// this is the inline `/`-command-palette-style overlay: the input row
+/// stays visible immediately below the sheet instead of being covered.
+///
+/// Every layout punches a hole with [`Clear`] and then fills its region
+/// with `palette.base_style()` so the modal sits on a uniform theme
+/// background. Without that step the conversation log behind the modal
+/// would bleed through under any plugin span that only sets `fg` — which
+/// makes upstream themes (Solarized Light, Catppuccin Latte, Tokyo Night
+/// Day, …) look like floating text rather than a popup.
 fn paint_screen(
     f: &mut Frame,
     area: Rect,

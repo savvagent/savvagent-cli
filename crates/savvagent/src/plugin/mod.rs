@@ -298,10 +298,15 @@ mod tests {
         //
         // Task 9 adds migration-picker, bringing non-provider count to 20;
         // Task 6 adds route, bringing non-provider count to 21;
-        // v0.16.0 adds lsp-installer, bringing non-provider count to 22;
-        // user-slash-commands adds 1 more, bringing non-provider count to 23;
-        // sub-project C (user-agents) adds 1 more, bringing non-provider count to 24;
-        // Task 11 adds tool-bash/fs/grep-summary, bringing non-provider count to 27;
+        // Task 11 adds tool-bash/fs/grep-summary, bringing non-provider count to 24;
+        // v0.16.0 adds lsp-installer, bringing non-provider count to 25;
+        // user-slash-commands adds 1 more, bringing non-provider count to 26;
+        // html-canvas adds 1 more, bringing non-provider count to 27;
+        // sub-project C (user-agents) adds 1 more, bringing non-provider count to 28;
+        // tool-task-summary adds 1 more, bringing non-provider count to 29;
+        // tool-web-summary adds 1 more, bringing non-provider count to 30;
+        // removing view-file, edit-file, and editor-keybindings drops the
+        // non-provider count from 30 back down to 27;
         // sub-project B (user-hooks) moves to `hook_entries` (not counted
         // in the plugins Vec) but still surfaces in the registry's plugins
         // map via the dual-Arc HookEntry, contributing 1 more registry

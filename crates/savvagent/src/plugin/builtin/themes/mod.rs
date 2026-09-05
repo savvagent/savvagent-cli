@@ -7,9 +7,9 @@
 //! `SelectingTheme` `InputMode` arm in the v0.8 keypath can go away.
 
 pub mod catalog;
-pub mod editor_theme;
 pub mod picker;
 pub mod screen;
+pub mod xterm_colors;
 
 use async_trait::async_trait;
 use savvagent_plugin::{
