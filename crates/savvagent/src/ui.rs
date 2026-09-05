@@ -339,7 +339,7 @@ pub fn render(app: &mut App, frame: &mut Frame, frame_data: &HomeFrameData) {
         if is_file_screen {
             paint_file_screen(frame, area, app, palette, top_id == "edit-file");
         } else {
-            paint_screen(frame, area, top_screen, layout, palette);
+            paint_screen(frame, area, chunks[4].y, top_screen, layout, palette);
         }
     }
 
@@ -1150,8 +1150,11 @@ fn line_block(prefix: &str, text: &str, color: Color, palette: Palette) -> Line<
 ///
 /// For `CenteredModal`, the host draws the border and title so the
 /// screen's `render` output fills the inner content area.
-/// For `Fullscreen` and `BottomSheet`, content fills the computed area
-/// directly.
+/// For `Fullscreen`, content fills the computed area directly.
+/// For `BottomSheet`, content is anchored directly above the prompt
+/// textarea (`input_top`) rather than the bottom of the whole terminal —
+/// this is the inline `/`-command-palette-style overlay: the input row
+/// stays visible immediately below the sheet instead of being covered.
 ///
 /// Every layout punches a hole with [`Clear`] and then fills its region
 /// with `palette.base_style()` so the modal sits on a uniform theme
@@ -1211,9 +1214,27 @@ fn paint_file_screen(
     }
 }
 
+/// Place a `BottomSheet` of `height` rows inside `area`, anchored so its
+/// bottom edge meets the top of the prompt textarea (`input_top`) rather
+/// than the bottom of the whole frame — the inline `/`-palette look, with
+/// the input row left visible immediately below the sheet.
+///
+/// The height is clamped to the space that actually exists *above* the
+/// prompt. Without that clamp a short terminal (the home layout's minimum
+/// is header 3 + log 1 + banner 1 + tips 1 + input 3 + footer 1, so a
+/// 15-row terminal puts `input_top` at 11) would pin the sheet's top at
+/// `area.y` while keeping its full height, growing it back down over the
+/// header and the textarea — exactly what the anchoring exists to avoid.
+fn bottom_sheet_rect(area: Rect, input_top: u16, height: u16) -> Rect {
+    let bottom = input_top.max(area.y);
+    let h = height.min(bottom.saturating_sub(area.y)).min(area.height);
+    Rect::new(area.x, bottom.saturating_sub(h), area.width, h)
+}
+
 fn paint_screen(
     f: &mut Frame,
     area: Rect,
+    input_top: u16,
     screen: &dyn savvagent_plugin::Screen,
     layout: &savvagent_plugin::ScreenLayout,
     palette: Palette,
@@ -1306,8 +1327,7 @@ fn paint_screen(
             f.render_widget(Paragraph::new(lines).style(palette.base_style()), inner);
         }
         ScreenLayout::BottomSheet { height } => {
-            let h = (*height).min(area.height);
-            let sheet = Rect::new(area.x, area.y + area.height - h, area.width, h);
+            let sheet = bottom_sheet_rect(area, input_top, *height);
             f.render_widget(Clear, sheet);
             f.buffer_mut().set_style(sheet, palette.base_style());
             let region = crate::plugin::convert::rect_to_region(sheet);
@@ -1638,5 +1658,53 @@ mod tests {
         let (top, body) = split_top_one_line(r);
         assert_eq!(top, r);
         assert_eq!(body, r);
+    }
+
+    /// A bottom sheet sits directly above the prompt, not at the bottom of
+    /// the frame: on a roomy terminal the full requested height fits and the
+    /// sheet's last row is the one immediately above `input_top`.
+    #[test]
+    fn bottom_sheet_is_anchored_above_the_prompt() {
+        // 40-row frame, 3-row prompt + 1-row footer => input_top = 36.
+        let area = Rect::new(0, 0, 100, 40);
+        let sheet = bottom_sheet_rect(area, 36, 12);
+        assert_eq!(sheet, Rect::new(0, 24, 100, 12));
+        assert_eq!(sheet.y + sheet.height, 36, "must stop at the prompt");
+    }
+
+    /// Regression: on a short terminal there is less room above the prompt
+    /// than the sheet asks for, and the sheet must shrink rather than grow
+    /// back down over the header and the textarea.
+    #[test]
+    fn bottom_sheet_shrinks_instead_of_covering_the_prompt() {
+        // 15-row frame: header 3 + log 1 + banner 1 + tips 1 + input 3 +
+        // footer 1 leaves input_top = 11, well under the requested 12.
+        let area = Rect::new(0, 0, 100, 15);
+        let sheet = bottom_sheet_rect(area, 11, 12);
+        assert_eq!(sheet.y, 0, "clamped sheet starts at the top of the area");
+        assert_eq!(sheet.height, 11);
+        assert_eq!(
+            sheet.y + sheet.height,
+            11,
+            "sheet must never extend past input_top"
+        );
+    }
+
+    /// The sheet is positioned relative to `area`, not the screen origin.
+    #[test]
+    fn bottom_sheet_respects_a_nonzero_area_origin() {
+        let area = Rect::new(4, 5, 60, 30);
+        let sheet = bottom_sheet_rect(area, 30, 8);
+        assert_eq!(sheet, Rect::new(4, 22, 60, 8));
+    }
+
+    /// Degenerate case: the prompt is at the very top of the area, so there
+    /// is no room at all. An empty sheet is fine; an overlapping one is not.
+    #[test]
+    fn bottom_sheet_with_no_room_above_the_prompt_is_empty() {
+        let area = Rect::new(0, 7, 80, 20);
+        let sheet = bottom_sheet_rect(area, 7, 12);
+        assert_eq!(sheet.height, 0);
+        assert_eq!(sheet.y, 7);
     }
 }

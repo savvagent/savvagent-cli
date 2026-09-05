@@ -36,13 +36,14 @@ impl Default for CommandPalettePlugin {
 impl Plugin for CommandPalettePlugin {
     fn manifest(&self) -> Manifest {
         let mut contributions = Contributions::default();
+        // Rendered as an inline `BottomSheet` directly above the prompt
+        // (matching Copilot CLI / Claude Code / OpenCode's `/` picker),
+        // rather than a floating `CenteredModal`. 12 rows: 1 for the
+        // `> filter` line, 1 spacer/scroll-hint, up to 9 command rows,
+        // and 1 reserved for the runtime's tips row at the bottom.
         contributions.screens = vec![ScreenSpec {
             id: "palette".into(),
-            layout: ScreenLayout::CenteredModal {
-                width_pct: 60,
-                height_pct: 60,
-                title: Some(rust_i18n::t!("picker.command-palette.modal-title").to_string()),
-            },
+            layout: ScreenLayout::BottomSheet { height: 12 },
         }];
         let open_palette = BoundAction::EmitEffect(Effect::OpenScreen {
             id: "palette".into(),

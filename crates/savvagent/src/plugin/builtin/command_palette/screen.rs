@@ -81,12 +81,10 @@ impl Screen for PaletteScreen {
         "palette".to_string()
     }
 
-    fn render(&self, _region: Region) -> Vec<StyledLine> {
-        let mut lines = vec![
-            StyledLine::plain(format!("> {}", self.filter)),
-            StyledLine::plain(""),
-        ];
+    fn render(&self, region: Region) -> Vec<StyledLine> {
+        let mut lines = vec![StyledLine::plain(format!("> {}", self.filter))];
         if self.commands.is_empty() {
+            lines.push(StyledLine::plain(""));
             lines.push(StyledLine {
                 spans: vec![StyledSpan {
                     text: rust_i18n::t!("picker.command-palette.no-commands").to_string(),
@@ -110,7 +108,54 @@ impl Screen for PaletteScreen {
             .unwrap_or(0)
             .max(12)
             + 2;
-        for (visual_idx, (_, cmd)) in filtered.iter().enumerate() {
+        // The list lives in a fixed-height `BottomSheet`, so a long,
+        // unfiltered command set (30+ builtins) won't fit. Window the
+        // rows around the cursor, budgeting *three* of the region's rows
+        // for non-command chrome: the `> filter` line (already pushed),
+        // the spacer/scroll-hint line, and the sheet's last row — which
+        // the host overpaints with our `tips()` after the paragraph
+        // (`ui.rs::paint_screen`). Reserving only two would put a row we
+        // still drew underneath the tips line, and since the window is
+        // anchored so the cursor sits on its *last* row that hidden row
+        // is the selected one: the `▶` highlight would vanish for every
+        // scrolled list. Then show a scroll hint in place of the usual
+        // blank spacer row whenever the window doesn't reach an edge.
+        let capacity = (region.height as usize).saturating_sub(3).max(1);
+        let window_start = if filtered.len() <= capacity {
+            0
+        } else {
+            (self.cursor + 1).saturating_sub(capacity)
+        };
+        let window_end = (window_start + capacity).min(filtered.len());
+
+        let hidden_above = window_start;
+        let hidden_below = filtered.len() - window_end;
+        // Only name the side that actually has hidden rows: at either end
+        // of a long list the other count is zero, and "↑0 more above" is
+        // noise rather than information.
+        let hint = match (hidden_above, hidden_below) {
+            (0, 0) => String::new(),
+            (0, below) => format!("  ↓{below} more below"),
+            (above, 0) => format!("  ↑{above} more above"),
+            (above, below) => format!("  ↑{above} more above · ↓{below} more below"),
+        };
+        if hint.is_empty() {
+            lines.push(StyledLine::plain(""));
+        } else {
+            lines.push(StyledLine {
+                spans: vec![StyledSpan {
+                    text: hint,
+                    fg: Some(ThemeColor::Muted),
+                    bg: None,
+                    modifiers: TextMods::default(),
+                }],
+            });
+        }
+        for (visual_idx, (_, cmd)) in filtered[window_start..window_end]
+            .iter()
+            .enumerate()
+            .map(|(i, c)| (window_start + i, c))
+        {
             let marker = if visual_idx == self.cursor {
                 "▶ "
             } else {
@@ -338,5 +383,146 @@ mod tests {
         let mut p = fixture();
         let effs = p.on_key(key(KeyCodePortable::Esc)).await.unwrap();
         assert!(matches!(effs[0], Effect::CloseScreen));
+    }
+
+    /// The palette renders inside a fixed-height `BottomSheet`, so a
+    /// command set that doesn't fit the region must be windowed around
+    /// the cursor rather than silently truncated with no indication.
+    #[tokio::test]
+    async fn long_list_fits_shows_no_scroll_hint() {
+        let commands: Vec<_> = (0..5).map(|i| cmd(&format!("cmd{i}"), false)).collect();
+        let p = PaletteScreen::with_commands(commands);
+        // capacity = height(12) - 3 = 9, which comfortably fits all 5 rows.
+        let lines = p.render(Region {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 12,
+        });
+        let joined: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.text.clone()))
+            .collect();
+        assert!(!joined.contains("more above"));
+        assert!(!joined.contains("more below"));
+        for i in 0..5 {
+            assert!(joined.contains(&format!("/cmd{i}")));
+        }
+    }
+
+    /// When the filtered list overflows the sheet's capacity, only a
+    /// window around the cursor renders, plus a hint showing how many
+    /// rows are hidden above/below. Only the non-zero side of the hint is
+    /// named — at either end of the list the other count is 0, and
+    /// "↑0 more above" would be noise.
+    #[tokio::test]
+    async fn overflowing_list_windows_around_cursor_with_scroll_hint() {
+        let commands: Vec<_> = (0..20).map(|i| cmd(&format!("cmd{i:02}"), false)).collect();
+        let mut p = PaletteScreen::with_commands(commands);
+        // capacity = height(6) - 3 = 3 visible rows out of 20 commands.
+        let region = Region {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 6,
+        };
+
+        let lines = p.render(region);
+        let joined: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.text.clone()))
+            .collect();
+        // Cursor starts at 0: window is [0, 3), nothing hidden above but
+        // 17 rows hidden below.
+        assert!(joined.contains("/cmd00"));
+        assert!(joined.contains("/cmd01"));
+        assert!(joined.contains("/cmd02"));
+        assert!(!joined.contains("/cmd03"));
+        assert!(joined.contains("↓17 more below"));
+        assert!(
+            !joined.contains("more above"),
+            "nothing is hidden above at the top of the list, got: {joined}"
+        );
+
+        // Move the cursor to the end; the window should follow it so the
+        // selected row is always visible, and hidden-above must update.
+        for _ in 0..19 {
+            p.on_key(key(KeyCodePortable::Down)).await.unwrap();
+        }
+        let lines = p.render(region);
+        let joined: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.text.clone()))
+            .collect();
+        assert!(joined.contains("/cmd19"));
+        assert!(joined.contains("↑17 more above"));
+        assert!(
+            !joined.contains("more below"),
+            "nothing is hidden below at the end of the list, got: {joined}"
+        );
+    }
+
+    /// Regression: the host overpaints the sheet's last row with `tips()`
+    /// *after* the paragraph, so `render` must emit at most
+    /// `region.height - 1` lines. The window is anchored so the cursor
+    /// sits on its last row, which is precisely the row that would be
+    /// swallowed — leaving the `▶` selection invisible for the rest of
+    /// the list once it scrolls.
+    #[tokio::test]
+    async fn cursor_row_never_lands_on_the_tips_row() {
+        let commands: Vec<_> = (0..30).map(|i| cmd(&format!("cmd{i:02}"), false)).collect();
+        let mut p = PaletteScreen::with_commands(commands);
+        let region = Region {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 12,
+        };
+
+        // Walk the whole list; at no point may the selected row fall on
+        // (or past) the row the tips line will claim.
+        for _ in 0..30 {
+            let lines = p.render(region);
+            let visible = region.height as usize - 1; // tips row is not ours
+            assert!(
+                lines.len() <= visible,
+                "render emitted {} lines into {} usable rows",
+                lines.len(),
+                visible
+            );
+            let cursor_row = lines
+                .iter()
+                .position(|l| l.spans.iter().any(|s| s.text.starts_with("▶")))
+                .expect("the selected row must always be rendered");
+            assert!(
+                cursor_row < visible,
+                "cursor row {cursor_row} would be overpainted by the tips row"
+            );
+            p.on_key(key(KeyCodePortable::Down)).await.unwrap();
+        }
+    }
+
+    /// A filtered list whose length is exactly the capacity must render in
+    /// full — the off-by-one that hid the cursor also hid this last row
+    /// while reporting `0 more below`.
+    #[tokio::test]
+    async fn list_exactly_filling_capacity_renders_every_row() {
+        // capacity = height(12) - 3 = 9.
+        let commands: Vec<_> = (0..9).map(|i| cmd(&format!("cmd{i}"), false)).collect();
+        let p = PaletteScreen::with_commands(commands);
+        let lines = p.render(Region {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 12,
+        });
+        let joined: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.text.clone()))
+            .collect();
+        for i in 0..9 {
+            assert!(joined.contains(&format!("/cmd{i}")), "missing /cmd{i}");
+        }
+        assert!(!joined.contains("more below"));
     }
 }
