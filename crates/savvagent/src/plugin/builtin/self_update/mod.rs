@@ -310,8 +310,14 @@ impl Plugin for SelfUpdatePlugin {
                     rust_i18n::t!("self-update.note-update-ok", latest = to.to_string())
                         .to_string(),
                 ),
-                UpdateState::Unknown | UpdateState::UpToDate | UpdateState::CheckFailed => {
+                UpdateState::UpToDate => {
                     Action::Note(rust_i18n::t!("self-update.note-no-update").to_string())
+                }
+                UpdateState::Unknown => {
+                    Action::Note(rust_i18n::t!("self-update.note-checking").to_string())
+                }
+                UpdateState::CheckFailed => {
+                    Action::Note(rust_i18n::t!("self-update.note-check-failed").to_string())
                 }
             }
         };
@@ -429,6 +435,9 @@ impl Plugin for SelfUpdatePlugin {
             .to_string(),
             UpdateState::Updated { to, .. } => {
                 rust_i18n::t!("self-update.banner-updated", latest = to.to_string()).to_string()
+            }
+            UpdateState::CheckFailed => {
+                rust_i18n::t!("self-update.banner-check-failed").to_string()
             }
             _ => return vec![],
         };
@@ -852,6 +861,14 @@ mod tests {
     }
 
     #[test]
+    fn render_slot_renders_banner_for_check_failed() {
+        let p = locked_plugin_with_state(Arc::new(StubInstaller::ok()), UpdateState::CheckFailed);
+        let lines = p.render_slot(BANNER_SLOT_ID, dummy_region());
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].spans[0].text.contains("Couldn't check"));
+    }
+
+    #[test]
     fn render_slot_returns_empty_for_disabled() {
         let p = locked_plugin_with_state(Arc::new(StubInstaller::ok()), UpdateState::Disabled);
         assert!(p.render_slot(BANNER_SLOT_ID, dummy_region()).is_empty());
@@ -1065,6 +1082,34 @@ mod tests {
         let effects = plugin.handle_slash("update", vec![]).await.unwrap();
         assert_eq!(effects.len(), 1);
         assert!(matches!(effects[0], Effect::PushNote { .. }));
+    }
+
+    #[tokio::test]
+    async fn slash_update_when_unknown_returns_checking_note() {
+        let mut plugin =
+            locked_plugin_with_state(Arc::new(StubInstaller::ok()), UpdateState::Unknown);
+        let effects = plugin.handle_slash("update", vec![]).await.unwrap();
+        assert_eq!(effects.len(), 1);
+        match &effects[0] {
+            Effect::PushNote { line } => {
+                assert!(line.spans[0].text.contains("Still checking"));
+            }
+            other => panic!("expected PushNote, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn slash_update_when_check_failed_returns_check_failed_note() {
+        let mut plugin =
+            locked_plugin_with_state(Arc::new(StubInstaller::ok()), UpdateState::CheckFailed);
+        let effects = plugin.handle_slash("update", vec![]).await.unwrap();
+        assert_eq!(effects.len(), 1);
+        match &effects[0] {
+            Effect::PushNote { line } => {
+                assert!(line.spans[0].text.contains("Couldn't check"));
+            }
+            other => panic!("expected PushNote, got {other:?}"),
+        }
     }
 
     #[tokio::test]
