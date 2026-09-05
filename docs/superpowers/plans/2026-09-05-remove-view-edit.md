@@ -33,12 +33,11 @@ four TOML locale files under `crates/savvagent/locales/`.
 the "Premise corrections" section — the issue's own description of the code shape is out of date).
 This plan implements it exactly.
 
-**Release line:** v0.20.1 (patch bump on top of the pending v0.20.0 — but see the note in Task 6:
-confirm the actual next-release number against `CHANGELOG.md`'s `[Unreleased]`/latest released
-version at merge time, since other work may land first). This is a breaking-ABI *removal*, which per
-this repo's pre-1.0 convention (MINOR for features/breaking changes, PATCH for fixes) should be a
-**MINOR** bump, not patch — use whatever the next MINOR version is at merge time (e.g. `v0.21.0` if
-`v0.20.0` has already shipped).
+**Release line:** the next **MINOR** version after whatever is latest-released at merge time (this is
+a breaking-ABI removal, which per this repo's pre-1.0 convention — MINOR for features/breaking
+changes, PATCH for fixes — must be a MINOR bump, not a patch). Do not hardcode a version number here;
+confirm the exact next MINOR against `CHANGELOG.md`'s most recent released heading when the release
+PR (Task 6's final note) is actually opened, since other work may land first.
 
 **Branch:** `savvagent/remove-view-edit`
 
@@ -53,10 +52,15 @@ this repo's pre-1.0 convention (MINOR for features/breaking changes, PATCH for f
 - Deleted: `crates/savvagent/src/plugin/builtin/view_file/` (whole dir),
   `crates/savvagent/src/plugin/builtin/edit_file/` (whole dir),
   `crates/savvagent/src/plugin/builtin/editor_keybindings/` (whole dir).
-- Modified: `crates/savvagent/src/plugin/builtin/mod.rs` — remove the three `pub mod` declarations.
+- Modified: `crates/savvagent/src/plugin/builtin/mod.rs` — remove the three `pub mod` declarations
+  and their doc comments (e.g. "Basic in-TUI file editor; opened via `/edit <path>`.").
 - Modified: `crates/savvagent/src/plugin/mod.rs` — remove the three plugin constructions from
   `register_builtins`; update `register_builtins_pr8_complete` and any other test asserting the
   builtin ID list/count.
+- Modified: `crates/savvagent/src/plugin/builtin/themes/editor_theme.rs` — remove
+  `build_editor_theme`/`color_to_hex` (and their tests/docs), which exist solely for
+  `ratatui-code-editor`'s syntax theme; **keep** `xterm_256_rgb` (and its tests) — it's a shared
+  utility also consumed by `egui_app/convert.rs` for unrelated ANSI-color conversion.
 - Modified: `crates/savvagent/src/app.rs` — remove `/view`/`/edit` `Command` entries,
   `InputMode::ViewingFile`/`EditingFile` + their debug-name arm, `App::open_file`,
   `App::load_file_into_editor`, `App::clear_active_editor`, `App::save_file`, `editor: Option<Editor>`
@@ -70,7 +74,8 @@ this repo's pre-1.0 convention (MINOR for features/breaking changes, PATCH for f
 - Deleted: `crates/savvagent/src/egui_app/widgets/editor.rs`,
   `crates/savvagent/src/egui_app/widgets/editor_theme.rs`.
 - Modified: `crates/savvagent/src/egui_app/widgets/mod.rs` — remove `pub mod editor;`/
-  `pub mod editor_theme;`.
+  `pub mod editor_theme;` and update the module's doc comment (currently describes "the
+  syntax-highlighted code editor (`view-file`/`edit-file` marker screens)" as a still-live widget).
 - Modified: `crates/savvagent/src/egui_app/mod.rs` — remove `editor_buffer` field,
   `save_editor_buffer`, `ensure_buffer_for_active_screen` call, and the `id == "edit-file"` Ctrl-S
   special case.
@@ -94,9 +99,10 @@ this repo's pre-1.0 convention (MINOR for features/breaking changes, PATCH for f
 - Modify: `crates/savvagent-plugin/src/effect.rs`
 - Modify: `crates/savvagent-plugin-wasm/src/adapter/interactive.rs`
 
-- [ ] Baseline: `cargo test -p savvagent-plugin` and `cargo test -p savvagent-plugin-wasm` — confirm
-      green before touching anything (records the pre-change test count referenced in the spec's
-      Risks section).
+- [ ] Baseline: `cargo test --workspace --no-fail-fast` — confirm green before touching anything, and
+      record the total test count (this is the pre-change baseline referenced in the spec's Risks
+      section and in Task 6's before/after comparison — a full-workspace run is needed here, not
+      just the two plugin crates, since Task 2 deletes tests in `savvagent` too).
 - [ ] In `crates/savvagent-plugin/src/types.rs`: delete the `ScreenArgs::ViewFile { path: String }`
       and `ScreenArgs::EditFile { path: String }` variants, their two arms in `screen_id()`
       (`Some("view-file")`/`Some("edit-file")`), and every test referencing them (the `_view`/`_edit`
@@ -109,11 +115,15 @@ this repo's pre-1.0 convention (MINOR for features/breaking changes, PATCH for f
       `EditFile` arm, and the two test-fixture lines constructing
       `ScreenArgs::ViewFile`/`EditFile` (around lines 902-903 and wherever their corresponding
       assertions live).
-- [ ] Run `cargo build -p savvagent-plugin -p savvagent-plugin-wasm` — expect compile errors
-      pointing at every downstream caller (this is expected; Task 2/3/4 fix them). Do not attempt to
-      fix downstream callers from this task — just confirm the errors are exactly the expected
-      ones (`edit_file`/`view_file`/`editor_keybindings` plugin modules,
-      `crates/savvagent/src/plugin/effects.rs`, `crates/savvagent/src/app.rs`).
+- [ ] Run `cargo check -p savvagent --all-targets` — expect compile errors pointing at every
+      downstream caller (this is expected; Task 2/3/4 fix them). `cargo build`/`cargo check` scoped
+      to `-p savvagent-plugin -p savvagent-plugin-wasm` would only build those two crates and their
+      dependencies, not the reverse-dependent `savvagent` crate, so it cannot surface these errors —
+      use `-p savvagent --all-targets` instead to pull in the whole downstream graph (including
+      `main.rs`, which `--lib` alone would skip). Do not attempt to fix downstream callers from this
+      task — just confirm the errors are exactly the expected ones (`edit_file`/`view_file`/
+      `editor_keybindings` plugin modules, `crates/savvagent/src/plugin/effects.rs`,
+      `crates/savvagent/src/app.rs`).
 - [ ] Run `cargo test -p savvagent-plugin -p savvagent-plugin-wasm` — expect green (these two crates
       compile standalone even though the workspace doesn't yet).
 - [ ] Public-interface check: this is the **breaking plugin-ABI change** — record in the PR body
@@ -144,7 +154,7 @@ this repo's pre-1.0 convention (MINOR for features/breaking changes, PATCH for f
       Update `register_builtins_pr8_complete` (and any other test in this file asserting an exact
       builtin plugin count or enumerating builtin IDs, e.g. via `grep -n "internal:edit-file\|internal:view-file\|internal:editor-keybindings" crates/savvagent/src/plugin/mod.rs`)
       to drop the three removed IDs and decrement the expected count by 3.
-- [ ] `cargo build -p savvagent --lib` (this crate won't fully build yet — `app.rs`/`main.rs`/`ui.rs`/
+- [ ] `cargo check -p savvagent --all-targets` (this crate won't fully build yet — `app.rs`/`main.rs`/`ui.rs`/
       `effects.rs`/egui files still reference removed items; Task 3/4 fix those) — confirm the only
       remaining errors are in those known files, not stray references to the deleted plugin modules.
 - [ ] Format and commit (even though the crate doesn't build yet, this repo's task-by-task discipline
@@ -200,9 +210,23 @@ this repo's pre-1.0 convention (MINOR for features/breaking changes, PATCH for f
   - Remove the `InputMode::ViewingFile | InputMode::EditingFile` render block (the popup + editor
     widget block) and the separate `if matches!(app.input_mode, InputMode::EditingFile) { ... }`
     cursor-position block right after it.
-- [ ] Run `cargo build -p savvagent --lib` — expect the remaining errors to be confined to
+- [ ] In `crates/savvagent/src/plugin/builtin/themes/editor_theme.rs`: remove `build_editor_theme`,
+      `color_to_hex`, `indexed_to_hex`, their module-level doc comment, and every test that exercises
+      them (`rgb_color_round_trips`, `named_colors_have_stable_hex`,
+      `reset_falls_back_to_caller_provided_default`, `indexed_system_colors_match_named_equivalents`,
+      `indexed_rgb_cube_uses_xterm_step_values`, `indexed_grayscale_ramp_steps_by_ten` insofar as
+      they only test `color_to_hex`/`indexed_to_hex`, `build_editor_theme_includes_every_required_token_kind`,
+      `build_editor_theme_emits_hex_color_strings`, `dark_and_light_themes_produce_different_string_colors`).
+      **Keep** `pub(crate) fn xterm_256_rgb` and its doc comment (drop only the sentence naming the
+      now-removed code-editor sink, keep the sentence about the shared egui sink) — it is still used
+      by `crates/savvagent/src/egui_app/convert.rs` (`use crate::plugin::builtin::themes::editor_theme::xterm_256_rgb;`)
+      for unrelated ANSI-color conversion. If any of the `indexed_to_hex`-testing assertions above
+      were actually testing `xterm_256_rgb` values indirectly, rewrite them to call `xterm_256_rgb`
+      directly instead of deleting the coverage.
+- [ ] Run `cargo check -p savvagent --all-targets` — expect the remaining errors to be confined to
       `crates/savvagent/src/egui_app/*.rs` (Task 4). If any error remains in `app.rs`/`main.rs`/
-      `ui.rs`/`effects.rs`, it means a reference was missed — fix it before proceeding.
+      `ui.rs`/`effects.rs`/`themes/editor_theme.rs`, it means a reference was missed — fix it before
+      proceeding.
 - [ ] Host-swap `RwLock` check (mandatory — this task touches `app.rs`): confirm no `.await` executes
       while `Arc<RwLock<Option<Arc<Host>>>>` (or `Host`'s internal `pool`/`active_provider` locks) is
       held across any edit in this task. This task is pure deletion of synchronous state/rendering
@@ -276,10 +300,9 @@ this repo's pre-1.0 convention (MINOR for features/breaking changes, PATCH for f
       remaining `rust_i18n::t!("...")` callers (re-grep the Rust source after Tasks 1-4 to confirm
       each key truly has no caller before deleting) in all four files, keeping them structurally
       consistent with each other (same keys removed from each).
-- [ ] Run `cargo test -p savvagent locales` (or whatever this crate's locale-completeness test target
-      is — search `crates/savvagent/src` for a test asserting all locale files have matching keys,
-      e.g. `grep -rln "locale" crates/savvagent/src/*.rs crates/savvagent/tests 2>/dev/null | xargs grep -l "fn.*test"`)
-      to confirm removing keys from all four files in lockstep didn't break locale-parity checks.
+- [ ] Run `cargo test -p savvagent --test locales` (the locale-parity integration test lives at
+      `crates/savvagent/tests/locales.rs`) to confirm removing keys from all four files in lockstep
+      didn't break locale-parity checks.
 - [ ] In `README.md`: remove the `/view <path>`, `/edit <path>`, and `/editor-keybindings` rows from
       the "Other slash commands" table, and the `/view <path>` and `/edit <path>` sentence from the
       experimental-GUI status paragraph (~lines 110-113) — rephrase the surrounding sentence so it
@@ -320,6 +343,12 @@ this repo's pre-1.0 convention (MINOR for features/breaking changes, PATCH for f
 - [ ] Confirm no `SAVVAGENT_TOOL_*` / provider / plugin-ABI-adjacent path was inadvertently touched
       outside what this plan lists (`git diff --stat origin/main` sanity check against the File Map
       above).
+- [ ] **Architecture-reviewer callout (mandatory):** the PR description and the architecture-review
+      dispatch (Phase 4 step 8 of the `savvagent-development` skill) must explicitly name the
+      removal of `ScreenArgs::ViewFile`, `ScreenArgs::EditFile`, and `Effect::SaveActiveFile` from
+      the `savvagent-plugin` public ABI, and the removal of the `/view`, `/edit`, and
+      `/editor-keybindings` slash commands, as intentional breaking public-interface changes per
+      Non-Negotiable Rule 6 — do not let this land as an unremarked incidental deletion.
 - [ ] **Release note (do not perform here):** per `RELEASING.md` and this skill's Non-Negotiable Rule
       8, after this PR merges to `main`, open a separate `release/X-Y-Z` PR that bumps
       `workspace.package.version` (and matching `workspace.dependencies` versions) to the next
