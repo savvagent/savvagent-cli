@@ -3221,35 +3221,6 @@ async fn run_app(
                 drain_pending_bash_net(app, &host_slot).await;
                 return Ok(());
             }
-            // view-file / edit-file are marker screens — most keys are
-            // routed straight to the ratatui-code-editor instance in
-            // `App::editor`. Only Esc (close), `q` (view-file only),
-            // and Ctrl-S (edit-file only) go through `Screen::on_key`
-            // to produce CloseScreen / SaveActiveFile effects.
-            let top_id = app
-                .screen_stack
-                .top()
-                .map(|(s, _)| s.id())
-                .unwrap_or_default();
-            if top_id == "view-file" || top_id == "edit-file" {
-                let is_close = matches!(key.code, KeyCode::Esc)
-                    || (top_id == "view-file" && key.code == KeyCode::Char('q'));
-                let is_save_in_edit = top_id == "edit-file"
-                    && matches!(key.code, KeyCode::Char('s'))
-                    && key.modifiers.contains(KeyModifiers::CONTROL);
-                if !is_close && !is_save_in_edit {
-                    if let Some(editor) = app.editor.as_mut() {
-                        let term_area = terminal.size()?;
-                        let popup = ui::centered_rect(80, 80, term_area.into());
-                        let inner = popup.inner(ratatui::layout::Margin {
-                            horizontal: 1,
-                            vertical: 1,
-                        });
-                        let _ = editor.input(*key, &inner);
-                    }
-                    continue;
-                }
-            }
             let effs = {
                 let (top_screen, _layout) =
                     app.screen_stack.top_mut().expect("just checked non-empty");
@@ -3663,43 +3634,6 @@ async fn run_app(
                 },
                 _ => {
                     app.api_key_textarea.input(evt);
-                }
-            },
-            InputMode::ViewingFile => match key.code {
-                KeyCode::Esc | KeyCode::Char('q') => {
-                    app.input_mode = InputMode::Editing;
-                    app.active_file_path = None;
-                    app.editor = None;
-                }
-                _ => {
-                    if let Some(editor) = &mut app.editor {
-                        let area = terminal.size()?;
-                        let popup = ui::centered_rect(80, 80, area.into());
-                        let inner = popup.inner(ratatui::layout::Margin {
-                            horizontal: 1,
-                            vertical: 1,
-                        });
-                        editor.input(*key, &inner)?;
-                    }
-                }
-            },
-            InputMode::EditingFile => match key.code {
-                KeyCode::Esc => {
-                    app.save_file();
-                    app.input_mode = InputMode::Editing;
-                    app.active_file_path = None;
-                    app.editor = None;
-                }
-                _ => {
-                    if let Some(editor) = &mut app.editor {
-                        let area = terminal.size()?;
-                        let popup = ui::centered_rect(80, 80, area.into());
-                        let inner = popup.inner(ratatui::layout::Margin {
-                            horizontal: 1,
-                            vertical: 1,
-                        });
-                        editor.input(*key, &inner)?;
-                    }
                 }
             },
             InputMode::PermissionPrompt => {
