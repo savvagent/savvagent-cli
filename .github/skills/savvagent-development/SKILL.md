@@ -112,12 +112,13 @@ These hold for every run of this skill, no exceptions, no fast-path carve-outs:
    dispatched through `ToolRegistry` (stdio child process or in-process handler), never bypassed. A
    brief that asks for something violating one of these is a brief to escalate on (Stop & Escalate
    condition 9), not to implement.
-8. **Every merge to the trunk branch (`main`) cuts a release.** No feature/fix PR merges and is
-   considered shipped without a version bump, a `CHANGELOG.md` entry, a pushed `vX.Y.Z` tag, and a
-   published GitHub Release with build artifacts, following `RELEASING.md`'s manual process. This is
-   not optional and not batchable across PRs — but "cut the release" means opening the dedicated
-   release PR (Phase 4 step 12) and completing the tag/release for it immediately after the
-   feature/fix PR merges, not necessarily folding the version bump into the same commit or PR.
+8. **Every merge to the trunk branch (`main`, or `master` if this repo ever reverts to that name —
+   see the Trunk row above) cuts a release.** No feature/fix PR merges and is considered shipped
+   without a version bump, a `CHANGELOG.md` entry, a pushed `vX.Y.Z` tag, and a published GitHub
+   Release with build artifacts, following `RELEASING.md`'s manual process. This is not optional and
+   not batchable across PRs — but "cut the release" means opening the dedicated release PR (Phase 4
+   step 12) and completing the tag/release for it immediately after the feature/fix PR merges, not
+   necessarily folding the version bump into the same commit or PR.
 
 ## When to Use This Skill vs. Alternatives
 
