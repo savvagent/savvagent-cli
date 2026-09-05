@@ -8,6 +8,10 @@ boundary changes and PATCH captures fixes).
 
 ## [Unreleased]
 
+### Removed
+
+- **`/view`, `/edit`, and `/editor-keybindings` slash commands removed.** Also removes the `ratatui-code-editor` / `egui_code_editor` in-TUI file editor/viewer they backed. This is a breaking change to the slash-command surface and the plugin ABI (`Effect::SaveActiveFile`, `ScreenArgs::ViewFile`, and `ScreenArgs::EditFile` were removed from `savvagent-plugin`).
+
 ## 0.20.2 - 2026-09-05
 
 ### Added

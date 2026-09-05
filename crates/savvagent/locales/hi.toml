@@ -193,17 +193,6 @@ modal-title       = "पुनः प्रारंभ"
 no-transcripts    = "इस निर्देशिका में कोई सहेजी हुई ट्रांसक्रिप्ट नहीं मिली।"
 tips              = "↑/↓ नेविगेट · Enter खोलें · Esc रद्द"
 
-[picker.view-file]
-modal-title = "देख रहे हैं"
-read-only   = "%{path}  (केवल पठनीय)"
-tips        = "↑/↓ स्क्रॉल · q/Esc बंद करें"
-
-[picker.edit-file]
-modal-title  = "संपादन"
-dirty-marker = " [+]"
-save-failed  = "सहेजना विफल: %{err}"
-tips         = "टाइप करके संपादित करें · Ctrl-S सहेजें · Esc सहेजें और बंद करें"
-
 [picker.plugins-manager]
 modal-title       = "Plugins"
 no-plugins        = "  (कोई प्लगइन पंजीकृत नहीं)"
@@ -262,46 +251,6 @@ redo                = "पूर्ववत किया गया संपा
 recall-prompt       = "Recall previous / next prompt (Up at empty input; then Up/Down to browse)"
 mouse-capture       = "माउस कैप्चर को बायपास करने और टर्मिनल की नेटिव टेक्स्ट चयन + कॉपी का उपयोग करने के लिए ड्रैग/क्लिक करते समय Shift दबाए रखें"
 
-[picker.editor-keybindings]
-modal-title       = "एडिटर कीबाइंडिंग"
-tips              = "↑/↓ स्क्रॉल · PgUp/PgDn पृष्ठ · Home/End शुरू/अंत · Esc बंद"
-section-modal     = "बंद करें और सहेजें"
-section-cursor    = "कर्सर और चयन"
-section-editing   = "संपादन"
-section-clipboard = "क्लिपबोर्ड"
-section-history   = "पूर्ववत करें / पुनः करें"
-section-mouse     = "माउस"
-section-notes     = "चेतावनी"
-
-[picker.editor-keybindings.row]
-close                  = "बंद करें (संपादन में सहेजता है)"
-close-view             = "बंद करें (केवल-पठनीय व्यूअर में)"
-save                   = "बिना बंद किए सहेजें"
-cursor-char            = "कर्सर एक वर्ण हिलाएं"
-cursor-line            = "कर्सर एक पंक्ति हिलाएं"
-select-char            = "वर्ण द्वारा चयन बढ़ाएं"
-select-line            = "पंक्ति द्वारा चयन बढ़ाएं"
-select-all             = "सब चुनें"
-insert-text            = "पाठ डालें"
-newline                = "नई पंक्ति डालें"
-delete-prev            = "पिछला वर्ण हटाएं"
-indent                 = "पंक्ति / चयन को इंडेंट करें"
-unindent               = "इंडेंट हटाएं"
-delete-line            = "वर्तमान पंक्ति हटाएं"
-duplicate              = "वर्तमान पंक्ति की प्रतिलिपि बनाएं"
-copy                   = "चयन कॉपी करें (चेतावनी देखें — Ctrl+C बाहर निकलने से ढका हुआ)"
-paste                  = "क्लिपबोर्ड से पेस्ट करें"
-cut                    = "चयन कट करें"
-undo                   = "अंतिम संपादन पूर्ववत करें"
-redo                   = "पूर्ववत किया गया संपादन पुनः लागू करें"
-mouse-scroll           = "व्यूपोर्ट स्क्रॉल करें"
-mouse-click            = "कर्सर रखें"
-mouse-drag             = "चयन बढ़ाएं"
-mouse-word             = "शब्द चुनें"
-mouse-line             = "पंक्ति चुनें"
-note-ctrl-c-quits      = "Ctrl+C वैश्विक रूप से savvagent से बाहर निकलता है — एडिटर से पहले संसाधित होता है, इसलिए व्यूअर/एडिटर में Ctrl+C से कॉपी काम नहीं करती।"
-note-shift-drag-copy   = "माउस कैप्चर को बायपास करने और टर्मिनल की नेटिव टेक्स्ट चयन + कॉपी का उपयोग करने के लिए ड्रैग/क्लिक करते समय Shift दबाए रखें (मुख्य बातचीत लॉग की तरह ही)"
-
 [prompt.api-key]
 paste-new              = "अपनी %{env} कुंजी पेस्ट करें"
 use-stored-or-paste-new = "संग्रहीत कुंजी का उपयोग करने के लिए Enter दबाएं, या नई %{env} कुंजी पेस्ट करें"
@@ -309,8 +258,6 @@ use-stored-or-paste-new = "संग्रहीत कुंजी का उ�
 [slash]
 clear-summary              = "वार्तालाप लॉग साफ़ करें"
 connect-summary            = "कनेक्ट करने के लिए प्रदाता चुनें"
-edit-summary               = "एडिटर में फ़ाइल खोलें"
-editor-keybindings-summary = "फ़ाइल व्यूअर/एडिटर के कीबाइंडिंग दिखाएं"
 language-summary           = "UI भाषा बदलें"
 model-summary              = "सक्रिय प्रदाता पर अगले मॉडल पर स्विच करें"
 plugins-summary            = "Plugins प्रबंधित करें"
@@ -322,16 +269,13 @@ route-summary              = "Manage routing rules (reload | show)"
 save-summary               = "ट्रांसक्रिप्ट को एक पथ पर सहेजें"
 splash-summary             = "स्प्लैश स्क्रीन दिखाएं"
 theme-summary              = "रंग थीम बदलें"
-view-summary               = "व्यूअर में फ़ाइल खोलें"
 
 [plugin]
 changelog-description     = "प्रोजेक्ट के CHANGELOG.md रिलीज़ नोट्स देखें"
 clear-description         = "वार्तालाप लॉग साफ़ करें"
 connect-description       = "प्रदाता पिकर"
-edit-file-description     = "TUI के भीतर मूल फ़ाइल एडिटर"
 home-footer-description   = "Sandbox + टर्न स्थिति + कार्य निर्देशिका + संदर्भ/लागत/संस्करण"
 home-tips-description     = "प्रॉम्प्ट के ऊपर एक-पंक्ति सुझाव"
-editor-keybindings-description = "/editor-keybindings व्यूअर/एडिटर शॉर्टकट दिखाने वाला मोडल खोलता है"
 prompt-keybindings-description = "/prompt-keybindings प्रॉम्प्ट शॉर्टकट दिखाने वाला मोडल खोलता है"
 language-description      = "/language + locale कैटलॉग (en/es/pt/hi)"
 model-description         = "सक्रिय प्रदाता पर अगले मॉडल पर चक्र"
@@ -345,7 +289,6 @@ save-description          = "सक्रिय वार्तालाप क�
 self-update-description   = "नई रिलीज़ खोजें और स्वचालित रूप से इंस्टॉल करें; लागू करने के लिए पुनः प्रारंभ करें"
 splash-description        = "स्टार्टअप HUD + पार्स-त्रुटि स्क्रीन"
 themes-description        = "रंग थीम + /theme पिकर"
-view-file-description     = "केवल पठनीय फ़ाइल व्यूअर"
 migration-picker-description = "startup_providers के लिए प्रथम-लॉन्च चयनकर्ता"
 
 [migration.picker]

@@ -2,8 +2,8 @@
 //! scrollable help modal listing the keybindings active in the main
 //! prompt input.
 //!
-//! Mirrors `internal:editor-keybindings` for symmetry: each plugin
-//! owns a slash + a screen and contributes its own static sections.
+//! Owns the prompt-keybindings slash command, screen definition, and
+//! static sections for the shared scrollable keybindings viewer.
 //! The dynamic plugin-contributed bindings section is sourced at open
 //! time from [`crate::plugin::manifests::Indexes`] by
 //! `apply_effects::open_screen`.

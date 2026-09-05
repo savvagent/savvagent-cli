@@ -1,7 +1,7 @@
 //! Shared scrollable, sectioned keybindings viewer.
 //!
-//! Used by `internal:prompt-keybindings` and `internal:editor-keybindings`
-//! (and any future help-style plugin with the same shape). Each plugin
+//! Used by `internal:prompt-keybindings` and any future help-style
+//! plugin with the same shape. Each plugin
 //! supplies its own list of [`KeybindingSection`]s; the screen handles
 //! rendering, scrolling, and the close keystroke.
 

@@ -107,12 +107,9 @@ cargo run -p savvagent -- gui
 > `/plugins`, `/changelog`, …). The active screen is painted as an egui
 > overlay — centered modal, full-screen, or bottom sheet — with chrome,
 > tips, and a dimmed backdrop, and keyboard input routes to it.
-> `/view <path>` and `/edit <path>` now open a syntax-highlighted code
-> editor (powered by `egui_code_editor`) that reads its colors from the
-> active theme; `Ctrl-S` saves the buffer in `/edit`, `Esc` closes (with
-> save-on-close for `/edit`). `Ctrl-O` from the home prompt opens a file
-> picker; the chosen path is spliced into the prompt as an `@<path>`
-> reference. `/lsp` (the LSP-installer's multi-select picker) is now driven
+> `Ctrl-O` from the home prompt opens a file picker; the chosen path is
+> spliced into the prompt as an `@<path>` reference. `/lsp` (the
+> LSP-installer's multi-select picker) is now driven
 > by portable keys end-to-end. Plugin-bound home accelerators (the command
 > palette's `/` chord and any plugin keybindings) are **not** routed in the
 > GUI yet — open those screens by their slash command, or use the TUI. Also
@@ -156,13 +153,10 @@ provider has a key on file.
 | `/save-canvas [path] [--block N] [--open]` | Write the most recent HTML canvas to a file. Default path is `savvagent-canvas-<id>.html` in the current directory. `--block N` targets a specific canvas by id; `--open` opens the file in the system browser after writing. |
 | `/resume` | Re-open a previously-saved transcript and continue from where it ended. With no args opens a picker; takes an absolute path or a bare basename relative to `~/.savvagent/transcripts/`. |
 | `/clear` | Reset the conversation history (and the visible log). |
-| `/view <path>` | Open a file in the read-only popup editor. `@<path>` in the prompt also works as an inline shortcut. |
-| `/edit <path>` | Open a file for editing (Ctrl-S saves, Esc closes). Syntax highlighting follows the active theme. |
 | `/tools` | List the tools registered with the current host, with their permission verdict. |
 | `/bash <cmd>` | Run a shell command through `tool-bash`. `--net` / `--no-net` toggle network access for that single call. |
 | `/sandbox` | Show or change OS-level sandbox settings; `/sandbox on` / `/sandbox off` persist to `~/.savvagent/sandbox.toml`. |
 | `/prompt-keybindings` | Modal listing the keybindings active in the main prompt input. |
-| `/editor-keybindings` | Modal listing the keybindings active inside `view-file` / `edit-file`. |
 | `/quit` | Exit. |
 
 `@` opens a file picker that inserts `@path` into the prompt.
