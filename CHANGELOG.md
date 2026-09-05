@@ -8,6 +8,15 @@ boundary changes and PATCH captures fixes).
 
 ## [Unreleased]
 
+## 0.20.2 - 2026-09-05
+
+### Added
+
+- **Added the `tui-engineer` Claude Code skill.** `.claude/skills/tui-engineer/SKILL.md` documents
+  project-specific ratatui/crossterm conventions (redraw discipline, the `HostSlot` host-swap
+  pattern, `Effect` dispatch boundaries, async event-loop guidance, and TUI test patterns) for
+  anyone building or reviewing `crates/savvagent`'s terminal UI. (#24)
+
 ## 0.20.1 - 2026-09-05
 
 ### Changed
