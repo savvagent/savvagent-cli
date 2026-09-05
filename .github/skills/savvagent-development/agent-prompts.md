@@ -96,8 +96,8 @@ task tool:
       the host-swap RwLock rule (no .await under the read guard)?
     - Does a task adding/modifying a streaming provider path include a step preserving the
       ProgressDispatcher forwarder-abort pattern?
-    - Does any task try to give Host a provider registry, or put turn-loop logic outside
-      savvagent-host?
+    - Does any task add a *second*, ad hoc provider registry or hardcode provider selection around
+      `Host`'s existing pool APIs, or put turn-loop logic outside savvagent-host?
     - Does a task changing a public interface (SPP wire format, tool schema, plugin ABI, slash
       command, env var, on-disk format) call out whether it's additive or breaking, per
       Non-Negotiable Rule 6?

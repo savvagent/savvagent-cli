@@ -178,7 +178,7 @@ has more than a one-sentence AC → STOP. Write the spec. The fast-path is for g
 | ---------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
 | "It's only 3 files"                                               | Fast-path caps at 2. Three files → spec.                                                                                        |
 | "The new MCP tool is tiny"                                        | A new tool is a new public interface with its own input schema and description an LLM has never read the docs for. Spec.        |
-| "I'll add a provider registry to `Host` for this one case"        | The host only ever sees `Box<dyn ProviderClient>`; a registry inside the host is a design defect the architect review will flag. |
+| "I'll add a provider registry to `Host` for this one case"        | `Host` already owns a provider pool with proper APIs (`add_provider`/`remove_provider`/`set_active_provider`, `crates/savvagent-host/src/session.rs`) — route through those. Adding a *second*, ad hoc registry or hardcoding provider selection around the pool is the design defect the architect review will flag. |
 | "I'll hold the `RwLock` across this one await, it's quick"        | That's the exact bug class the host-swap rule exists to prevent. Spec it, or don't do it.                                        |
 | "The type fix incidentally fixes a bug"                           | If behavior changes, you need the spec to record what it changed and why.                                                         |
 | "I'll fast-path the first sub-change and spec the rest"           | If the work splits into sub-changes, write the spec. Multi-step work doesn't fast-path.                                          |
@@ -943,9 +943,10 @@ Stop the pipeline and return control to the developer when ANY of these is true:
 7. The AC contradicts the spec/plan you built (mid-flight requirements change).
 8. An agent review surfaces a security finding (secrets, injection, sandbox-escape, PII) —
    especially one touching the keyring, `tool-bash`, `tool-web`, or the plugin ABI trust boundary.
-9. A proposed change would add a provider registry inside `Host`, hold the host-swap `RwLock` across
-   an `.await`, drop the `ProgressDispatcher` forwarder-abort pattern, write a secret to disk in
-   plaintext, or widen a tool/plugin's reach (filesystem, network, process spawning) without an
+9. A proposed change would add a second, ad hoc provider registry bypassing `Host`'s existing pool
+   APIs, hold the host-swap `RwLock` across an `.await`, drop the `ProgressDispatcher`
+   forwarder-abort pattern, write a secret to disk in plaintext, or widen a tool/plugin's reach
+   (filesystem, network, process spawning) without an
    explicit design decision — these are not negotiable design choices.
 10. Out-of-band verification (Phase 5 step 15) fails after a green merge.
 11. The release (Phase 4 step 12) fails to publish cleanly, or a platform artifact is missing at
@@ -1013,7 +1014,7 @@ explicitly.
 | "cargo test --workspace is green, it's shipped"                        | The TUI's runtime tool-spawn, a plugin example, and the actual release artifacts are not test outputs. Verify them at #15–16.                       |
 | "I'll skip the plan doc, the code is self-documenting"                 | The plan repository IS this project's history. Commit the doc.                                                                                     |
 | "I'll skip the record-as-shipped commit"                               | The spec Status and the plan's checkboxes are how the docs track shipped state. Close the loop.                                                     |
-| "I'll add a provider registry to Host, it's simpler"                   | The host only ever sees `Box<dyn ProviderClient>`. A registry inside the host is the exact anti-pattern the transport split exists to prevent.       |
+| "I'll add a provider registry to Host, it's simpler"                   | `Host` already owns a provider pool with the right APIs for this (`add_provider`/`remove_provider`/`set_active_provider`). A *second*, ad hoc registry or hardcoded selection bypassing that pool is the exact anti-pattern the transport split exists to prevent.       |
 | "Holding the RwLock across this one await is fine, it's fast"          | That's the exact bug class the host-swap rule exists to prevent — it doesn't matter how fast the await resolves.                                    |
 | "I'll skip the ProgressDispatcher abort, the subscriber will just idle" | It deadlocks the caller's mpsc waiter. Abort the forwarder task after the request future resolves, every time.                                       |
 | "I'll log the API key for debugging"                                   | Secrets never cross a trust boundary into logs, errors, transcripts, or responses. Keyring only.                                                    |
