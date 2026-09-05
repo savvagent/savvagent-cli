@@ -10,11 +10,14 @@ leaving zero dead code and zero orphaned documentation.
 dependency order so every task ends at a green build:
 
 1. `crates/savvagent` ratatui frontend: the `internal:view-file`/`internal:edit-file`/
-   `internal:editor-keybindings` plugins, `App::editor`/`active_file_path` and their supporting
-   methods, the legacy `InputMode::ViewingFile`/`EditingFile` path, and the `main.rs`/`ui.rs`
-   marker-screen dispatch/render branches.
+   `internal:editor-keybindings` plugins, `App::editor` and its supporting methods, the legacy
+   `InputMode::ViewingFile`/`EditingFile` path, and the `main.rs`/`ui.rs` marker-screen
+   dispatch/render branches. `App::active_file_path`/`clear_active_editor()` are deliberately left
+   in place here — the egui frontend still reads/calls them until step 2 below.
 2. `crates/savvagent` egui frontend: `editor_buffer`, `save_editor_buffer`, the marker-screen
-   sync/paint branches, and the `egui_app/widgets/editor.rs` + `editor_theme.rs` widgets.
+   sync/paint branches, the `egui_app/widgets/editor.rs` + `editor_theme.rs` widgets, and (once
+   those are gone) the now-unreferenced `App::active_file_path`/`clear_active_editor()` left over
+   from step 1.
 3. `crates/savvagent-plugin` (the plugin ABI) + `crates/savvagent-plugin-wasm` (its WASM adapter):
    once no code in either frontend constructs or matches `Effect::SaveActiveFile` /
    `ScreenArgs::ViewFile` / `ScreenArgs::EditFile`, the variants themselves come out.
@@ -35,11 +38,13 @@ for the eventual release.
 **Spec:** `docs/superpowers/specs/2026-09-05-remove-view-edit-design.md` — read it first. This plan
 implements it exactly.
 
-**Release line:** next MINOR release after `v0.19.3` (currently `v0.20.0`, but **confirm the actual
-next-unclaimed MINOR against `origin/main`'s `Cargo.toml` at release-cut time** — another PR may
-already have claimed `0.20.0` by then, in which case this ships as the MINOR after that one). This
-is a **MINOR** bump, not a PATCH, because it is a breaking change to the slash-command surface and
-the plugin ABI (Non-Negotiable Rule 6 — see the spec's "Public-interface changes" section).
+**Release line:** `v0.20.0` is already claimed by open PR #29 (`release/0-20-0`, branched from the
+command-palette PR #19) as of this plan's writing — so this change ships as **`v0.21.0`**, the MINOR
+after that. **Confirm the actual next-unclaimed MINOR against `origin/main`'s `Cargo.toml` at
+release-cut time regardless** — PR #29 may or may not have merged by then, and another PR could
+claim a MINOR in between. This is a **MINOR** bump, not a PATCH, because it is a breaking change to
+the slash-command surface and the plugin ABI (Non-Negotiable Rule 6 — see the spec's
+"Public-interface changes" section).
 
 **Branch:** `plugin/remove-view-edit`
 
@@ -91,7 +96,10 @@ the plugin ABI (Non-Negotiable Rule 6 — see the spec's "Public-interface chang
       `Box::new(builtin::view_file::ViewFilePlugin::new())`) and the "PR 4 adds: view-file,
       edit-file" comment. Update `register_builtins_pr8_complete`'s expected-id list (remove
       `internal:edit-file`, `internal:editor-keybindings`, `internal:view-file`) and its expected
-      count (`assert_eq!(set.plugins.len(), 30)` → `27`).
+      count (`assert_eq!(set.plugins.len(), 30)` → `27`). Also update the separate registry-size
+      assertion later in the same test — `assert_eq!(reg.len(), 35, ...)` → `32` (30 non-provider +
+      4 provider + 1 hook = 35 currently; 27 + 4 + 1 = 32 after this removal) — this is a distinct
+      assertion from `set.plugins.len()` and is easy to miss.
 - [ ] In `crates/savvagent/src/plugin/builtin/mod.rs`: remove the `pub mod edit_file;`,
       `pub mod editor_keybindings;`, `pub mod view_file;` declarations and their doc-comment
       mentions.
@@ -118,10 +126,17 @@ the plugin ABI (Non-Negotiable Rule 6 — see the spec's "Public-interface chang
 - [ ] In `crates/savvagent/src/app.rs`: remove the `InputMode::ViewingFile`/`InputMode::EditingFile`
       variants and their doc comments; the `/view`/`/edit` `Command` entries in `refresh_commands`;
       the `editor_theme_for_active`/`borrow_editor_theme`/`language_for_path` helper functions; the
-      `load_file_into_editor`/`clear_active_editor`/legacy `open_file`/`save_file` methods; the
-      `editor: Option<Editor>` and `active_file_path: Option<PathBuf>` fields and their
-      initializers; the `use ratatui_code_editor::editor::Editor;` import; the stale `/view` prefill
-      test; and the `input_mode_label()` match arms for the two removed `InputMode` variants.
+      `load_file_into_editor`/legacy `open_file`/`save_file` methods; the `editor: Option<Editor>`
+      field and its initializer; the `use ratatui_code_editor::editor::Editor;` import; the stale
+      `/view` prefill test; and the `input_mode_label()` match arms for the two removed `InputMode`
+      variants. **Do NOT remove `active_file_path: Option<PathBuf>` or the `clear_active_editor()`
+      method yet** — `crates/savvagent/src/egui_app/widgets/editor.rs:145` still reads
+      `app.active_file_path` and `crates/savvagent/src/egui_app/mod.rs:587` still calls
+      `self.app.clear_active_editor()`, and the egui side isn't deleted until Task 2. Removing
+      either now breaks `cargo build -p savvagent --all-targets` at the end of *this* task, since
+      both frontends live in the same crate. Leaving them in place is safe: after this task's other
+      deletions, nothing in the ratatui path still sets `active_file_path` to `Some(_)`, so it's
+      inert (always `None`) for the one commit until Task 2 finishes the removal.
 - [ ] In `crates/savvagent/src/main.rs`: remove the `view-file`/`edit-file` marker-screen
       pre-dispatch routing block (the `if top_id == "view-file" || top_id == "edit-file" { ... }`
       block that routes keys into `app.editor`) and the legacy `InputMode::ViewingFile`/
@@ -170,6 +185,13 @@ the plugin ABI (Non-Negotiable Rule 6 — see the spec's "Public-interface chang
 - [ ] Delete `crates/savvagent/src/egui_app/widgets/editor.rs` and
       `crates/savvagent/src/egui_app/widgets/editor_theme.rs` in full (including their inline
       `#[cfg(test)]` modules).
+- [ ] In `crates/savvagent/src/app.rs`: now that the egui widgets above no longer reference them,
+      remove the `active_file_path: Option<PathBuf>` field and its initializer, and the
+      `clear_active_editor()` method (both deliberately left in place by Task 1 — see that task's
+      note — because `egui_app/widgets/editor.rs:145` and `egui_app/mod.rs:587` still referenced
+      them until the deletions above). Confirm via
+      `grep -rn "active_file_path\|clear_active_editor" crates/savvagent/src` that only the
+      definition sites existed before this step (zero remaining call sites in either frontend).
 - [ ] Run `cargo build -p savvagent --all-targets` and fix any remaining compile errors. At this
       point, verify by grep that no code in `crates/savvagent` still constructs or matches
       `Effect::SaveActiveFile`, `ScreenArgs::ViewFile`, or `ScreenArgs::EditFile`:
@@ -316,8 +338,9 @@ the plugin ABI (Non-Negotiable Rule 6 — see the spec's "Public-interface chang
 
 Per `RELEASING.md` and this skill's Non-Negotiable Rule 8, after this task's PR merges to `main`,
 open a separate `release/X-Y-Z` PR: confirm the actual next-unclaimed MINOR version against
-`origin/main`'s current `Cargo.toml` (see the Release line note above — another PR may have already
-claimed the version this plan assumed), bump `workspace.package.version` (and matching
+`origin/main`'s current `Cargo.toml` (see the Release line note above — PR #29, `release/0-20-0`,
+may already have merged by then, in which case this ships as `v0.21.0`; if not, coordinate rather
+than both PRs claiming `0.20.0`), bump `workspace.package.version` (and matching
 `workspace.dependencies` versions), move the `## [Unreleased]` content (including this task's
 `### Removed` entry) under the new version heading in `CHANGELOG.md`, then tag and push once that PR
 merges. Because this change is breaking (Non-Negotiable Rule 6), the bump **must** be MINOR, not
