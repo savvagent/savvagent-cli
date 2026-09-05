@@ -57,9 +57,9 @@ fn paint_screen_overlay(state: &mut SavvagentApp, ctx: &egui::Context, palette: 
     let (glyph_w, glyph_h) = ctx.fonts(|f| (f.glyph_width(&font, 'M'), f.row_height(&font)));
     let avail = ctx.available_rect(); // central area below/above panels already reserved
 
-    // Extract everything we need from the screen up-front so the immutable
-    // borrow on `state.app` ends before we mutably borrow `state.editor_buffer`
-    // inside the area closure. The screen's `render(region)` is the only call
+    // Extract everything we need from the screen up-front so the screen's
+    // `render(region)` output can be painted without borrowing `state.app`
+    // across the egui closure. The screen's `render(region)` is the only call
     // that touches per-frame screen state, and screens are owned by the stack,
     // so the cloned outputs (lines/tips/id/layout) are stable for this frame.
     let (layout, id, lines, tips, geom) = {
@@ -110,16 +110,6 @@ fn paint_screen_overlay(state: &mut SavvagentApp, ctx: &egui::Context, palette: 
             if let Some(t) = &title {
                 ui.label(egui::RichText::new(t).strong());
                 ui.separator();
-            }
-            // Plan 3: view-file/edit-file marker screens get the egui
-            // code editor. The buffer lives on SavvagentApp; if it
-            // hasn't loaded yet (file missing, IO error), the screen
-            // paints empty and the screen's `tips()` still shows.
-            if id == "view-file" || id == "edit-file" {
-                if let Some(buf) = state.editor_buffer.as_mut() {
-                    let editable = id == "edit-file";
-                    crate::egui_app::widgets::editor::paint_editor(ui, buf, palette, editable);
-                }
             }
             for line in &lines {
                 ui.label(styled_line_to_job(line, palette, FONT_SIZE));
