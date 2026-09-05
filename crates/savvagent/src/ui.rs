@@ -339,7 +339,7 @@ pub fn render(app: &mut App, frame: &mut Frame, frame_data: &HomeFrameData) {
         if is_file_screen {
             paint_file_screen(frame, area, app, palette, top_id == "edit-file");
         } else {
-            paint_screen(frame, area, top_screen, layout, palette);
+            paint_screen(frame, area, chunks[4].y, top_screen, layout, palette);
         }
     }
 
@@ -1150,8 +1150,11 @@ fn line_block(prefix: &str, text: &str, color: Color, palette: Palette) -> Line<
 ///
 /// For `CenteredModal`, the host draws the border and title so the
 /// screen's `render` output fills the inner content area.
-/// For `Fullscreen` and `BottomSheet`, content fills the computed area
-/// directly.
+/// For `Fullscreen`, content fills the computed area directly.
+/// For `BottomSheet`, content is anchored directly above the prompt
+/// textarea (`input_top`) rather than the bottom of the whole terminal —
+/// this is the inline `/`-command-palette-style overlay: the input row
+/// stays visible immediately below the sheet instead of being covered.
 ///
 /// Every layout punches a hole with [`Clear`] and then fills its region
 /// with `palette.base_style()` so the modal sits on a uniform theme
@@ -1214,6 +1217,7 @@ fn paint_file_screen(
 fn paint_screen(
     f: &mut Frame,
     area: Rect,
+    input_top: u16,
     screen: &dyn savvagent_plugin::Screen,
     layout: &savvagent_plugin::ScreenLayout,
     palette: Palette,
@@ -1307,7 +1311,12 @@ fn paint_screen(
         }
         ScreenLayout::BottomSheet { height } => {
             let h = (*height).min(area.height);
-            let sheet = Rect::new(area.x, area.y + area.height - h, area.width, h);
+            // Anchor the sheet's bottom edge to the top of the prompt
+            // textarea (not `area.y + area.height`) so it reads as an
+            // inline list directly above the input, with the input row
+            // itself left unobscured below it.
+            let bottom = input_top.max(area.y);
+            let sheet = Rect::new(area.x, bottom.saturating_sub(h).max(area.y), area.width, h);
             f.render_widget(Clear, sheet);
             f.buffer_mut().set_style(sheet, palette.base_style());
             let region = crate::plugin::convert::rect_to_region(sheet);
