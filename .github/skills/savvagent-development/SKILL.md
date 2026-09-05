@@ -51,9 +51,11 @@ prerequisite even for TUI-only work, since that binary is a `[[bin]]` target ins
 that the cross-platform release binaries built by `cargo-dist` still work, or that a released crate
 version is installable. Whatever this change touches, verify it explicitly (Phase 5).
 
-**A merge to `main` is not done until a release is cut.** Every PR that lands on `main` triggers a
-version bump, tag, and published GitHub Release with build artifacts (Phase 4 step 12). There is no
-"batch several PRs into one release later" carve-out in this workflow — see Non-Negotiable Rule 8.
+**A merge to the trunk branch (`main` — CI also triggers on `master` for compatibility, but `main` is
+this repo's actual default branch) is not done until a release is cut.** Every PR that lands on trunk
+triggers a version bump, tag, and published GitHub Release with build artifacts (Phase 4 step 12).
+There is no "batch several PRs into one release later" carve-out in this workflow — see
+Non-Negotiable Rule 8.
 
 **Violating the letter of the workflow is violating the spirit.**
 
@@ -110,12 +112,12 @@ These hold for every run of this skill, no exceptions, no fast-path carve-outs:
    dispatched through `ToolRegistry` (stdio child process or in-process handler), never bypassed. A
    brief that asks for something violating one of these is a brief to escalate on (Stop & Escalate
    condition 9), not to implement.
-8. **Every merge to `main` cuts a release.** No feature/fix PR merges and is considered shipped
-   without a version bump, a `CHANGELOG.md` entry, a pushed `vX.Y.Z` tag, and a published GitHub
-   Release with build artifacts, following `RELEASING.md`'s manual process. This is not optional and
-   not batchable across PRs — but "cut the release" means opening the dedicated release PR (Phase 4
-   step 12) and completing the tag/release for it immediately after the feature/fix PR merges, not
-   necessarily folding the version bump into the same commit or PR.
+8. **Every merge to the trunk branch (`main`) cuts a release.** No feature/fix PR merges and is
+   considered shipped without a version bump, a `CHANGELOG.md` entry, a pushed `vX.Y.Z` tag, and a
+   published GitHub Release with build artifacts, following `RELEASING.md`'s manual process. This is
+   not optional and not batchable across PRs — but "cut the release" means opening the dedicated
+   release PR (Phase 4 step 12) and completing the tag/release for it immediately after the
+   feature/fix PR merges, not necessarily folding the version bump into the same commit or PR.
 
 ## When to Use This Skill vs. Alternatives
 
@@ -188,7 +190,7 @@ has more than a one-sentence AC → STOP. Write the spec. The fast-path is for g
 | Convention            | Value                                                                                                                                                                                                                                                                                                                     |
 | ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Repo                   | `savvagent/savvagent-cli` — pass `--repo savvagent/savvagent-cli` on `gh` commands run from a worktree or outside the checkout.                                                                                                                                                                                          |
-| Trunk                  | `main`. **All** work happens in a worktree; **all** main-branch changes land via merged PRs. No direct commits, pushes, or merges to `main` outside a PR (Non-Negotiable Rules 1–2).                                                                                                                                     |
+| Trunk                  | `main` — this repo's actual default branch (`ci.yml` also triggers on `master` for backward compatibility, but there is no `master` branch in active use here; treat every "trunk"/"main" reference in this skill as meaning `main`). **All** work happens in a worktree; **all** main-branch changes land via merged PRs. No direct commits, pushes, or merges to `main` outside a PR (Non-Negotiable Rules 1–2).                                                                                                                                     |
 | Worktree               | **Required.** `git worktree add .claude/worktrees/<branch> -b <branch> origin/main` — worktrees live **inside the repo** at `.claude/worktrees/<branch>` (already gitignored; if `<branch>` contains a `/`, e.g. `release/0-20-0`, the worktree path nests the same way — `.claude/worktrees/release/0-20-0` — there is no flattening) — **never `git add .`** in the main checkout. Branch off `origin/main`, never local `main` (see Phase 0 trunk-sync). Every code edit, commit, and push happens from inside this worktree. |
 | Branch name            | `<area>/<kebab-slug>` — area is a crate short name (e.g. `host`, `protocol`, `mcp`, `provider`, `tool-fs`, `tool-lsp`, `canvas`, `plugin` — use the crate's own directory-name suffix under `crates/` for any crate not listed, such as `provider-openai`, `provider-local`, `tool-bash`, `tool-grep`, `tool-web`, `fence`) or a theme (`ci`, `docs`, `release`).                                                                                                                                                |
 | Commit format          | `<scope>: <subject>` — scope is a crate directory or area, e.g. `savvagent-host:`, `savvagent-protocol:`, `savvagent-mcp:`, `provider-anthropic:`, `tool-fs:`, `tool-lsp:`, `savvagent-canvas:`, `docs:`, `ci:`, `release:` — for any crate not listed, use its own directory name under `crates/` as the scope (`provider-openai:`, `provider-local:`, `tool-bash:`, `tool-grep:`, `tool-web:`, `savvagent-fence:`, etc.). Squash-merge to `main` via PR.                                                                    |
@@ -753,10 +755,10 @@ gh pr merge <PR> --squash --delete-branch
 
 ### Step 12: Cut the release (mandatory — Non-Negotiable Rule 8)
 
-**Every merge to `main` cuts a release.** This is not optional, not batchable, and not skippable for
-"small" PRs. Follow `RELEASING.md`'s manual process (release-plz automation is currently broken
-upstream — see that file), from a fresh worktree off the just-updated `main`, itself landing via its
-own PR:
+**Every merge to the trunk branch (`main`) cuts a release.** This is not optional, not batchable, and
+not skippable for "small" PRs. Follow `RELEASING.md`'s manual process (release-plz automation is
+currently broken upstream — see that file), from a fresh worktree off the just-updated `main`,
+itself landing via its own PR:
 
 ```bash
 cd <main-checkout-root>
