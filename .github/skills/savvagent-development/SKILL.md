@@ -189,7 +189,7 @@ has more than a one-sentence AC → STOP. Write the spec. The fast-path is for g
 | ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Repo                   | `savvagent/savvagent-cli` — pass `--repo savvagent/savvagent-cli` on `gh` commands run from a worktree or outside the checkout.                                                                                                                                                                                          |
 | Trunk                  | `main`. **All** work happens in a worktree; **all** main-branch changes land via merged PRs. No direct commits, pushes, or merges to `main` outside a PR (Non-Negotiable Rules 1–2).                                                                                                                                     |
-| Worktree               | **Required.** `git worktree add .claude/worktrees/<branch> -b <branch> origin/main` — worktrees live **inside the repo** at `.claude/worktrees/<branch>` (already gitignored) — **never `git add .`** in the main checkout. Branch off `origin/main`, never local `main` (see Phase 0 trunk-sync). Every code edit, commit, and push happens from inside this worktree. |
+| Worktree               | **Required.** `git worktree add .claude/worktrees/<branch> -b <branch> origin/main` — worktrees live **inside the repo** at `.claude/worktrees/<branch>` (already gitignored; if `<branch>` contains a `/`, e.g. `release/0-20-0`, the worktree path nests the same way — `.claude/worktrees/release/0-20-0` — there is no flattening) — **never `git add .`** in the main checkout. Branch off `origin/main`, never local `main` (see Phase 0 trunk-sync). Every code edit, commit, and push happens from inside this worktree. |
 | Branch name            | `<area>/<kebab-slug>` — area is a crate short name (e.g. `host`, `protocol`, `mcp`, `provider`, `tool-fs`, `tool-lsp`, `canvas`, `plugin` — use the crate's own directory-name suffix under `crates/` for any crate not listed, such as `provider-openai`, `provider-local`, `tool-bash`, `tool-grep`, `tool-web`, `fence`) or a theme (`ci`, `docs`, `release`).                                                                                                                                                |
 | Commit format          | `<scope>: <subject>` — scope is a crate directory or area, e.g. `savvagent-host:`, `savvagent-protocol:`, `savvagent-mcp:`, `provider-anthropic:`, `tool-fs:`, `tool-lsp:`, `savvagent-canvas:`, `docs:`, `ci:`, `release:` — for any crate not listed, use its own directory name under `crates/` as the scope (`provider-openai:`, `provider-local:`, `tool-bash:`, `tool-grep:`, `tool-web:`, `savvagent-fence:`, etc.). Squash-merge to `main` via PR.                                                                    |
 | AI attribution         | **Never.** No `Co-Authored-By`, no "Generated with", no `🤖`/AI credit markers in commits, PR bodies, comments, or docs — direct work or subagent work (Non-Negotiable Rule 3).                                                                                                                                            |
@@ -617,7 +617,8 @@ flagged, minor issues left unfixed. Populates the Phase 6 summary.
 
 Dispatch using the **`Final Code Review`** template in [`agent-prompts.md`](agent-prompts.md) —
 **read that file now and paste the template verbatim.** `agent_type: "code-review"`. Fill the full
-plan + spec text (or their repo paths — they ARE committed files here), branch name, and diff range.
+plan + spec text inline (never just their repo paths — every dispatch prompt must be fully
+self-contained), branch name, and diff range.
 
 If issues, one fix round then re-review. If still failing → escalate.
 
@@ -760,8 +761,8 @@ own PR:
 ```bash
 cd <main-checkout-root>
 git checkout main && git pull --ff-only
-git worktree add .claude/worktrees/release-X-Y-Z -b release/X-Y-Z origin/main
-cd .claude/worktrees/release-X-Y-Z
+git worktree add .claude/worktrees/release/X-Y-Z -b release/X-Y-Z origin/main
+cd .claude/worktrees/release/X-Y-Z
 ```
 
 `X-Y-Z` is the dashed form of the version (dots aren't valid in a `<kebab-slug>` — e.g. `v0.20.0`
@@ -807,7 +808,7 @@ cd <main-checkout-root>
 git checkout main && git pull --ff-only
 git branch -d <branch>                              # -D only if force needed and intentional
 git worktree remove .claude/worktrees/<branch>       # required — worktrees live inside the repo
-# e.g. for the release worktree above: git worktree remove .claude/worktrees/release-X-Y-Z
+# e.g. for the release worktree above: git worktree remove .claude/worktrees/release/X-Y-Z
 ```
 
 **Record-as-shipped (mandatory, do not skip):** in a fresh worktree off the updated `main` — the
