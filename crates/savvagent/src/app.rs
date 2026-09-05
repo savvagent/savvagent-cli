@@ -825,6 +825,31 @@ pub struct App {
     /// Per-process session id, generated at startup. Used as the
     /// `session_id` field of every user-hook stdin payload.
     pub session_id: String,
+    /// The OS command used to hand a URL to the user's default browser
+    /// (`xdg-open` / `open` / `start`). Seeded by [`App::new`] from
+    /// [`default_url_opener`].
+    ///
+    /// This is a field rather than an inline `cfg!` chain at the call sites
+    /// so tests can point it at a harmless binary. Both `OpenUrl` paths
+    /// (`canvas_input::apply_canvas_effects` and
+    /// `plugin::effects::apply_open_url`) spawn it fire-and-forget, so a
+    /// hard-coded opener means every `cargo test` run — and every save
+    /// under `bacon test` — launches a real browser window.
+    pub url_opener: String,
+}
+
+/// The OS command that hands a URL to the user's default browser.
+///
+/// Single source of truth for the platform choice; both `OpenUrl` paths read
+/// it through [`App::url_opener`] rather than repeating the `cfg!` chain.
+pub(crate) fn default_url_opener() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "open"
+    } else if cfg!(target_os = "windows") {
+        "start"
+    } else {
+        "xdg-open"
+    }
 }
 
 /// Compute the `scroll_y` value (number of wrapped rows hidden ABOVE the
@@ -1070,6 +1095,7 @@ impl App {
             )),
             transcript_path: std::sync::Arc::new(tokio::sync::RwLock::new(session_transcript_path)),
             session_id,
+            url_opener: default_url_opener().to_string(),
         };
         app.refresh_commands();
         app

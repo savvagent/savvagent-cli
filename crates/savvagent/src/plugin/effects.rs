@@ -1075,7 +1075,8 @@ async fn run_slash(
 /// Apply [`Effect::OpenUrl`]: launch the URL in the system browser or
 /// submit it as a follow-up user prompt, depending on `target`.
 ///
-/// Browser launch is fire-and-forget via `std::process::Command::new(…).spawn()`.
+/// Browser launch is fire-and-forget via `std::process::Command::new(…).spawn()`,
+/// using [`App::url_opener`] so tests can redirect it away from a real browser.
 /// Spawn errors are logged at `warn` level and surface as a styled note so
 /// the user knows something went wrong without crashing the TUI. There is
 /// no `submit_prompt` guard here — if the URL is malformed that is the
@@ -1084,14 +1085,10 @@ async fn run_slash(
 fn apply_open_url(app: &mut App, url: String, target: UrlTarget) {
     match target {
         UrlTarget::SystemBrowser => {
-            let cmd = if cfg!(target_os = "macos") {
-                "open"
-            } else if cfg!(target_os = "windows") {
-                "start"
-            } else {
-                "xdg-open"
-            };
-            if let Err(err) = std::process::Command::new(cmd).arg(&url).spawn() {
+            if let Err(err) = std::process::Command::new(&app.url_opener)
+                .arg(&url)
+                .spawn()
+            {
                 tracing::warn!(?err, %url, "apply_open_url: failed to open URL in system browser");
                 app.push_styled_note(savvagent_plugin::StyledLine::plain(
                     rust_i18n::t!("notes.open-url-failed", url = url).to_string(),
