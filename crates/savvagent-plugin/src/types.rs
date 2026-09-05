@@ -255,16 +255,6 @@ pub enum ScreenArgs {
         /// Ordered list of saved transcripts to display in the picker.
         transcripts: Vec<TranscriptHandle>,
     },
-    /// Open a read-only file viewer for the given path.
-    ViewFile {
-        /// Absolute or workspace-relative path of the file to display.
-        path: String,
-    },
-    /// Open an editor for the given path.
-    EditFile {
-        /// Absolute or workspace-relative path of the file to edit.
-        path: String,
-    },
     /// Open the installed-plugins manager screen.
     PluginsManager,
     /// Open the language picker, scrolled to the currently-active locale.
@@ -360,8 +350,6 @@ impl ScreenArgs {
             ScreenArgs::ThemePicker { .. } => Some("themes.picker"),
             ScreenArgs::ConnectPicker => Some("connect.picker"),
             ScreenArgs::ResumePicker { .. } => Some("resume.picker"),
-            ScreenArgs::ViewFile { .. } => Some("view-file"),
-            ScreenArgs::EditFile { .. } => Some("edit-file"),
             ScreenArgs::PluginsManager => Some("plugins.manager"),
             ScreenArgs::LanguagePicker { .. } => Some("language.picker"),
             ScreenArgs::ModelPicker { .. } => Some("model.picker"),
@@ -515,9 +503,6 @@ mod tests {
         let _theme = ScreenArgs::ThemePicker {
             current_slug: "dark".into(),
         };
-        let _view = ScreenArgs::ViewFile {
-            path: "/tmp/x.rs".into(),
-        };
         let _resume = ScreenArgs::ResumePicker {
             transcripts: vec![TranscriptHandle {
                 id: "t1".into(),
@@ -622,14 +607,6 @@ mod tests {
             }
             .screen_id(),
             Some("resume.picker")
-        );
-        assert_eq!(
-            ScreenArgs::ViewFile { path: "/x".into() }.screen_id(),
-            Some("view-file")
-        );
-        assert_eq!(
-            ScreenArgs::EditFile { path: "/x".into() }.screen_id(),
-            Some("edit-file")
         );
         assert_eq!(
             ScreenArgs::LanguagePicker {

@@ -744,8 +744,6 @@ fn screen_args_to_json(args: &ScreenArgs) -> String {
                 "saved_at_nanos": t.saved_at.nanos,
             })).collect::<Vec<_>>(),
         }),
-        ScreenArgs::ViewFile { path } => json!({"kind": "view-file", "path": path}),
-        ScreenArgs::EditFile { path } => json!({"kind": "edit-file", "path": path}),
         ScreenArgs::PluginsManager => json!({"kind": "plugins-manager"}),
         ScreenArgs::LanguagePicker { current_code } => json!({
             "kind": "language-picker",
@@ -899,8 +897,6 @@ mod tests {
                 current_slug: "dark".into(),
             },
             ScreenArgs::ConnectPicker,
-            ScreenArgs::ViewFile { path: "/x".into() },
-            ScreenArgs::EditFile { path: "/y".into() },
             ScreenArgs::PluginsManager,
             ScreenArgs::Changelog,
         ] {

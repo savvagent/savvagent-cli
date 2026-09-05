@@ -114,11 +114,6 @@ pub enum Effect {
         /// Stable identifier of the provider whose key to collect.
         provider_id: ProviderId,
     },
-    /// Persist the currently-open file editor's buffer to disk. Emitted
-    /// by the `edit-file` screen plugin on Ctrl-S. The runtime resolves
-    /// the target path from `App::active_file_path` and the buffer from
-    /// `App::editor`; if neither is populated the effect is a no-op.
-    SaveActiveFile,
     /// Enable or disable a registered plugin by id. The runtime updates its
     /// enabled-set, rebuilds derived indexes, and (if the plugin is
     /// [`crate::manifest::PluginKind::Optional`]) persists the new state
@@ -307,7 +302,6 @@ impl std::fmt::Debug for Effect {
                 .debug_struct("PromptApiKey")
                 .field("provider_id", provider_id)
                 .finish(),
-            Effect::SaveActiveFile => f.write_str("SaveActiveFile"),
             Effect::TogglePlugin { id, enabled } => f
                 .debug_struct("TogglePlugin")
                 .field("id", id)
