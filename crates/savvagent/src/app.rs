@@ -551,7 +551,6 @@ pub struct App {
 
     pub is_file_picker_active: bool,
     pub file_explorer: FileExplorer,
-    pub active_file_path: Option<PathBuf>,
 
     pub commands: Vec<Command>,
     pub command_index: usize,
@@ -979,7 +978,6 @@ impl App {
             last_transcript: None,
             is_file_picker_active: false,
             file_explorer,
-            active_file_path: None,
             commands: Vec::new(),
             command_index: 0,
             palette_filter: String::new(),
@@ -1549,11 +1547,6 @@ impl App {
     /// Hide the file-picker popup.
     pub fn close_file_picker(&mut self) {
         self.is_file_picker_active = false;
-    }
-
-    /// Clear the active file path bridge that the egui editor still reads.
-    pub fn clear_active_editor(&mut self) {
-        self.active_file_path = None;
     }
 
     /// Populate `transcript_entries` from `dir` and enter the picker mode.
