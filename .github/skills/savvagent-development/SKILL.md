@@ -19,8 +19,9 @@ If you are working in any other repository, use `general-development`.
 ## Why this shape
 
 The spine mirrors what this repository builds: savvagent-cli treats **everything as MCP-shaped** —
-a provider is just a `ProviderHandler`, a tool is just a stdio MCP server, wired together by a thin
-`Host` turn loop. The workflow below applies that same separation to the repo itself: a design spec
+a provider is just a `ProviderHandler`, a tool presents an MCP tool surface (usually a stdio server,
+sometimes an in-process handler), wired together by a thin `Host` turn loop. The workflow below
+applies that same separation to the repo itself: a design spec
 and a plan document first (the specification), implementation against them (the mechanical
 execution), and the repo's own test suite plus CI as the verifier.
 
@@ -102,10 +103,12 @@ These hold for every run of this skill, no exceptions, no fast-path carve-outs:
    features/breaking changes, PATCH for fixes — see `RELEASING.md`).
 7. **The host-swap and transport-boundary rules in `CLAUDE.md` outrank the task brief.** Per-turn
    worker tasks clone `Arc<Host>` under a brief read lock and drop the guard before any `.await` —
-   never hold the `RwLock` across an await. The `Host` only ever sees `Box<dyn ProviderClient>` and
-   must never gain a provider registry of its own. Tools are always stdio child processes owned by
-   `ToolRegistry`. A brief that asks for something violating one of these is a brief to escalate on
-   (Stop & Escalate condition 9), not to implement.
+   never hold the `RwLock` across an await (the same holds for `Host`'s own internal `pool`/
+   `active_provider` locks). Provider selection must go through `Host`'s pool APIs
+   (`add_provider`/`remove_provider`/`set_active_provider`), never hardcoded around them. Tools are
+   dispatched through `ToolRegistry` (stdio child process or in-process handler), never bypassed. A
+   brief that asks for something violating one of these is a brief to escalate on (Stop & Escalate
+   condition 9), not to implement.
 8. **Every merge to `main` cuts a release.** No feature/fix PR merges and is considered shipped
    without a version bump, a `CHANGELOG.md` entry, a pushed `vX.Y.Z` tag, and a published GitHub
    Release with build artifacts, following `RELEASING.md`'s manual process. This is not optional and
@@ -209,12 +212,17 @@ load-bearing subset for this workflow.
 ## Load-Bearing Invariants (get these right — every review step below checks them)
 
 These are not style rules; they are the invariants this repository is built around. `CLAUDE.md`
-explains the reasoning behind each — read it, and treat the list here as the checklist.
+explains the reasoning behind each — read it for context, but the exact mechanics below are verified
+against the current code (`CLAUDE.md`'s own phrasing can lag an evolving codebase, e.g. the provider
+pool in invariant 4 and the in-process tool path in invariant 5 are more nuanced in code than
+`CLAUDE.md`'s summary suggests); treat the list here as the checklist.
 
-1. **Everything is MCP-shaped.** A provider is just a `ProviderHandler` (`savvagent-mcp`); a tool is
-   just a stdio MCP server. Providers are linked **in-process by default** via
-   `InProcessProviderClient` — a standalone binary form (`savvagent-anthropic`, etc.) exists only for
-   wire-protocol debugging, not as the primary path.
+1. **Everything is MCP-shaped.** A provider is just a `ProviderHandler` (`savvagent-mcp`). Tools are
+   primarily stdio MCP servers, though built-in plugins may also register an in-process tool handler
+   directly with `ToolRegistry` (see invariant 5) — either shape presents the same `ToolDef` surface
+   to the turn loop. Providers are linked **in-process by default** via `InProcessProviderClient` — a
+   standalone binary form (`savvagent-anthropic`, etc.) exists only for wire-protocol debugging, not
+   as the primary path.
 2. **The turn loop lives in `Host`.** `Host::run_turn_streaming` (in `savvagent-host`) loops
    `provider.complete` → `tool_registry.call` until the model emits `end_turn`, forwarding
    `StreamEvent`s as it goes. Tool-use looping, session state, and project-context loading
@@ -224,13 +232,25 @@ explains the reasoning behind each — read it, and treat the list here as the c
    `Arc<RwLock<Option<Arc<Host>>>>`. Per-turn worker tasks clone the `Arc<Host>` under a brief read
    lock and **drop the guard before any `.await`** — never hold the `RwLock` across an await.
    `/connect` swaps the slot atomically. See `crates/savvagent/src/app.rs` and `crates/savvagent/src/tui.rs`.
-4. **The provider transport split is a hard boundary.** In-process (`InProcessProviderClient`) is the
-   default; MCP-over-HTTP (`rmcp`'s Streamable HTTP transport) is opt-in, selected only when
-   `SAVVAGENT_PROVIDER_URL` is set. `Host` only ever sees `Box<dyn ProviderClient>` and must never
-   know which path is active — **there is no provider registry inside the host.**
-5. **Tools are always stdio child processes, owned by `ToolRegistry`.** They're reaped on shutdown.
-   New tools are wired via `HostConfig::with_tool` in `crates/savvagent/src/main.rs`, mirroring
-   `crates/tool-fs`'s stdio-MCP-server shape.
+   The same discipline applies to `Host`'s own internal locks (`pool`, `active_provider`, invariant 4)
+   — never hold their guards across an `.await` either.
+4. **The provider transport split is a hard boundary per connection.** For any single provider
+   connection, in-process (`InProcessProviderClient`) is the default; MCP-over-HTTP (`rmcp`'s
+   Streamable HTTP transport) is opt-in, selected only when `SAVVAGENT_PROVIDER_URL` is set at
+   connect time. `Host` holds a provider **pool** (`pool: RwLock<HashMap<ProviderId, PoolEntry>>`,
+   `crates/savvagent-host/src/session.rs`) with an `active_provider` pointer that turns are routed to
+   — `/connect`/`add_provider`/`remove_provider`/`set_active_provider` manage entries in this pool.
+   This is a real registry, not a single `Box<dyn ProviderClient>` — do not describe it that way in
+   new code comments or docs; the invariant that still holds is per-entry transport selection, not
+   registry-freedom.
+5. **Tools are dispatched through `ToolRegistry`, which owns two paths: stdio child processes (the
+   default, one process per registered tool server, reaped on shutdown) and in-process handlers**
+   registered by built-in plugins via `Effect::RegisterInProcessTool` (looked up before the stdio
+   children map — see `crates/savvagent-host/src/tools.rs`). New *external* tools are wired via
+   `HostConfig::with_tool` in `crates/savvagent/src/main.rs`, mirroring `crates/tool-fs`'s
+   stdio-MCP-server shape; new *built-in* tools that don't need a separate process register
+   in-process instead. Either way, all tool dispatch must go through `ToolRegistry` — never call a
+   tool's implementation directly, bypassing the registry.
 6. **The `rmcp` `ProgressDispatcher` forwarder-abort pattern must be preserved.**
    `subscriber.next()` from `rmcp`'s `ProgressDispatcher` does **not** auto-close when the RPC
    completes. Forwarder tasks that pump progress notifications must `JoinHandle::abort()` after the
@@ -660,7 +680,7 @@ response, or `mode: "background"` for all three), regardless of size:
 | Reviewer                          | `agent_type`        | Why                                                                                                                                                                                                                                                                                                             |
 | ----------------------------------- | ---------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Rust-expert pass                  | `general-purpose`      | Idiomatic Rust: ownership/lifetimes, error handling, no `unwrap()` outside tests, no panics on untrusted input, `Send + Sync` async seams, `rmcp`/tokio usage, test placement — against this repo's conventions. This project also carries a `.claude/skills/rust-engineer` skill; paste its checklist into the dispatch prompt as additional reference, but the dedicated review is still mandatory. |
-| Architecture pass                 | `general-purpose`      | Architectural consistency: the everything-is-MCP-shaped separation, crate boundaries (`savvagent-protocol` has no I/O; `savvagent-mcp` owns the provider/tool traits; `savvagent-host` owns the turn loop; `crates/savvagent` is a thin shell), the host-swap `RwLock` rule, the provider transport split, no provider registry inside `Host`, spec/plan alignment.                        |
+| Architecture pass                 | `general-purpose`      | Architectural consistency: the everything-is-MCP-shaped separation, crate boundaries (`savvagent-protocol` has no I/O; `savvagent-mcp` owns the provider/tool traits; `savvagent-host` owns the turn loop; `crates/savvagent` is a thin shell), the host-swap `RwLock` rule, the provider transport split, provider selection routed through `Host`'s pool APIs (not hardcoded around them), spec/plan alignment.                        |
 | Independent security pass         | `security-review`      | Security of the actual diff. **Receives ONLY the diff** — never the spec/plan/brief/PR-body summary (Non-Negotiable Rule 5). Weighs keyring/secret handling, `tool-bash`/`tool-web` sandboxing, and plugin ABI trust boundaries hardest. See the Independent Security Review template in `agent-prompts.md`, and the mandatory-output-contract override in "How dispatch works in this environment" above. |
 
 Both `general-purpose` reviews the actual diff (commit range), not the summary. Treat their findings

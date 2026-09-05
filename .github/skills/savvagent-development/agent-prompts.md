@@ -195,8 +195,9 @@ task tool:
     - Extra work (built features not requested)
     - Misinterpretations (right feature, wrong way)
     - Repo-specific gotchas: an Arc<RwLock<...>> read guard held across an .await, a
-      ProgressDispatcher forwarder task never aborted, a provider registry sneaking into Host, an
-      unwrap() outside tests, a tool wired without going through ToolRegistry's stdio transport, a
+      ProgressDispatcher forwarder task never aborted, hardcoded provider-spec/selection logic
+      sneaking around Host's pool/routing (crates/savvagent-host/src/session.rs), an
+      unwrap() outside tests, a tool bypassing ToolRegistry's dispatch (stdio or in-process), a
       secret written to disk in plaintext (transcript JSON, logs, error messages) instead of the OS
       keyring, a public-interface change (SPP wire format, tool schema, plugin ABI, slash command)
       not flagged as additive/breaking.
@@ -293,7 +294,8 @@ task tool:
     - Async: Send + Sync seams, no blocking work in an async task, the host-swap RwLock rule (never
       hold Arc<RwLock<Option<Arc<Host>>>>'s read guard across an .await) if touched, the rmcp
       ProgressDispatcher forwarder-abort pattern if a streaming path is touched
-    - rmcp/MCP usage: tool input schemas well-typed, stdio transport wired through ToolRegistry, no
+    - rmcp/MCP usage: tool input schemas well-typed, tool dispatch routed through ToolRegistry
+      (stdio child process or registered in-process handler — either is fine, a bypass isn't), no
       HTTP creeping into what should be an in-process or stdio call
     - Tests: this repo has no database and no external-service test dependency — tests should be
       self-contained; a new tool needs coverage of its MCP schema/dispatch, a new provider needs
@@ -323,8 +325,11 @@ task tool:
       crates/savvagent is a thin TUI shell
     - The host-swap rule: Arc<RwLock<Option<Arc<Host>>>>, read lock held only briefly and dropped
       before any .await; /connect swaps the slot atomically
-    - The provider transport split: InProcessProviderClient is the default; MCP-over-HTTP is opt-in
-      via SAVVAGENT_PROVIDER_URL; Host only ever sees Box<dyn ProviderClient> and gains no registry
+    - The provider transport split: for any single connection, InProcessProviderClient is the
+      default; MCP-over-HTTP is opt-in via SAVVAGENT_PROVIDER_URL at connect time. Host holds a real
+      provider pool (pool: RwLock<HashMap<ProviderId, PoolEntry>>, active_provider pointer) that
+      /connect, add_provider, remove_provider, and set_active_provider manage — flag hardcoded
+      provider-selection logic bypassing that pool/routing, not the mere existence of the pool
     - Whether a public-interface change (SPP wire format, tool schema, plugin ABI, slash command, env
       var, on-disk transcript/keyring format) is additive, and if not, whether it is named in the
       spec, the plan, the CHANGELOG, and the PR body (Non-Negotiable Rule 6)
