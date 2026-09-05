@@ -9,7 +9,11 @@ handling, fix-loop caps, convergence rules); this file owns the prompt *text* th
 from your working memory (spec / plan / task text / report verbatim, plus the relevant Load-Bearing
 Invariants and Repository Conventions from `SKILL.md`). The `agent_type` and `mode` are named in
 each template's heading — honor them; see "How dispatch works in this environment" in `SKILL.md` for
-the mapping from this skill's role names to this CLI's actual `agent_type`s.
+the mapping from this skill's role names to this CLI's actual `agent_type`s. **Note:** the `task`
+tool and `agent_type`/`mode` fields referenced throughout this file belong to the *orchestrating*
+GitHub Copilot CLI running this skill — a different thing from savvagent-cli's own in-product `task`
+tool (`README.md`, `{ description, prompt, subagent_type }`), which is a runtime feature of the
+software being built, not the dispatch mechanism used to build it.
 
 `<ref>` below is the source reference: a GitHub issue (`savvagent/savvagent-cli#123`) or — on the
 ticketless path — the captured task brief.

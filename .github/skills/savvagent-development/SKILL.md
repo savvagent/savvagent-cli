@@ -106,10 +106,12 @@ These hold for every run of this skill, no exceptions, no fast-path carve-outs:
    must never gain a provider registry of its own. Tools are always stdio child processes owned by
    `ToolRegistry`. A brief that asks for something violating one of these is a brief to escalate on
    (Stop & Escalate condition 9), not to implement.
-8. **Every merge to `main` cuts a release.** No PR merges and is considered shipped without a
-   version bump, a `CHANGELOG.md` entry, a pushed `vX.Y.Z` tag, and a published GitHub Release with
-   build artifacts (Phase 4 step 12, following `RELEASING.md`'s manual process). This is not optional
-   and not batchable across PRs — cut the release as part of closing out the PR that necessitated it.
+8. **Every merge to `main` cuts a release.** No feature/fix PR merges and is considered shipped
+   without a version bump, a `CHANGELOG.md` entry, a pushed `vX.Y.Z` tag, and a published GitHub
+   Release with build artifacts, following `RELEASING.md`'s manual process. This is not optional and
+   not batchable across PRs — but "cut the release" means opening the dedicated release PR (Phase 4
+   step 12) and completing the tag/release for it immediately after the feature/fix PR merges, not
+   necessarily folding the version bump into the same commit or PR.
 
 ## When to Use This Skill vs. Alternatives
 
@@ -320,19 +322,31 @@ this is why the templates in `agent-prompts.md` say "paste verbatim, do not impr
    commit, or the release version bump), it does so through its own worktree + PR like everything
    else.
 
-Create a todo (via the `sql` tool's `todos` table) for each phase (1–6), plus one per plan task once
-the plan exists, and update `status` as you go (`pending` → `in_progress` → `done`/`blocked`). Use
-`todo_deps` to record that Phase 2 depends on Phase 1, each implementation task depends on the plan
-being committed, etc.
+Create a todo (via the orchestrating CLI's own `sql` tool and its session-scoped `todos` table — a
+capability of the CLI running this skill, not anything documented in this repo) for each phase (1–6),
+plus one per plan task once the plan exists, and update `status` as you go (`pending` →
+`in_progress` → `done`/`blocked`). Use `todo_deps` to record that Phase 2 depends on Phase 1, each
+implementation task depends on the plan being committed, etc. If the environment running this skill
+has no equivalent structured-todo tool, fall back to a plain checklist in the working notes (e.g. the
+plan file's own `- [ ]` boxes) — the requirement is visible progress tracking, not this specific
+tool.
 
 ## How dispatch works in this environment
 
-This skill is written for the GitHub Copilot CLI's `task` tool, not Claude Code's `Agent` tool —
-there is no `subagent_type` catalog with `rust-pro` / `architect-reviewer` / `security-auditor` /
-`code-reviewer` names. Every dispatch in this skill maps to a `task` tool call with one of this
-CLI's seven `agent_type`s (`explore`, `task`, `general-purpose`, `rubber-duck`, `code-review`,
-`security-review`, `research`). Use this table everywhere `agent-prompts.md` says
-"`subagent_type: X`" in the original template shape:
+This skill is written for the *orchestrating* GitHub Copilot CLI's `task` tool — the CLI agent
+running this skill — not Claude Code's `Agent` tool, and **not** the in-product `task` tool that
+savvagent-cli itself (the software being built) exposes to its own model via `.savvagent/agents/`
+markdown files (`README.md`'s "The `task` tool" section, `{ description, prompt, subagent_type }`,
+depth-capped by `SAVVAGENT_AGENT_MAX_DEPTH`). Those are two unrelated `task` tools that happen to
+share a name — one belongs to the orchestrating CLI (this skill's dispatch mechanism), the other is
+a runtime feature of the product under development. There is no `subagent_type` catalog with
+`rust-pro` / `architect-reviewer` / `security-auditor` / `code-reviewer` names in *either* one; the
+orchestrating CLI's `task` tool uses a fixed `agent_type` enum instead (below), while savvagent's own
+`task` tool populates its `subagent_type` enum from discovered agent files. Every dispatch in this
+skill maps to the orchestrating CLI's `task` tool call with one of this CLI's seven `agent_type`s
+(`explore`, `task`, `general-purpose`, `rubber-duck`, `code-review`, `security-review`, `research`).
+Use this table everywhere `agent-prompts.md` says "`subagent_type: X`" in the original template
+shape:
 
 | Role in this skill                                            | `agent_type`        | Why                                                                                                                     |
 | ----------------------------------------------------------------- | ---------------------- | --------------------------------------------------------------------------------------------------------------------- |
