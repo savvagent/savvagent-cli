@@ -865,7 +865,7 @@ mod tests {
         let p = locked_plugin_with_state(Arc::new(StubInstaller::ok()), UpdateState::CheckFailed);
         let lines = p.render_slot(BANNER_SLOT_ID, dummy_region());
         assert_eq!(lines.len(), 1);
-        assert!(!lines[0].spans[0].text.is_empty());
+        assert!(lines[0].spans[0].text.contains("Couldn't check"));
     }
 
     #[test]
@@ -1106,7 +1106,7 @@ mod tests {
         assert_eq!(effects.len(), 1);
         match &effects[0] {
             Effect::PushNote { line } => {
-                assert!(!line.spans[0].text.contains("Already on the latest version"));
+                assert!(line.spans[0].text.contains("Couldn't check"));
             }
             other => panic!("expected PushNote, got {other:?}"),
         }
