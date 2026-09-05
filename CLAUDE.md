@@ -85,7 +85,7 @@ The README has step-by-step recipes — the short version:
 
 ## Claude Code skills
 
-This repo's own committed skill location is `.github/skills/` (Copilot CLI's skill format, e.g. `savvagent-development`). `.claude/skills/<name>/SKILL.md` is the equivalent location for Claude-Code-compatible skills and is **committed**, not gitignored — `.claude/skills/rust-engineer/SKILL.md` is the existing precedent. Only repo-authored, project-specific skills belong there (mirroring or complementing `.github/skills/`, e.g. `rust-engineer`, `tui-engineer`).
+This repo's own committed skill location is `.github/skills/` (Copilot CLI's skill format, e.g. `savvagent-development`). `.claude/skills/<name>/SKILL.md` is the equivalent location for Claude-Code-compatible skills and is **committed**, not gitignored — `.claude/skills/rust-engineer/SKILL.md` is the existing precedent. Only repo-authored, project-specific skills belong there (mirroring or complementing `.github/skills/`, e.g. `rust-engineer`).
 
 Generic or personal Claude Code skills pulled from `~/.claude/skills/` (e.g. a symlinked `creating-tickets`) are **not** added under this repo's `.claude/skills/` — they stay personal and machine-local in the contributor's home directory, never checked into this tree. Nothing needs to be gitignored as a result, since a correctly-scoped personal skill is never placed under the repo in the first place.
 
