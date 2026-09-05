@@ -96,11 +96,6 @@ use-no-host                   = "No host is connected."
 use-invalid-id                = "'%{id}' is not a valid provider id."
 use-not-connected             = "Provider '%{name}' is not connected. Use /connect %{name} first."
 use-switched                  = "Switched active provider to %{name}. History preserved; new turns route here by default."
-file-not-found                = "Archivo no encontrado: %{path}"
-file-read-error               = "Error de lectura: %{err}"
-file-editor-error             = "Error del editor: %{err}"
-file-saved                    = "Guardado %{path}"
-file-write-error              = "Error de escritura: %{err}"
 
 [bash]
 net-allowed-once              = "bash red: permitido una vez"
