@@ -27,9 +27,10 @@ dependency order so every task ends at a green build:
 
 Tasks 1 and 2 are ordered so that egui's `ScreenArgs::ViewFile`/`EditFile` matches still compile
 after Task 1 removes the ratatui side (the enum variants aren't touched until Task 3, once nothing
-in `crates/savvagent` references them). Each task's final step is `cargo build --workspace
---all-targets` + `cargo test --workspace` + `cargo clippy --workspace --all-targets` + `cargo fmt
---all` + commit — no task ends with a broken build.
+in `crates/savvagent` references them). Tasks 1–2 run their build/test/clippy/fmt checks scoped to
+`-p savvagent` (the only crate either task touches); Tasks 3–5 run them `--workspace`, since those
+tasks touch other crates or the workspace root. Every task ends with a "Format and commit" step —
+no task ends with a broken build.
 
 **Tech Stack:** Rust 2024, the existing `savvagent-plugin` `Screen`/`Effect`/`ScreenArgs` traits and
 enums, `rust_i18n::t!` + the four TOML locale files under `crates/savvagent/locales/`, `cargo-dist`
@@ -38,11 +39,10 @@ for the eventual release.
 **Spec:** `docs/superpowers/specs/2026-09-05-remove-view-edit-design.md` — read it first. This plan
 implements it exactly.
 
-**Release line:** `v0.20.0` is already claimed by open PR #29 (`release/0-20-0`, branched from the
-command-palette PR #19) as of this plan's writing — so this change ships as **`v0.21.0`**, the MINOR
-after that. **Confirm the actual next-unclaimed MINOR against `origin/main`'s `Cargo.toml` at
-release-cut time regardless** — PR #29 may or may not have merged by then, and another PR could
-claim a MINOR in between. This is a **MINOR** bump, not a PATCH, because it is a breaking change to
+**Release line:** `v0.20.0` has already merged to `main` via PR #29 (`release/0-20-0`) — so this
+change ships as **`v0.21.0`**, the next MINOR. **Confirm the actual next-unclaimed MINOR against
+`origin/main`'s `Cargo.toml` at release-cut time regardless** — another PR could claim a MINOR
+between now and then. This is a **MINOR** bump, not a PATCH, because it is a breaking change to
 the slash-command surface and the plugin ABI (Non-Negotiable Rule 6 — see the spec's
 "Public-interface changes" section).
 
@@ -63,6 +63,7 @@ the slash-command surface and the plugin ABI (Non-Negotiable Rule 6 — see the 
   `crates/savvagent/src/plugin/mod.rs`, `crates/savvagent/src/plugin/builtin/mod.rs`,
   `crates/savvagent/src/plugin/builtin/themes/mod.rs`, `crates/savvagent/src/egui_app/mod.rs`,
   `crates/savvagent/src/egui_app/view.rs`, `crates/savvagent/src/egui_app/widgets/mod.rs`,
+  `crates/savvagent/src/egui_app/convert.rs`,
   `crates/savvagent-plugin/src/effect.rs`, `crates/savvagent-plugin/src/types.rs`,
   `crates/savvagent-plugin-wasm/src/adapter/interactive.rs`, `crates/savvagent/Cargo.toml`,
   `Cargo.toml` (root), `Cargo.lock`, `crates/savvagent/locales/{en,es,hi,pt}.toml`, `README.md`,
@@ -84,7 +85,7 @@ the slash-command surface and the plugin ABI (Non-Negotiable Rule 6 — see the 
 - Modify: `crates/savvagent/src/app.rs`, `crates/savvagent/src/main.rs`,
   `crates/savvagent/src/ui.rs`, `crates/savvagent/src/plugin/effects.rs`,
   `crates/savvagent/src/plugin/mod.rs`, `crates/savvagent/src/plugin/builtin/mod.rs`,
-  `crates/savvagent/src/plugin/builtin/themes/mod.rs`
+  `crates/savvagent/src/plugin/builtin/themes/mod.rs`, `crates/savvagent/src/egui_app/convert.rs`
 
 - [ ] Baseline: run `cargo test -p savvagent plugin::register_builtins_pr8_complete -- --nocapture`
       and confirm it currently passes with 30 plugin ids including `internal:view-file`,
@@ -103,14 +104,32 @@ the slash-command surface and the plugin ABI (Non-Negotiable Rule 6 — see the 
 - [ ] In `crates/savvagent/src/plugin/builtin/mod.rs`: remove the `pub mod edit_file;`,
       `pub mod editor_keybindings;`, `pub mod view_file;` declarations and their doc-comment
       mentions.
+- [ ] **Relocate the shared `xterm_256_rgb` helper before touching `editor_theme.rs`'s module
+      declaration or deleting the file.** `crates/savvagent/src/plugin/builtin/themes/editor_theme.rs`
+      is not exclusively editor-support code despite its name: its `xterm_256_rgb` function is
+      imported by `crates/savvagent/src/egui_app/convert.rs` (production code mapping every
+      `ratatui::style::Color` the egui frontend renders — conversation log, screens, all of it — to
+      an `egui::Color32`, not just code-editor syntax colors; see the spec's Premise corrections).
+      Cut `xterm_256_rgb`'s full body from `editor_theme.rs` and paste it into
+      `crates/savvagent/src/egui_app/convert.rs` as a private (`fn xterm_256_rgb`, no `pub(crate)`
+      needed since it's now file-local) helper near `ratatui_color_to_color32` (its only caller).
+      Update `convert.rs`'s `use crate::plugin::builtin::themes::editor_theme::xterm_256_rgb;`
+      import — remove it, since the function is now local. Only `build_editor_theme`,
+      `color_to_hex`, `indexed_to_hex`, and their tests remain in `editor_theme.rs` after this move
+      (`indexed_to_hex` stays behind — it's a thin `editor_theme.rs`-local wrapper over
+      `xterm_256_rgb` used only by `color_to_hex`, so it moves with the rest of the editor-only
+      code, not with `xterm_256_rgb`). Run `cargo build -p savvagent --all-targets` now, before
+      proceeding, to confirm the relocation alone compiles clean in both directions (nothing else
+      in `editor_theme.rs` is deleted yet at this point — only `xterm_256_rgb` has moved).
 - [ ] In `crates/savvagent/src/plugin/builtin/themes/mod.rs`: remove `pub mod editor_theme;`.
 - [ ] Delete `crates/savvagent/src/plugin/builtin/view_file/mod.rs`,
       `crates/savvagent/src/plugin/builtin/view_file/screen.rs`,
       `crates/savvagent/src/plugin/builtin/edit_file/mod.rs`,
       `crates/savvagent/src/plugin/builtin/edit_file/screen.rs`,
       `crates/savvagent/src/plugin/builtin/editor_keybindings/mod.rs`,
-      `crates/savvagent/src/plugin/builtin/themes/editor_theme.rs` (and the now-empty
-      `view_file/`/`edit_file/` directories).
+      `crates/savvagent/src/plugin/builtin/themes/editor_theme.rs` (now containing only
+      `build_editor_theme`/`color_to_hex`/`indexed_to_hex` and their tests, per the relocation step
+      above — safe to delete whole-file) (and the now-empty `view_file/`/`edit_file/` directories).
 - [ ] In `crates/savvagent/src/plugin/effects.rs`: remove the `Effect::CloseScreen` view-file/
       edit-file teardown block (the `if id == "edit-file" { app.save_file(); }` /
       `if id == "view-file" || id == "edit-file" { app.clear_active_editor(); }` lines — `CloseScreen`
@@ -195,7 +214,7 @@ the slash-command surface and the plugin ABI (Non-Negotiable Rule 6 — see the 
 - [ ] Run `cargo build -p savvagent --all-targets` and fix any remaining compile errors. At this
       point, verify by grep that no code in `crates/savvagent` still constructs or matches
       `Effect::SaveActiveFile`, `ScreenArgs::ViewFile`, or `ScreenArgs::EditFile`:
-      `grep -rn "SaveActiveFile\|ScreenArgs::ViewFile\|ScreenArgs::EditFile" crates/savvagent/src`
+      `grep -rEn "SaveActiveFile|ScreenArgs::ViewFile|ScreenArgs::EditFile" crates/savvagent/src`
       should return zero hits (this is the precondition Task 3 depends on).
 - [ ] Run `cargo test -p savvagent`, `cargo clippy -p savvagent --all-targets`, `cargo fmt --all`.
       Expect green.
@@ -215,7 +234,7 @@ the slash-command surface and the plugin ABI (Non-Negotiable Rule 6 — see the 
   `crates/savvagent-plugin-wasm/src/adapter/interactive.rs`
 
 - [ ] Precondition check (repeat of Task 2's last grep, now against the whole workspace):
-      `grep -rn "SaveActiveFile\|ScreenArgs::ViewFile\|ScreenArgs::EditFile" crates/ --include=*.rs`
+      `grep -rEn "SaveActiveFile|ScreenArgs::ViewFile|ScreenArgs::EditFile" crates/ --include=*.rs`
       must show hits **only** inside `crates/savvagent-plugin/src/effect.rs`,
       `crates/savvagent-plugin/src/types.rs`, and `crates/savvagent-plugin-wasm/src/adapter/interactive.rs`
       (the definitions and adapter arms this task is about to remove) — if any other crate still
@@ -296,7 +315,7 @@ the slash-command surface and the plugin ABI (Non-Negotiable Rule 6 — see the 
       `plugin.editor-keybindings-description`. Before removing any `notes.file-not-found` /
       `notes.file-editor-error` / `notes.file-read-error` / `notes.file-saved` /
       `notes.file-write-error` key, grep for remaining callers
-      (`grep -rn "notes.file-not-found\|notes.file-editor-error\|notes.file-read-error\|notes.file-saved\|notes.file-write-error" crates/savvagent/src`)
+      (`grep -rEn "notes\.file-not-found|notes\.file-editor-error|notes\.file-read-error|notes\.file-saved|notes\.file-write-error" crates/savvagent/src`)
       — remove only the keys with zero remaining callers after Tasks 1–2; if any still has a
       caller, leave it and note why in the commit message.
 - [ ] Run `cargo test -p savvagent --test locales` (or the repo's actual locale-test invocation)
@@ -338,9 +357,9 @@ the slash-command surface and the plugin ABI (Non-Negotiable Rule 6 — see the 
 
 Per `RELEASING.md` and this skill's Non-Negotiable Rule 8, after this task's PR merges to `main`,
 open a separate `release/X-Y-Z` PR: confirm the actual next-unclaimed MINOR version against
-`origin/main`'s current `Cargo.toml` (see the Release line note above — PR #29, `release/0-20-0`,
-may already have merged by then, in which case this ships as `v0.21.0`; if not, coordinate rather
-than both PRs claiming `0.20.0`), bump `workspace.package.version` (and matching
+`origin/main`'s current `Cargo.toml` (`v0.20.0` has already merged via PR #29 as of this plan's
+writing, so `v0.21.0` is the current expected target — but re-check at cut time in case another
+MINOR has landed in between), bump `workspace.package.version` (and matching
 `workspace.dependencies` versions), move the `## [Unreleased]` content (including this task's
 `### Removed` entry) under the new version heading in `CHANGELOG.md`, then tag and push once that PR
 merges. Because this change is breaking (Non-Negotiable Rule 6), the bump **must** be MINOR, not
