@@ -188,7 +188,6 @@ impl std::fmt::Debug for CanvasRegistry {
 
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::widgets::{Block, BorderType, Borders};
-use ratatui_code_editor::editor::Editor;
 use ratatui_explorer::{FileExplorer, FileExplorerBuilder, Theme};
 use savvagent_host::{NetOverride, SandboxConfig, ToolCallStatus, TranscriptFile, TurnEvent};
 use serde_json::Value;
@@ -207,48 +206,6 @@ pub const INPUT_MAX_ROWS: u16 = 10;
 /// `tui-textarea` is 50; we raise it so users editing large multi-line
 /// prompts can scrub back through more revisions.
 pub const INPUT_MAX_HISTORIES: usize = 1000;
-
-/// Build an owned ratatui-code-editor theme — `Vec<(token, hex)>` —
-/// from the app's active TUI theme. Callers borrow into the
-/// `Vec<(&str, &str)>` form via [`borrow_editor_theme`] at the
-/// `Editor::new` call site so the upstream constructor sees a clean
-/// slice of references without anything escaping.
-///
-/// The viewer/editor is short-lived, so we rebuild per-open rather
-/// than caching on `App`: catches `/theme`-switches between opens
-/// without a cache-invalidation step.
-pub fn editor_theme_for_active(app: &App) -> Vec<(String, String)> {
-    let palette = crate::palette::Palette::for_theme(app.active_theme);
-    crate::plugin::builtin::themes::editor_theme::build_editor_theme(&palette)
-}
-
-/// Convert an owned editor theme into the borrowed shape
-/// `Editor::new` accepts. The returned slice borrows from `owned`;
-/// keep `owned` alive across the `Editor::new` call.
-pub fn borrow_editor_theme(owned: &[(String, String)]) -> Vec<(&str, &str)> {
-    owned
-        .iter()
-        .map(|(k, v)| (k.as_str(), v.as_str()))
-        .collect()
-}
-
-/// Map a file path's extension to the language id ratatui-code-editor
-/// uses for syntax highlighting. Falls back to `"text"` for unrecognized
-/// extensions so the editor still loads without highlighting.
-pub fn language_for_path(path: &std::path::Path) -> &'static str {
-    let extension = path.extension().and_then(|s| s.to_str()).unwrap_or("txt");
-    match extension {
-        "rs" => "rust",
-        "py" => "python",
-        "js" => "javascript",
-        "ts" => "typescript",
-        "json" => "json",
-        "toml" => "toml",
-        "yml" | "yaml" => "yaml",
-        "md" => "markdown",
-        _ => "text",
-    }
-}
 
 /// Build a fresh, properly-configured main-input [`TextArea`].
 ///
@@ -281,16 +238,6 @@ where
 pub enum InputMode {
     /// Editing the prompt textarea.
     Editing,
-    /// Browsing a read-only file in the legacy popup editor. Replaced by
-    /// the `internal:view-file` Screen plugin; retained until a follow-up
-    /// PR rips out the legacy file-popup mechanism.
-    #[allow(dead_code)]
-    ViewingFile,
-    /// Editing a file in the legacy popup editor. Replaced by the
-    /// `internal:edit-file` Screen plugin; retained until a follow-up
-    /// PR rips out the legacy file-popup mechanism.
-    #[allow(dead_code)]
-    EditingFile,
     /// Provider selection list — first step of `/connect`.
     SelectingProvider,
     /// API-key input — second step of `/connect`. Masked.
@@ -604,7 +551,6 @@ pub struct App {
 
     pub is_file_picker_active: bool,
     pub file_explorer: FileExplorer,
-    pub editor: Option<Editor>,
     pub active_file_path: Option<PathBuf>,
 
     pub commands: Vec<Command>,
@@ -1033,7 +979,6 @@ impl App {
             last_transcript: None,
             is_file_picker_active: false,
             file_explorer,
-            editor: None,
             active_file_path: None,
             commands: Vec::new(),
             command_index: 0,
@@ -1449,16 +1394,6 @@ impl App {
                 needs_arg: false,
             },
             Command {
-                name: "/view".into(),
-                description: "View a file".into(),
-                needs_arg: true,
-            },
-            Command {
-                name: "/edit".into(),
-                description: "Edit a file".into(),
-                needs_arg: true,
-            },
-            Command {
                 name: "/tools".into(),
                 description: "List registered tools and their default permission verdict".into(),
                 needs_arg: false,
@@ -1616,107 +1551,9 @@ impl App {
         self.is_file_picker_active = false;
     }
 
-    /// Build a syntax-highlighted [`Editor`] for `path` and install it as
-    /// the active editor. Used by the plugin-driven view/edit flow:
-    /// `apply_effects::open_screen` calls this when a `view-file` or
-    /// `edit-file` screen is pushed so `ui.rs` can render the file via
-    /// ratatui-code-editor. Does **not** mutate `input_mode` — the
-    /// screen stack tracks visibility instead. Returns `true` on
-    /// success; on failure (missing file, I/O error, editor-construct
-    /// error) a styled note is pushed and `false` is returned so the
-    /// caller can skip pushing the marker screen.
-    pub fn load_file_into_editor(&mut self, path: PathBuf) -> bool {
-        if !path.exists() {
-            self.push_note(
-                rust_i18n::t!("notes.file-not-found", path = path.display().to_string())
-                    .to_string(),
-            );
-            return false;
-        }
-        let lang = language_for_path(&path);
-        let owned_theme = editor_theme_for_active(self);
-        match std::fs::read_to_string(&path) {
-            Ok(content) => match Editor::new(lang, &content, borrow_editor_theme(&owned_theme)) {
-                Ok(editor) => {
-                    self.editor = Some(editor);
-                    self.active_file_path = Some(path);
-                    true
-                }
-                Err(e) => {
-                    self.push_note(
-                        rust_i18n::t!("notes.file-editor-error", err = format!("{e:#}"))
-                            .to_string(),
-                    );
-                    false
-                }
-            },
-            Err(e) => {
-                self.push_note(
-                    rust_i18n::t!("notes.file-read-error", err = format!("{e:#}")).to_string(),
-                );
-                false
-            }
-        }
-    }
-
-    /// Clear the active editor + file path. Called by `apply_effects` when a
-    /// `view-file` or `edit-file` screen is popped from the stack.
+    /// Clear the active file path bridge that the egui editor still reads.
     pub fn clear_active_editor(&mut self) {
-        self.editor = None;
         self.active_file_path = None;
-    }
-
-    /// Open `path` in the legacy popup editor (read-only or read-write per
-    /// `edit`). Retained for the legacy `InputMode::ViewingFile`/
-    /// `EditingFile` path; new code goes through
-    /// [`Self::load_file_into_editor`] + the screen-stack abstraction.
-    #[allow(dead_code)]
-    pub fn open_file(&mut self, path: PathBuf, edit: bool) {
-        if !path.exists() {
-            self.push_note(
-                rust_i18n::t!("notes.file-not-found", path = path.display().to_string())
-                    .to_string(),
-            );
-            return;
-        }
-        let lang = language_for_path(&path);
-        let owned_theme = editor_theme_for_active(self);
-        match std::fs::read_to_string(&path) {
-            Ok(content) => match Editor::new(lang, &content, borrow_editor_theme(&owned_theme)) {
-                Ok(editor) => {
-                    self.editor = Some(editor);
-                    self.active_file_path = Some(path);
-                    self.input_mode = if edit {
-                        InputMode::EditingFile
-                    } else {
-                        InputMode::ViewingFile
-                    };
-                }
-                Err(e) => self.push_note(
-                    rust_i18n::t!("notes.file-editor-error", err = format!("{e:#}")).to_string(),
-                ),
-            },
-            Err(e) => self.push_note(
-                rust_i18n::t!("notes.file-read-error", err = format!("{e:#}")).to_string(),
-            ),
-        }
-    }
-
-    /// Persist the open editor's buffer to disk.
-    pub fn save_file(&mut self) {
-        let Some(path) = self.active_file_path.clone() else {
-            return;
-        };
-        let Some(editor) = &self.editor else { return };
-        let content = editor.get_content();
-        match std::fs::write(&path, content) {
-            Ok(_) => self.push_note(
-                rust_i18n::t!("notes.file-saved", path = path.display().to_string()).to_string(),
-            ),
-            Err(e) => self.push_note(
-                rust_i18n::t!("notes.file-write-error", err = format!("{e:#}")).to_string(),
-            ),
-        }
     }
 
     /// Populate `transcript_entries` from `dir` and enter the picker mode.
@@ -1861,7 +1698,7 @@ impl App {
     /// `SelectingProvider` InputMode for `/connect`) or are genuinely
     /// unknown.
     ///
-    /// The legacy arms for `/clear`, `/save`, `/view`, `/edit`, `/quit`
+    /// The legacy arms for `/clear`, `/save`, `/quit`
     /// were removed once their plugin counterparts shipped (PR 5, PR 4,
     /// PR 8 hotfix): leaving the legacy arms intact meant disabling the
     /// owning plugin in `/plugins` had no effect — the slash was still
@@ -2048,7 +1885,8 @@ impl App {
     /// the very end. Called by `apply_effects` in response to
     /// [`savvagent_plugin::Effect::PrefillInput`]. The command palette emits
     /// `PrefillInput { text: "/cmd " }` for slashes that need a path arg
-    /// (e.g. `/view`, `/edit`) so the user can complete the line via the
+    /// (e.g. a slash command that needs an argument) so the user can
+    /// complete the line via the
     /// `@` file picker instead of executing the command with no args.
     pub fn prefill_input(&mut self, text: String) {
         // Bridge for out-of-`App` prompt buffers (egui's `SavvagentApp::prompt`).
@@ -2658,16 +2496,6 @@ mod tests {
     }
 
     #[test]
-    fn select_arg_command_returns_prefill_with_seeded_input() {
-        let mut app = fresh_app();
-        app.palette_filter = "vi".into();
-        app.command_index = 0;
-        let outcome = app.select_command();
-        assert_eq!(outcome, Some(CommandSelection::Prefill("/view".into())));
-        assert_eq!(app.input_textarea.lines(), &["/view ".to_string()]);
-    }
-
-    #[test]
     fn select_with_no_match_closes_palette() {
         let mut app = fresh_app();
         app.palette_filter = "zzz".into();
@@ -2809,8 +2637,6 @@ mod tests {
     fn input_mode_label(m: &InputMode) -> &'static str {
         match m {
             InputMode::Editing => "Editing",
-            InputMode::ViewingFile => "ViewingFile",
-            InputMode::EditingFile => "EditingFile",
             InputMode::SelectingProvider => "SelectingProvider",
             InputMode::EnteringApiKey => "EnteringApiKey",
             InputMode::PermissionPrompt => "PermissionPrompt",

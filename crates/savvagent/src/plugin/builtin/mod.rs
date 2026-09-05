@@ -13,9 +13,6 @@ pub mod command_palette;
 /// Provider connection picker; opened via `/connect` with no args.
 pub mod connect;
 
-/// Basic in-TUI file editor; opened via `/edit <path>`.
-pub mod edit_file;
-
 /// Footer widget: sandbox state + turn state + working dir + key reminder.
 pub mod home_footer;
 
@@ -23,15 +20,9 @@ pub mod home_footer;
 pub mod home_tips;
 
 /// Scrollable, sectioned keybindings help screen reused by the
-/// `prompt-keybindings` and `editor-keybindings` plugins. Owns the
-/// rendering / scrolling logic so the per-plugin modules just
-/// supply their section data.
+/// `prompt-keybindings` plugin. Owns the rendering / scrolling logic
+/// so the plugin module just supplies its section data.
 pub mod keybindings_view;
-
-/// `/editor-keybindings` slash + viewer modal listing the keybindings
-/// active inside the ratatui-code-editor (`view-file` / `edit-file`)
-/// screens.
-pub mod editor_keybindings;
 
 /// `/prompt-keybindings` slash + viewer modal listing the keybindings
 /// active in the main prompt input. Includes a dynamic section sourced
@@ -111,9 +102,6 @@ pub mod tool_task_summary;
 /// `internal:tool-web-summary` — renders one-line summaries for the
 /// `tool-web` `web_fetch` and `web_search` tools.
 pub mod tool_web_summary;
-
-/// Fullscreen read-only file viewer; opened via `/view <path>`.
-pub mod view_file;
 
 /// Savvagent-internal [`provider_common::BuiltinProviderPlugin`] trait —
 /// the explicit non-WIT-portable seam where `Box<dyn ProviderClient>` is

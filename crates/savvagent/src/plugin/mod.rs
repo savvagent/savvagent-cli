@@ -69,7 +69,6 @@ pub(crate) use external::register_builtins_with_external;
 ///
 /// PR 2 adds: home-footer, home-tips.
 /// PR 3 adds: splash, command-palette.
-/// PR 4 adds: view-file, edit-file.
 /// PR 5 adds: connect, resume, model, save, clear.
 /// PR 6 adds: themes + 4 providers (anthropic / openai / gemini / local).
 /// PR 8 adds: plugins-manager.
@@ -107,8 +106,6 @@ pub(crate) fn register_builtins(
         Box::new(builtin::clear::ClearPlugin::new()),
         Box::new(builtin::command_palette::CommandPalettePlugin::new()),
         Box::new(builtin::connect::ConnectPlugin::new()),
-        Box::new(builtin::edit_file::EditFilePlugin::new()),
-        Box::new(builtin::editor_keybindings::EditorKeybindingsPlugin::new()),
         Box::new(builtin::home_footer::HomeFooterPlugin::new()),
         Box::new(builtin::home_tips::HomeTipsPlugin::new()),
         Box::new(builtin::language::LanguagePlugin::new()),
@@ -133,7 +130,6 @@ pub(crate) fn register_builtins(
         Box::new(builtin::tool_grep_summary::ToolGrepSummaryPlugin::new()),
         Box::new(builtin::tool_task_summary::ToolTaskSummaryPlugin::new()),
         Box::new(builtin::tool_web_summary::ToolWebSummaryPlugin::new()),
-        Box::new(builtin::view_file::ViewFilePlugin::new()),
         Box::new(builtin::html_canvas::HtmlCanvasPlugin::new()),
     ];
 
@@ -230,8 +226,6 @@ mod tests {
             "internal:clear",
             "internal:command-palette",
             "internal:connect",
-            "internal:edit-file",
-            "internal:editor-keybindings",
             "internal:home-footer",
             "internal:home-tips",
             "internal:language",
@@ -254,7 +248,6 @@ mod tests {
             "internal:tool-web-summary",
             "internal:user-agents",
             "internal:user-slash-commands",
-            "internal:view-file",
             "internal:html-canvas",
         ] {
             assert!(
@@ -262,7 +255,7 @@ mod tests {
                 "missing non-provider plugin id: {expected}"
             );
         }
-        assert_eq!(set.plugins.len(), 30);
+        assert_eq!(set.plugins.len(), 27);
 
         // `internal:user-hooks` lives in `hook_entries`, not the `plugins`
         // Vec. The dual-Arc HookEntry pattern means it still appears in
@@ -312,15 +305,16 @@ mod tests {
         // sub-project C (user-agents) adds 1 more, bringing non-provider count to 28;
         // tool-task-summary adds 1 more, bringing non-provider count to 29;
         // tool-web-summary adds 1 more, bringing non-provider count to 30;
+        // removing view/edit/editor-keybindings drops the count back to 27;
         // sub-project B (user-hooks) moves to `hook_entries` (not counted
         // in the plugins Vec) but still surfaces in the registry's plugins
         // map via the dual-Arc HookEntry, contributing 1 more registry
-        // entry; total registry size is 30 + 4 + 1 = 35.
+        // entry; total registry size is 27 + 4 + 1 = 32.
         let reg = PluginRegistry::new(set);
         assert_eq!(
             reg.len(),
-            35,
-            "registry should have 30 non-provider + 4 provider + 1 hook plugin"
+            32,
+            "registry should have 27 non-provider + 4 provider + 1 hook plugin"
         );
         assert_eq!(
             reg.provider_count(),

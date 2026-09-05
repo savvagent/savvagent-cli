@@ -11,7 +11,6 @@ use savvagent_plugin::{
 };
 
 use crate::palette::Palette;
-use crate::plugin::builtin::themes::editor_theme::xterm_256_rgb;
 
 /// Resolve a [`ThemeColor`] (including semantic slots) to an egui [`Color32`].
 ///
@@ -23,6 +22,46 @@ use crate::plugin::builtin::themes::editor_theme::xterm_256_rgb;
 pub fn theme_color_to_color32(c: ThemeColor, palette: &Palette) -> Color32 {
     let resolved = crate::plugin::convert::theme_color_to_ratatui(c, palette);
     ratatui_color_to_color32(resolved, palette)
+}
+
+/// Resolve an xterm 256-color palette index to its RGB triple.
+fn xterm_256_rgb(n: u8) -> (u8, u8, u8) {
+    match n {
+        0 => (0, 0, 0),
+        1 => (128, 0, 0),
+        2 => (0, 128, 0),
+        3 => (128, 128, 0),
+        4 => (0, 0, 128),
+        5 => (128, 0, 128),
+        6 => (0, 128, 128),
+        7 => (192, 192, 192),
+        8 => (128, 128, 128),
+        9 => (255, 0, 0),
+        10 => (0, 255, 0),
+        11 => (255, 255, 0),
+        12 => (0, 0, 255),
+        13 => (255, 0, 255),
+        14 => (0, 255, 255),
+        15 => (255, 255, 255),
+        16..=231 => {
+            let idx = n - 16;
+            let r = idx / 36;
+            let g = (idx / 6) % 6;
+            let b = idx % 6;
+            let to_comp = |x: u8| -> u8 {
+                if x == 0 {
+                    0
+                } else {
+                    (55_u16 + 40_u16 * x as u16).min(255) as u8
+                }
+            };
+            (to_comp(r), to_comp(g), to_comp(b))
+        }
+        232..=255 => {
+            let v = (8_u16 + 10_u16 * (n as u16 - 232)).min(255) as u8;
+            (v, v, v)
+        }
+    }
 }
 
 /// Map a resolved `ratatui::style::Color` to [`Color32`].
