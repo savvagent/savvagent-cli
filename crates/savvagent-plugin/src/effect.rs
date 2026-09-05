@@ -95,8 +95,8 @@ pub enum Effect {
     ClearLog,
     /// Replace the prompt textarea contents with `text` and position the
     /// cursor at the end. Used by the command palette to seed an in-progress
-    /// slash command (e.g. `"/view "`) so the user can complete it via the
-    /// `@` file picker rather than have it fire immediately with no args.
+    /// slash command (e.g. `"/bash "`) so the user can complete it with the
+    /// intended arguments rather than have it fire immediately with no args.
     PrefillInput {
         /// The literal text to install in the textarea (no trailing newline).
         text: String,
@@ -416,10 +416,10 @@ mod tests {
     #[test]
     fn prefill_input_carries_text() {
         let eff = Effect::PrefillInput {
-            text: "/view ".into(),
+            text: "/bash ".into(),
         };
         match eff {
-            Effect::PrefillInput { text } => assert_eq!(text, "/view "),
+            Effect::PrefillInput { text } => assert_eq!(text, "/bash "),
             _ => panic!("expected PrefillInput"),
         }
     }

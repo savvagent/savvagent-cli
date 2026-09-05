@@ -216,7 +216,7 @@ M1–M9 are shipped. M7 (v0.2.0) added Layer-1 path containment, M8 (v0.3.0) the
 - Distributed via [`cargo-dist`](https://opensource.axo.dev/cargo-dist/): `.tar.xz` for Linux (x86_64 / aarch64) and macOS arm64, `.zip` for Windows x86_64, plus shell (`curl | sh`) and PowerShell (`irm | iex`) installers from GitHub Releases. Config in `[workspace.metadata.dist]`, workflow at `.github/workflows/release.yml`.
 - License: AGPL-3.0-or-later.
 - Crates.io publication remains deferred until there's an external consumer for the libraries.
-- TUI editor widget decision (see §9): `tui-textarea` for the prompt input; `ratatui-code-editor` retained for the in-TUI viewer/editor pending a future consolidation pass.
+- TUI editor widget decision (see §9): `tui-textarea` for the prompt input; `ratatui-code-editor` retained for the in-TUI viewer/editor pending a future consolidation pass. *(Superseded 2026-09: the viewer/editor path was removed rather than consolidated — see §9 "TUI editor widget".)*
 
 ### M7 · v0.2.0 — `tool-fs` Layer 1 path containment + `/connect` UX (✅ done)
 - `tool-fs` confines paths to `SAVVAGENT_TOOL_FS_ROOT` (set by the host to the project root); rejects `..`, symlink escapes, and out-of-root absolute paths. Closes the v0.1 §9 "Layer 1 path hygiene" gap.

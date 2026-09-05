@@ -275,12 +275,15 @@ mod tests {
 
     fn fixture() -> PaletteScreen {
         // Alphabetically sorted — matches apply_effects::open_screen ordering.
+        // `demo`/`zeta` are synthetic stand-ins for an arg-taking command
+        // (not aliases of any real slash), so their `needs_arg` flag here
+        // doesn't need to track any actual command's `requires_arg` value.
         PaletteScreen::with_commands(vec![
             cmd("clear", false),
-            cmd("model", true),
+            cmd("demo", true),
             cmd("quit", false),
             cmd("theme", false),
-            cmd("use", true),
+            cmd("zeta", true),
         ])
     }
 
@@ -309,14 +312,14 @@ mod tests {
         assert_eq!(p.cursor, 0);
     }
 
-    /// Selecting a `needs_arg` command (e.g. `/model`) must seed the
-    /// textarea with `"/model "` rather than firing the slash with empty
-    /// args (which would error out with "usage: /model <id>"). Regression
-    /// test for hotfix bug #1.
+    /// Selecting a `needs_arg` command must seed the textarea with its
+    /// name plus a trailing space rather than firing the slash with empty
+    /// args (which would error out with a usage message). Regression test
+    /// for hotfix bug #1.
     #[tokio::test]
     async fn enter_on_needs_arg_command_emits_prefill_not_runslash() {
         let mut p = fixture();
-        for ch in "model".chars() {
+        for ch in "demo".chars() {
             p.on_key(key(KeyCodePortable::Char(ch))).await.unwrap();
         }
         let effs = p.on_key(key(KeyCodePortable::Enter)).await.unwrap();
@@ -324,7 +327,7 @@ mod tests {
             Some(Effect::Stack(children)) => {
                 assert!(matches!(children[0], Effect::CloseScreen));
                 match &children[1] {
-                    Effect::PrefillInput { text } => assert_eq!(text, "/model "),
+                    Effect::PrefillInput { text } => assert_eq!(text, "/demo "),
                     other => panic!("expected PrefillInput, got {other:?}"),
                 }
             }
