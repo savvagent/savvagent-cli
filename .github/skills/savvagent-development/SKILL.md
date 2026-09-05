@@ -516,9 +516,9 @@ Every task MUST include:
   modifies a streaming provider path
 - The repo's actual test + lint commands for the TDD steps
 - A final "Format and commit" step: `cargo fmt --all` + `git commit -m "<scope>: <subject>"`
-- A final task in the plan (the last `## Task N`) that bumps `workspace.package.version` and every
-  internal `workspace.dependencies` version in `Cargo.toml`, adds the `CHANGELOG.md` entry, and notes
-  the release will be cut per `RELEASING.md` after merge (Phase 4 step 12)
+- A final task in the plan (the last `## Task N`) that **notes** the release will be cut via a
+  dedicated release PR per `RELEASING.md` after this PR merges (Phase 4 step 12) — the version bump
+  and `CHANGELOG.md` entry happen in *that* release PR, not this one; do not duplicate them here
 
 **Commit the plan draft** as `docs: add <slug> implementation plan` before critique.
 
