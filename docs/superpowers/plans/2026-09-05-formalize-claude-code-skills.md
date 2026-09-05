@@ -6,12 +6,14 @@ is committed or personal/machine-local, which skills (if any) get vendored, and 
 skill's conventions must defer to this repo's GitHub Issues convention (never JIRA).
 
 **Architecture:** No code changes. `.claude/skills/rust-engineer/SKILL.md` is already a tracked,
-committed file in this repo (confirmed via `git ls-files .claude/skills/`) mirroring
-`.github/skills/`'s `rust-engineer` skill in Claude-Code-compatible format — that precedent, not the
-issue's speculative "gitignore recommended" framing, is the one CLAUDE.md must document, since the
-code (an existing committed file) outranks a proposal when the two disagree. The convention this plan
-documents: `.claude/skills/<name>/SKILL.md` is for repo-authored, project-specific skills (mirroring
-or complementing `.github/skills/`) and IS committed; generic/personal Claude Code skills a
+committed file in this repo (confirmed via `git ls-files .claude/skills/`) — a repo-authored,
+Claude-Code-compatible skill with no counterpart under `.github/skills/` (which today holds only
+`savvagent-development`) — that precedent, not the issue's speculative "gitignore recommended"
+framing, is the one CLAUDE.md must document, since the code (an existing committed file) outranks a
+proposal when the two disagree. The convention this plan documents: `.claude/skills/<name>/SKILL.md`
+is for repo-authored, project-specific skills (independently authored for Claude Code, or
+complementing a `.github/skills/` skill where one exists for the same topic) and IS committed;
+generic/personal Claude Code skills a
 contributor pulls in from `~/.claude/skills/` (e.g. a symlinked `creating-tickets`) are NOT to be
 added under this repo's `.claude/skills/` at all — they stay in the user's home directory, outside
 repo tracking, so no `.gitignore` change is needed. Any tracker-related skill a contributor uses
