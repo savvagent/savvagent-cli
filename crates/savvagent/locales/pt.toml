@@ -232,6 +232,7 @@ section-prompt    = "Prompt"
 section-cursor    = "Cursor"
 section-editing   = "Edição"
 section-history   = "Desfazer / Refazer"
+section-mouse     = "Mouse"
 section-plugins   = "Atalhos de plugins"
 
 [picker.prompt-keybindings.row]
@@ -259,6 +260,7 @@ tab                 = "Inserir tabulação"
 undo                = "Desfazer última edição"
 redo                = "Refazer a edição desfeita"
 recall-prompt       = "Recall previous / next prompt (Up at empty input; then Up/Down to browse)"
+mouse-capture       = "Mantenha Shift pressionado enquanto arrasta/clica para contornar a captura do mouse e usar a seleção + cópia nativa do terminal"
 
 [picker.editor-keybindings]
 modal-title       = "Atalhos do editor"
@@ -298,6 +300,7 @@ mouse-drag             = "Estender seleção"
 mouse-word             = "Selecionar palavra"
 mouse-line             = "Selecionar linha"
 note-ctrl-c-quits      = "Ctrl+C sai do savvagent globalmente — é processado antes que o editor veja a tecla, então copiar com Ctrl+C não funciona dentro do visualizador/editor."
+note-shift-drag-copy   = "Mantenha Shift pressionado enquanto arrasta/clica para contornar a captura do mouse e usar a seleção + cópia nativa do terminal (assim como no log de conversa principal)"
 
 [prompt.api-key]
 paste-new              = "Cole sua chave do %{env}"

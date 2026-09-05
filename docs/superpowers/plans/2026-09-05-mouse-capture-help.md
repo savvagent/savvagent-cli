@@ -55,46 +55,46 @@ files under `crates/savvagent/locales/`.
 - Modify: `crates/savvagent/locales/hi.toml`
 - Modify: `crates/savvagent/locales/pt.toml`
 
-- [ ] Confirm current behavior with a failing-first check: run
+- [x] Confirm current behavior with a failing-first check: run
       `cargo test -p savvagent plugin::builtin::prompt_keybindings -- --nocapture` and
       `cargo test -p savvagent plugin::builtin::editor_keybindings -- --nocapture` to see the
       existing baseline test output (both currently pass; there is no existing test asserting the
       new row's absence — this step is a sanity baseline, not a red test, since the addition is
       additive content and the fast-path assertion below is what actually verifies the change).
-- [ ] In `crates/savvagent/locales/en.toml`, under `[picker.prompt-keybindings.row]`, add:
+- [x] In `crates/savvagent/locales/en.toml`, under `[picker.prompt-keybindings.row]`, add:
       `mouse-capture = "Hold Shift while dragging/clicking to bypass mouse capture and use native terminal text selection + copy"`.
       Under `[picker.editor-keybindings.row]`, add:
       `note-shift-drag-copy = "Hold Shift while dragging/clicking to bypass mouse capture for native terminal text selection + copy (same as the main conversation log)"`.
-- [ ] Mirror both keys (verbatim English text, since these are UX-critical caveats and this repo has
+- [x] Mirror both keys (verbatim English text, since these are UX-critical caveats and this repo has
       no automated translation pipeline) into `es.toml`, `hi.toml`, and `pt.toml` in the same
       `[picker.prompt-keybindings.row]` / `[picker.editor-keybindings.row]` sections, preserving each
       file's existing key ordering/alignment style.
-- [ ] In `crates/savvagent/src/plugin/builtin/prompt_keybindings/mod.rs`: add
+- [x] In `crates/savvagent/src/plugin/builtin/prompt_keybindings/mod.rs`: add
       `section("picker.prompt-keybindings.section-mouse", mouse_rows())` to the `sections` vec in
       `build_prompt_keybindings_screen` (after `section-history`, before the dynamic plugin-rows
       push), add a new `section-mouse = "Mouse"` key to all four locale files'
       `[picker.prompt-keybindings]` tables, and add a `mouse_rows()` function returning
       `vec![row("Shift+drag / Shift+click", "picker.prompt-keybindings.row.mouse-capture")]`.
-- [ ] In `crates/savvagent/src/plugin/builtin/editor_keybindings/mod.rs`: add
+- [x] In `crates/savvagent/src/plugin/builtin/editor_keybindings/mod.rs`: add
       `row("Shift+drag / Shift+click", "picker.editor-keybindings.row.note-shift-drag-copy")` to the
       `notes_rows()` vec (after the existing `note-ctrl-c-quits` row).
-- [ ] Update the existing test assertions if line-count thresholds are affected:
+- [x] Update the existing test assertions if line-count thresholds are affected:
       `populated_screen_includes_static_sections` (prompt_keybindings, currently asserts
       `line_count() > 20`) and `populated_screen_includes_all_sections` (editor_keybindings,
       currently asserts `line_count() > 30`) — both thresholds already have headroom, so no numeric
       change should be required, but re-run them to confirm.
-- [ ] Run `cargo test -p savvagent plugin::builtin::prompt_keybindings` and
+- [x] Run `cargo test -p savvagent plugin::builtin::prompt_keybindings` and
       `cargo test -p savvagent plugin::builtin::editor_keybindings` — expect green, and manually
       confirm (via the existing `render` test pattern already used in
       `dynamic_plugin_rows_become_a_section`) that the new row text renders.
-- [ ] Run `cargo build --workspace --all-targets`, `cargo clippy --workspace --all-targets`, and
+- [x] Run `cargo build --workspace --all-targets`, `cargo clippy --workspace --all-targets`, and
       `cargo fmt --all --check` — expect clean.
-- [ ] Public-interface check: this is additive-only (new translation keys, new static screen rows);
+- [x] Public-interface check: this is additive-only (new translation keys, new static screen rows);
       no SPP wire format, tool schema, plugin ABI, slash command, or on-disk format changes. No
       CHANGELOG entry beyond the standard "Fixed" line for this issue.
-- [ ] Host-swap / `RwLock` check: not applicable — no changes to `app.rs`/`tui.rs`.
-- [ ] `ProgressDispatcher` check: not applicable — no streaming provider path touched.
-- [ ] Format and commit: `cargo fmt --all` then
+- [x] Host-swap / `RwLock` check: not applicable — no changes to `app.rs`/`tui.rs`.
+- [x] `ProgressDispatcher` check: not applicable — no streaming provider path touched.
+- [x] Format and commit: `cargo fmt --all` then
       `git commit -m "savvagent: surface Shift+drag mouse-capture bypass in keybindings help"`.
 
 ## Task 2 (release, not part of this PR): cut v0.19.3

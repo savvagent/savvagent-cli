@@ -103,6 +103,7 @@ pub fn build_prompt_keybindings_screen(
         section("picker.prompt-keybindings.section-cursor", cursor_rows()),
         section("picker.prompt-keybindings.section-editing", editing_rows()),
         section("picker.prompt-keybindings.section-history", history_rows()),
+        section("picker.prompt-keybindings.section-mouse", mouse_rows()),
     ];
     if !plugin_rows.is_empty() {
         sections.push(KeybindingSection {
@@ -192,6 +193,16 @@ fn history_rows() -> Vec<KeybindingRow> {
         row("Ctrl+Y / Ctrl+R", "picker.prompt-keybindings.row.redo"),
         row("↑ / ↓", "picker.prompt-keybindings.row.recall-prompt"),
     ]
+}
+
+/// Mouse capture is on globally (see `crates/savvagent/src/tui.rs`), which
+/// suppresses the terminal's native click-drag text selection everywhere in
+/// the app. Shift bypasses it for native selection/copy.
+fn mouse_rows() -> Vec<KeybindingRow> {
+    vec![row(
+        "Shift+drag / Shift+click",
+        "picker.prompt-keybindings.row.mouse-capture",
+    )]
 }
 
 fn row(chord: &str, description_key: &str) -> KeybindingRow {
