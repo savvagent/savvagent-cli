@@ -1,7 +1,7 @@
 # Remove `/view` and `/edit` slash commands — design
 
 Date: 2026-09-05
-Status: approved for planning
+Status: IMPLEMENTED
 Related: `savvagent/savvagent-cli#22`
 
 ## Problem
