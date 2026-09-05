@@ -243,7 +243,7 @@ mod tests {
     #[test]
     fn populated_screen_includes_static_sections() {
         let s = build_prompt_keybindings_screen(vec![]);
-        // 4 static sections × (header + blank + N rows) + 3 inter-section blanks.
+        // 5 static sections × (header + blank + N rows) + 4 inter-section blanks.
         assert!(
             s.line_count() > 20,
             "expected populated content; got {} lines",
