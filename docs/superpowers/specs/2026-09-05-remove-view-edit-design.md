@@ -106,8 +106,10 @@ to all three commands and their exclusively-supporting code.
    and the removal must be named regardless).
 
 Both changes must be:
-- flagged explicitly to the architecture reviewer (done — see Phase 4 step 8
-  dispatch instructions in the plan),
+- flagged explicitly to the architecture reviewer — the plan's Phase 4 step 8
+  dispatch instructions (once the plan is written) must call this out by
+  name; this is a requirement on the forthcoming plan, not yet satisfied by
+  this spec alone,
 - called out in `CHANGELOG.md` under a `### Removed` heading,
 - reflected in a **MINOR** version bump per this repo's pre-1.0 SemVer
   convention (breaking changes get MINOR, not PATCH) at release-cut time.
@@ -248,6 +250,25 @@ touches those surfaces.
   generic enough another caller might reuse them — check before deleting).
 - `README.md` — remove `/view`/`/edit`/`/editor-keybindings` from the
   slash-command table and any prose describing the file editor/viewer.
+- `PRD.md` — the M6 milestone's "TUI editor widget decision" bullet and the
+  matching "TUI editor widget" entry under the risks/open-questions section
+  both currently describe `ratatui-code-editor` as "pending a future
+  consolidation pass" — that question is now resolved (removed rather than
+  consolidated); update both to reflect the resolution. The M5/M6 milestone
+  bullets that narrate `/view`/`/edit` shipping as part of that historical
+  milestone (e.g. "`/view` and `/edit` open files in the in-TUI
+  viewer/editor") are a historical record of what shipped at the time and
+  are **not** rewritten, matching this repo's convention of not editing
+  past `CHANGELOG.md` entries — only the still-open decision entries change.
+- `crates/savvagent/src/plugin/builtin/prompt_keybindings/mod.rs` — the
+  module doc comment's "Mirrors `internal:editor-keybindings` for symmetry"
+  line becomes stale once that plugin is deleted; reword to drop the
+  now-nonexistent comparison.
+- `crates/savvagent/src/plugin/builtin/keybindings_view.rs` — the module
+  doc comment's "Used by `internal:prompt-keybindings` and
+  `internal:editor-keybindings`" line; drop the `editor-keybindings` mention
+  (the shared viewer is still used by `prompt-keybindings` and any future
+  help screen, so the file itself is not touched beyond this comment).
 
 ## Assumptions
 
